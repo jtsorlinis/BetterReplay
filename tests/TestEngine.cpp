@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <string>
 #include <vector>
@@ -148,6 +149,15 @@ TEST(Engine_FullFlightSavesTakeoffAndLanding) {
     CHECK(landings[0]->autoClip);
     CHECK_NEAR(landings[0]->touchdownVsFpm, -150.0, 2.0);
     CHECK_NEAR(landings[0]->durationSec, 120.0 + 21.25, 0.1);  // 115 -> 15 kt crosses 30 kt after 21.25 s
+
+    // Set BR_SAMPLE_OUT=<path> to keep this clip on disk (handy for tools/rpl-dump.mjs).
+    if (const char* out = std::getenv("BR_SAMPLE_OUT")) {
+        const std::vector<uint8_t>& bytes = h.storage.files[landings[0]->file];
+        if (FILE* f = std::fopen(out, "wb")) {
+            std::fwrite(bytes.data(), 1, bytes.size(), f);
+            std::fclose(f);
+        }
+    }
 
     Clip clip;
     REQUIRE(h.load(landings[0]->file, clip));

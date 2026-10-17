@@ -138,7 +138,11 @@ When playing, channels are matched by **key**. Unknown keys are ignored, and cha
 6. Panel, package definition, `.spb`, and a full Community package from `build.ps1`.
 7. README and MANUAL_TEST.md.
 
-## 8. Decisions I need from you
+## Status (2026-10-17)
+
+Milestones 1–7 are implemented and committed. The core has 74 passing unit tests, the module builds with the SDK clang, and the panel has been exercised in a browser harness against a fake module. Still pending: in-sim verification ([MANUAL_TEST.md](MANUAL_TEST.md)) and compiling the panel `.spb` (`build.ps1 -Package`, which needs the sim's package builder).
+
+## 8. Decisions (answered: defaults approved)
 
 1. Package name `betterreplay-recorder` and toolbar title "BetterReplay". OK?
 2. The pause-mid-event interpretation in §3. OK?

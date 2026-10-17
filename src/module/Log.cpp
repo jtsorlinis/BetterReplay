@@ -6,7 +6,11 @@
 namespace br {
 namespace log {
 
-bool g_debug = false;
+#ifdef NDEBUG
+bool g_debug = false;  // Release: enable from the panel's CommBus "setDebug" command
+#else
+bool g_debug = true;  // Debug builds log everything
+#endif
 
 namespace {
 

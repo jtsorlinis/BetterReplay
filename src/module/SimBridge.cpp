@@ -207,7 +207,7 @@ void SimBridge::dispatch(SIMCONNECT_RECV* p, DWORD size) {
             const auto* e = reinterpret_cast<const SIMCONNECT_RECV_EVENT_FILENAME*>(p);
             if (e->uEventID == EVT_FLIGHT_LOADED) {
                 log::info("FlightLoaded: %s", e->szFileName);
-                engine_.onFlightLoaded("FlightLoaded");
+                engine_.onFlightLoaded("FlightLoaded event");
             }
             break;
         }
@@ -265,7 +265,7 @@ void SimBridge::onFlowEvent(DWORD flow, const char* path) {
     log::info("flow event %s%s%s", flowName(flow), path && path[0] ? ": " : "", path ? path : "");
     switch (flow) {
         case SIMCONNECT_FLOW_EVENT_FLT_LOADED:
-            engine_.onFlightLoaded("flight loaded");
+            engine_.onFlightLoaded("FLT_LOADED flow event");
             engine_.setAtMainMenu(false);
             break;
         case SIMCONNECT_FLOW_EVENT_FLIGHT_START:
