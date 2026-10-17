@@ -216,6 +216,12 @@ function formatClock(seconds: number): string {
     return Math.floor(s / 60) + ":" + pad2(s % 60);
 }
 
+// When a clip ends: the time a list row and the player show, and the list's order (the module
+// sorts by it too). A 5-minute save starts long before you pressed Save but ends right then.
+function clipEndMs(c: ClipInfo): number {
+    return c.utcMs + (c.durationSec || 0) * 1000;
+}
+
 function formatLocalDate(utcMs: number): string {
     const d = new Date(utcMs);
     return d.getDate() + " " + MONTHS[d.getMonth()] + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
@@ -977,7 +983,7 @@ class BetterReplayPanel extends UIElement {
         const preparing = !!p.preparing;
         byId("br-player").classList.toggle("preparing", preparing);
         byId("br-player-kicker").textContent = preparing ? "Getting ready" : "Replaying";
-        byId("br-now").textContent = clip ? eventLabel(clip.event) + " · " + formatLocalDate(clip.utcMs) : p.file;
+        byId("br-now").textContent = clip ? eventLabel(clip.event) + " · " + formatLocalDate(clipEndMs(clip)) : p.file;
         const note = this.note && this.note.view === "player" ? this.note.text : "";
         const sub = byId("br-now-sub");
         sub.textContent = note || (clip ? clipFacts(clip).join(" · ") : "");
@@ -1027,7 +1033,7 @@ class BetterReplayPanel extends UIElement {
                 '" data-file="' + file + '">' +
                 '<span class="br-badge ' + escapeHtml(c.event) + '">' + eventLabel(c.event) + "</span>" +
                 '<div class="br-clip-text">' +
-                '<div class="br-clip-title">' + formatLocalDate(c.utcMs) + "</div>" +
+                '<div class="br-clip-title">' + formatLocalDate(clipEndMs(c)) + "</div>" +
                 '<div class="br-clip-sub">' + (failed ? escapeHtml(failed) : parts.join(" · ")) + "</div>" +
                 "</div>" +
                 '<div class="br-clip-btns">' +

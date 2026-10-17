@@ -31,6 +31,25 @@ TEST(ClipIndex_KeepsNewestFirst) {
     CHECK_EQ(idx.clips()[0].file, std::string("a.rpl"));
 }
 
+TEST(ClipIndex_OrderIsByWhenClipsEnd) {
+    // Save last 5 minutes right after a takeoff clip: the save starts earlier but ends later.
+    ClipIndex idx;
+    ClipEntry takeoff = entry("takeoff.rpl", EventType::Takeoff, 1000000 + 260000);
+    takeoff.durationSec = 39.2;
+    ClipEntry manual = entry("manual.rpl", EventType::Manual, 1000000);
+    manual.durationSec = 317.3;
+    idx.add(takeoff);
+    idx.add(manual);
+    CHECK_EQ(idx.clips()[0].file, std::string("manual.rpl"));
+
+    // and after a reload
+    std::string json;
+    idx.toJson(json);
+    ClipIndex loaded;
+    REQUIRE(loaded.fromJson(json.data(), json.size(), nullptr));
+    CHECK_EQ(loaded.clips()[0].file, std::string("manual.rpl"));
+}
+
 TEST(ClipIndex_UniqueFileNames) {
     ClipIndex idx;
     const int64_t t = 1792247525000;  // 2026-10-17 14:32:05 UTC

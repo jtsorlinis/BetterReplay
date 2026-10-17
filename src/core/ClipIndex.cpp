@@ -1,6 +1,7 @@
 #include "ClipIndex.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "Json.h"
 #include "TimeUtil.h"
@@ -9,8 +10,14 @@ namespace br {
 
 namespace {
 
+// Newest first by when a clip ends: a manual save of the last 5 minutes starts long before the
+// takeoff clip saved a minute earlier, but it's the newer of the two.
+int64_t endMs(const ClipEntry& e) { return e.utcStartMs + static_cast<int64_t>(std::llround(e.durationSec * 1000.0)); }
+
 bool newerFirst(const ClipEntry& a, const ClipEntry& b) {
-    if (a.utcStartMs != b.utcStartMs) return a.utcStartMs > b.utcStartMs;
+    const int64_t ea = endMs(a);
+    const int64_t eb = endMs(b);
+    if (ea != eb) return ea > eb;
     return a.file > b.file;
 }
 
