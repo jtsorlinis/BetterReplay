@@ -1,0 +1,95 @@
+// Data-driven channel table. Every recorded value is described here once; the SimConnect
+// data definitions, the clip file's channel list and playback all derive from this table.
+//
+// To add a channel: append an enumerator before kChannelCount and a matching row in
+// Channels.cpp. Keys are stored in clip files, so never rename or reuse an existing key.
+#pragma once
+
+#include <bitset>
+#include <cstddef>
+#include <cstdint>
+
+namespace br {
+
+enum class Storage : uint8_t { F64 = 1, F32 = 2, U8 = 3 };
+
+enum class Interp : uint8_t {
+    Linear = 0,
+    Angle180 = 1,  // degrees, shortest path, result in (-180, 180]
+    Angle360 = 2,  // degrees, shortest path, result in [0, 360)
+    Step = 3,      // hold the earlier sample (booleans, detents)
+};
+
+enum class PlayMode : uint8_t {
+    None = 0,   // recorded only
+    Set = 1,    // written every playback frame via SetDataOnSimObject
+    Event = 2,  // sent as a key event when the value changes
+};
+
+struct ChannelDef {
+    const char* key;        // stable id stored in clip files
+    const char* simvar;     // SimConnect simulation variable
+    const char* units;      // SimConnect units string
+    Storage storage;        // on-disk representation
+    Interp interp;
+    PlayMode play;
+    const char* playEvent;  // key event for PlayMode::Event, otherwise nullptr
+};
+
+enum Channel : uint16_t {
+    kLat,
+    kLon,
+    kAlt,
+    kAgl,
+    kPitch,
+    kBank,
+    kHeading,
+    kVelBodyX,
+    kVelBodyY,
+    kVelBodyZ,
+    kRotVelBodyX,
+    kRotVelBodyY,
+    kRotVelBodyZ,
+    kGroundSpeed,
+    kVerticalSpeed,
+    kOnGround,
+    kGForce,
+    kGearCenter,
+    kGearLeft,
+    kGearRight,
+    kGearHandle,
+    kFlapsLeft,
+    kFlapsRight,
+    kFlapsHandleIndex,
+    kSpoilersHandle,
+    kAileronLeft,
+    kAileronRight,
+    kElevator,
+    kRudder,
+    kAileronInput,
+    kElevatorInput,
+    kRudderInput,
+    kLightNav,
+    kLightBeacon,
+    kLightStrobe,
+    kLightLanding,
+    kLightTaxi,
+    kChannelCount
+};
+
+extern const ChannelDef kChannels[kChannelCount];
+
+using ChannelMask = std::bitset<kChannelCount>;
+
+// Returns the slot for a stable key, or -1 if this build doesn't know it.
+int findChannel(const char* key);
+
+size_t storageBytes(Storage s);  // 0 for unknown values
+
+// One recorded sample: time on the recording clock plus every channel's value.
+struct Frame {
+    double t = 0.0;
+    double v[kChannelCount] = {};
+};
+
+}  // namespace br
