@@ -33,9 +33,14 @@ interface SetupControl {
     state: string;
     method: string;
 }
+interface SetupStep {
+    control: string;
+    state: string;  // a finished step's result ("ok", "failed", "skipped"), or "current" / "next"
+}
 // The control setup (src/core/ControlSetup.h); the step fields are there while it's active.
 interface SetupStatus {
-    offer: string;  // "new", "gear" or ""
+    offer: string;  // "new" (can start), "wait" (no profile, not ready yet), "gear" or ""
+    ready?: { parkingBrake: boolean; onRunway: boolean; engines: boolean };  // what "wait" is waiting for
     have: string;   // the aircraft's profile: "none", "partial", "complete", "declined"
     controls: SetupControl[];
     active: boolean;
@@ -44,9 +49,15 @@ interface SetupStatus {
     title?: string;
     stepNo?: number;
     steps?: number;
-    prompt?: string;
-    detail?: string;
+    prompt?: string;  // one short instruction or question
+    task?: number;    // the pilot's instruction showing, of `tasks` in this step
+    tasks?: number;
+    taskDone?: boolean;  // the last one is done (things settling)
+    method?: number;      // the method being tried (1-based), of `methods` in this step
+    methods?: number;
+    attempts?: string[];  // how each method before it ended: "failed", "rejected", "unavailable"
     note?: string;
+    plan?: SetupStep[];
     buttons?: string[];
 }
 interface Status {
@@ -111,19 +122,57 @@ const PHASES: { [phase: string]: string } = {
     "landing-rollout": "capturing landing",
 };
 const SETUP_BUTTONS: { [answer: string]: string } = {
-    start: "Start",
+    start: "Start setup",
     yes: "Yes",
     no: "No",
     again: "Watch again",
-    skip: "Skip",
+    skip: "Skip this step",
     retry: "Try again",
     ready: "Continue anyway",
     later: "Later",
     never: "Never for this aircraft",
-    cancel: "Cancel",
-    close: "Close",
+    cancel: "Cancel setup",
+    close: "Done",
 };
-const SETUP_PRIMARY: { [answer: string]: boolean } = { start: true, yes: true, retry: true, close: true };
+// How prominent each answer is: the main choice, the alternatives beside it, and (anything not
+// listed) the small ones underneath.
+const SETUP_KIND: { [answer: string]: string } = {
+    start: "primary",
+    yes: "primary",
+    retry: "primary",
+    close: "primary",
+    no: "secondary",
+    again: "secondary",
+    ready: "secondary",
+    later: "secondary",
+};
+const SETUP_PHASES: { [phase: string]: string } = {
+    wait: "Get ready",
+    prepare: "Get ready",
+    user: "Your turn",
+    takeoff: "Take off",
+    retry: "Didn't catch that",
+    replay: "Watch",
+    hold: "Watch",
+    ask: "Your call",
+    done: "All done",
+};
+// Phases where the pilot is doing something: when what they were told changes there, they did it.
+const PILOT_PHASES: { [phase: string]: boolean } = { prepare: true, takeoff: true, user: true };
+const TICK_HOLD_MS = 1100;  // a done instruction stays up, ticked, this long
+
+const CONTROL_LABELS: { [control: string]: string } = {
+    spoilers: "Spoilers",
+    flaps: "Flaps",
+    throttle: "Throttle",
+    gear: "Gear",
+};
+const RESULT_LABELS: { [state: string]: string } = {
+    ok: "Set up",
+    failed: "Not replayable",
+    skipped: "Skipped",
+    pending: "Not set up",
+};
 const CONTROL_STATES: { [state: string]: string } = {
     ok: "ok",
     failed: "not replayable",
@@ -187,6 +236,88 @@ function setText(id: string, text: string): void {
     el.classList.toggle("hidden", !text);
 }
 
+// Sets an element's markup only when it changed (status arrives 4 times a second), hiding it
+// when empty.
+function setHtml(id: string, html: string): void {
+    const el = byId(id);
+    if (el.getAttribute("data-html") !== html) {
+        el.innerHTML = html;
+        el.setAttribute("data-html", html);
+    }
+    el.classList.toggle("hidden", !html);
+}
+
+function controlLabel(control: string): string {
+    return CONTROL_LABELS[control] || capitalize(control);
+}
+
+// The setup's progress: one numbered dot per step, joined by lines.
+function stepsHtml(plan: SetupStep[]): string {
+    let html = "";
+    for (let i = 0; i < plan.length; ++i) {
+        const p = plan[i];
+        if (i > 0) html += '<div class="br-step-line' + (p.state === "next" ? "" : " done") + '"></div>';
+        html += '<div class="br-step ' + escapeHtml(p.state) + '"><span class="br-step-dot">' + (i + 1) + "</span>" +
+            '<span class="br-step-name">' + escapeHtml(controlLabel(p.control)) + "</span></div>";
+    }
+    return html;
+}
+
+// What the finished setup found, per control.
+function resultsHtml(controls: SetupControl[]): string {
+    let html = "";
+    for (let i = 0; i < controls.length; ++i) {
+        const c = controls[i];
+        if (c.state === "absent") continue;
+        html += '<div class="br-result ' + escapeHtml(c.state) + '"><div class="br-result-head">' +
+            '<span class="br-result-name">' + escapeHtml(controlLabel(c.control)) + "</span>" +
+            '<span class="br-result-state">' + escapeHtml(RESULT_LABELS[c.state] || c.state) + "</span></div>" +
+            (c.method ? '<div class="br-result-method">' + escapeHtml(c.method) + "</div>" : "") + "</div>";
+    }
+    return html;
+}
+
+// What the setup is waiting for, ticked off as it happens.
+function checklistHtml(items: Array<[boolean, string]>): string {
+    let html = "";
+    for (let i = 0; i < items.length; ++i) {
+        html += '<div class="br-check' + (items[i][0] ? " ok" : "") + '"><span class="br-check-box"></span><span>' +
+            escapeHtml(items[i][1]) + "</span></div>";
+    }
+    return html;
+}
+
+// While replaying: one row per method tried in this step, the current one last. The methods still
+// to come get invisible rows, so the block (centred in the page) is as tall from the start and
+// the text above doesn't move up as rows appear.
+function attemptsHtml(setup: SetupStatus): string {
+    const phase = setup.phase || "";
+    if (phase !== "replay" && phase !== "hold" && phase !== "ask") return "";
+    const done = setup.attempts || [];
+    let html = "";
+    for (let i = 0; i < done.length; ++i) {
+        html += '<div class="br-attempt failed"><span class="br-attempt-mark"></span>Method ' + (i + 1) + " failed</div>";
+    }
+    const n = setup.method || done.length + 1;
+    html += '<div class="br-attempt current br-enter"><span class="br-attempt-mark"></span>' +
+        (phase === "ask" ? "Method " + n + " passed the check" : "Trying method " + n) + "</div>";
+    for (let i = n; i < (setup.methods || 0); ++i) {
+        html += '<div class="br-attempt reserved"><span class="br-attempt-mark"></span>Trying method ' + (i + 1) + "</div>";
+    }
+    return html;
+}
+
+// The offer's outline: [heading, text] per item.
+function outlineHtml(items: string[][]): string {
+    let html = "";
+    for (let i = 0; i < items.length; ++i) {
+        html += '<div class="br-outline"><span class="br-step-dot">' + (i + 1) + "</span><div>" +
+            '<span class="br-outline-title">' + escapeHtml(items[i][0]) + "</span>" +
+            '<span class="br-outline-text">' + escapeHtml(items[i][1]) + "</span></div></div>";
+    }
+    return html;
+}
+
 // Walks up from an event target to the nearest element carrying `attr` (no Element.closest).
 function findWithAttr(start: EventTarget | null, attr: string, stop: HTMLElement): HTMLElement | null {
     let el = start as HTMLElement | null;
@@ -219,6 +350,12 @@ class BetterReplayPanel extends UIElement {
     declare confirmTimer: number;
     declare toastTimer: number;
     declare setupButtons: string;
+    declare shownPrompt: string;   // the setup's main text as shown, and the step and phase it was in
+    declare shownStep: string;
+    declare shownPhase: string;
+    declare tickOn: boolean;
+    declare holding: boolean;      // showing a done instruction for a moment
+    declare heldStatus: Status | null;
     declare resetConfirm: boolean;
     declare resetTimer: number;
     declare handleStatus: (payload: string) => void;
@@ -246,6 +383,12 @@ class BetterReplayPanel extends UIElement {
         this.confirmTimer = 0;
         this.toastTimer = 0;
         this.setupButtons = "";
+        this.shownPrompt = "";
+        this.shownStep = "";
+        this.shownPhase = "";
+        this.tickOn = false;
+        this.holding = false;
+        this.heldStatus = null;
         this.resetConfirm = false;
         this.resetTimer = 0;
         this.handleStatus = (payload: string) => this.onStatus(payload);
@@ -537,68 +680,157 @@ class BetterReplayPanel extends UIElement {
         error.classList.toggle("hidden", !s.error);
     }
 
-    // The setup card (an offer, or the step in progress) and the profile line under the status.
+    // While the setup is offered or running it takes the whole panel; otherwise there's a line
+    // under the status with the aircraft's profile.
     renderSetup(s: Status): void {
-        const setup = s.setup;
-        const card = byId("br-setup");
-        const line = byId("br-controls");
-        if (!setup) {
-            card.classList.add("hidden");
-            line.classList.add("hidden");
+        if (this.holding) {
+            this.heldStatus = s;  // shown once the done instruction has had its moment
             return;
         }
-        let title = "";
-        let step = "";
+        const setup = s.setup;
+        if (setup && setup.active && this.instructionDone(setup)) {
+            // The pilot did what's showing: tick it, then move on.
+            this.holding = true;
+            this.heldStatus = s;
+            this.setTick(true);
+            window.setTimeout(() => {
+                this.holding = false;
+                this.shownPhase = "";  // that change has had its tick
+                const held = this.heldStatus;
+                this.heldStatus = null;
+                if (held) this.renderSetup(held);
+            }, TICK_HOLD_MS);
+            return;
+        }
+        let kicker = "";
+        let phase = "";
         let prompt = "";
         let detail = "";
         let note = "";
+        let list = "";
+        let plan: SetupStep[] = [];
         let buttons: string[] = [];
-        if (setup.active) {
-            title = "Control setup";
-            if (setup.phase !== "done" && setup.steps) {
-                step = "Step " + setup.stepNo + " of " + setup.steps + ": " + (setup.title || "");
-            }
+        if (setup && setup.active) {
+            kicker = "Control setup";
+            phase = setup.phase || "";
             prompt = setup.prompt || "";
-            detail = setup.detail || "";
             note = setup.note || "";
+            plan = setup.plan || [];
             buttons = setup.buttons || [];
-        } else if (setup.offer === "new") {
-            title = "Set up replay controls for this aircraft?";
-            prompt =
-                "BetterReplay learns how this aircraft's spoilers, flaps, throttle and gear respond, so replays can move them.";
-            detail = "About a minute here on the runway, then raise and lower the gear once after takeoff.";
+            if (phase === "done") list = resultsHtml(setup.controls);
+        } else if (setup && setup.offer === "new") {
+            kicker = "New aircraft";
+            phase = "offer";
+            prompt = "Set up replay controls for this aircraft?";
+            detail = "BetterReplay learns how its spoilers, flaps, throttle and gear respond, so replays can move them.";
+            list = outlineHtml([
+                ["Here on the runway, about a minute",
+                    "Move the spoilers, flaps and throttle when asked. Each time, it replays your movement and asks whether it looked right."],
+                ["After takeoff", "Raise the gear and lower it again, once."],
+            ]);
             buttons = ["start", "later", "never"];
-        } else if (setup.offer === "gear") {
-            title = "Finish the control setup";
-            prompt = "Raise and lower the gear once, so replays can move it.";
+        } else if (setup && setup.offer === "wait") {
+            // No profile yet, and not where the setup can start: say what's missing.
+            const r = setup.ready || { parkingBrake: false, onRunway: false, engines: false };
+            kicker = "New aircraft";
+            phase = "wait";
+            prompt = "Set up replay controls for this aircraft";
+            detail = "Line up on a runway with the engines running, ready for takeoff. The setup can start once these are ticked:";
+            list = checklistHtml([
+                [r.parkingBrake, "Parking brake set"],
+                [r.onRunway, "On a runway"],
+                [r.engines, "Engines running"],
+            ]);
+            buttons = ["later", "never"];
+        } else if (setup && setup.offer === "gear") {
+            kicker = "Control setup";
+            phase = "offer";
+            prompt = "One step left: the gear";
+            detail = "Raise the gear and lower it again, staying slow. It then replays that and asks whether it looked right.";
             buttons = ["start", "later"];
         }
-        card.classList.toggle("hidden", !title);
-        card.classList.toggle("asking", setup.phase === "ask" && setup.active);
-        if (title) {
-            byId("br-setup-title").textContent = title;
-            byId("br-setup-step").textContent = step;
-            byId("br-setup-prompt").textContent = prompt;
+
+        const show = !!prompt;
+        byId("br-root").classList.toggle("setup-mode", show);
+        byId("br-setup").className = "br-setup phase-" + (phase || "none") + (setup && setup.active ? " stepping" : "") +
+            (show ? "" : " hidden");
+        if (show) {
+            byId("br-setup-kicker").textContent = kicker;
+            byId("br-setup-aircraft").textContent = s.aircraft || "";
+            setHtml("br-setup-steps", stepsHtml(plan));
+            setText("br-setup-phase", SETUP_PHASES[phase] || "");
+            this.renderPrompt(prompt, !!(setup && setup.active && setup.taskDone));
             setText("br-setup-detail", detail);
+            setHtml("br-setup-attempts", setup && setup.active ? attemptsHtml(setup) : "");
+            setHtml("br-setup-list", list);
             setText("br-setup-note", note);
-            // Rebuilt only when the set changes, so a click isn't lost to a re-render.
-            const key = buttons.join(",");
-            if (key !== this.setupButtons) {
-                this.setupButtons = key;
-                let html = "";
-                for (let i = 0; i < buttons.length; ++i) {
-                    const a = buttons[i];
-                    html += '<button type="button" class="br-btn' + (SETUP_PRIMARY[a] ? " br-primary" : "") + '" data-a="' +
-                        escapeHtml(a) + '">' + escapeHtml(SETUP_BUTTONS[a] || a) + "</button>";
-                }
-                byId("br-setup-btns").innerHTML = html;
-            }
+            this.renderSetupButtons(buttons, !!(setup && setup.active));
         } else {
             this.setupButtons = "";
         }
+        const active = !!(setup && setup.active);
+        this.shownStep = active && setup ? setup.step || "" : "";
+        this.shownPhase = active ? phase : "";
+        this.renderControlsLine(s, show);
+    }
 
-        line.classList.toggle("hidden", setup.active);
-        if (setup.active) return;
+    // Whether what the panel shows the pilot to do has just been done: the setup moved on within
+    // the same step (a skip moves to another step; a time-out isn't done).
+    instructionDone(setup: SetupStatus): boolean {
+        return !!PILOT_PHASES[this.shownPhase] && setup.step === this.shownStep && !!this.shownPrompt &&
+            (setup.prompt || "") !== this.shownPrompt && setup.phase !== "retry";
+    }
+
+    // The main text, sliding in when it changes, with a tick when it's done.
+    renderPrompt(text: string, done: boolean): void {
+        if (text !== this.shownPrompt) {
+            this.shownPrompt = text;
+            const el = byId("br-setup-prompt");
+            el.textContent = text;
+            el.classList.remove("br-enter");
+            void el.offsetWidth;  // restart the animation
+            el.classList.add("br-enter");
+        }
+        this.setTick(done);
+    }
+
+    setTick(on: boolean): void {
+        if (on === this.tickOn) return;
+        this.tickOn = on;
+        const tick = byId("br-setup-tick");
+        tick.classList.remove("on");
+        if (on) {
+            void tick.offsetWidth;  // restart the animation
+            tick.classList.add("on");
+        }
+    }
+
+    // Big buttons for the main choices, small ones underneath for the rest. Rebuilt only when the
+    // set changes, so a click isn't lost to a re-render.
+    renderSetupButtons(buttons: string[], active: boolean): void {
+        const key = buttons.join(",") + (active ? "+" : "");
+        if (key === this.setupButtons) return;
+        this.setupButtons = key;
+        let main = "";
+        let minor = "";
+        for (let i = 0; i < buttons.length; ++i) {
+            const a = buttons[i];
+            const kind = SETUP_KIND[a] || "minor";
+            const label = a === "later" && active ? "Finish later" : SETUP_BUTTONS[a] || a;
+            const html = '<button type="button" class="br-btn ' + (kind === "minor" ? "br-link" : "br-big br-" + kind) +
+                '" data-a="' + escapeHtml(a) + '">' + escapeHtml(label) + "</button>";
+            if (kind === "minor") minor += html;
+            else main += html;
+        }
+        setHtml("br-setup-btns", main);
+        setHtml("br-setup-minor", minor);
+    }
+
+    renderControlsLine(s: Status, setupShown: boolean): void {
+        const setup = s.setup;
+        const line = byId("br-controls");
+        line.classList.toggle("hidden", !setup || setupShown);
+        if (!setup || setupShown) return;
         let text = "Replay controls: ";
         if (setup.have === "none") {
             text += "not set up for this aircraft";

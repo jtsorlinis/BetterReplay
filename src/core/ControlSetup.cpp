@@ -27,6 +27,7 @@ constexpr size_t kMaxMethods = 8;
 constexpr double kPassPeak = 0.6;    // a replay must move the control at least 60% as far as the pilot did
 constexpr double kPassReturn = 0.15; // and bring it back to within 15% of that
 constexpr double kMaxRollKt = 3.0;   // the throttle replay stops if the aircraft starts to roll
+constexpr double kTaskStillSec = 0.75;  // a control held this long has finished that instruction
 
 double meanOf(const Frame& f, int first, int count) {
     double sum = 0.0;
@@ -82,14 +83,26 @@ const char* const* wordsFor(Control c) {
     return nullptr;
 }
 
-const char* instruction(Control c) {
+// What the pilot does for each control, one instruction at a time (the panel ticks each off).
+const char* const kSpoilerTasks[] = {"Deploy the spoilers", "Retract the spoilers"};
+const char* const kFlapTasks[] = {"Lower the flaps one notch", "Wait for the flaps to extend", "Retract the flaps"};
+const char* const kThrottleTasks[] = {"Advance the throttle to full", "Bring the throttle back to idle",
+                                      "Wait for the engines to spool down"};
+const char* const kGearTasks[] = {"Raise the gear", "Lower the gear"};
+
+struct TaskList {
+    const char* const* items;
+    size_t count;
+};
+
+TaskList tasksFor(Control c) {
     switch (c) {
-        case Control::Spoilers: return "Deploy the spoilers fully, then retract them.";
-        case Control::Flaps: return "Lower the flaps one notch, wait for them to extend, then retract them.";
-        case Control::Throttle: return "Advance the throttle to full, then back to idle.";
-        case Control::Gear: return "Raise the gear, then lower it again.";
+        case Control::Spoilers: return {kSpoilerTasks, 2};
+        case Control::Flaps: return {kFlapTasks, 3};
+        case Control::Throttle: return {kThrottleTasks, 3};
+        case Control::Gear: return {kGearTasks, 2};
     }
-    return "";
+    return {kSpoilerTasks, 0};
 }
 
 const char* question(Control c) {
@@ -110,16 +123,6 @@ const char* watchWhat(Control c) {
         case Control::Gear: return "Watch the gear";
     }
     return "Watch";
-}
-
-const char* backHint(Control c) {
-    switch (c) {
-        case Control::Spoilers:
-        case Control::Flaps: return "Now retract them.";
-        case Control::Throttle: return "Now back to idle.";
-        case Control::Gear: return "Now lower it again.";
-    }
-    return "";
 }
 
 std::string title(Control c) {
@@ -447,7 +450,7 @@ bool SetupFlow::start(const AircraftProfile& profile, const Frame& live, const S
 }
 
 void SetupFlow::enterStep() {
-    detail_.clear();
+    need_.clear();
     phaseT_ = 0.0;
     if (step_ >= plan_.size()) {
         phase_ = Phase::Done;
@@ -455,9 +458,8 @@ void SetupFlow::enterStep() {
         for (int i = 0; i < kControlCount; ++i) {
             const Control c = controlAt(i);
             if (profile_[c].state == ControlState::Absent) continue;
-            summary += (summary.empty() ? "" : " · ") + title(c) + ": " + stateLabel(profile_[c].state);
+            summary += (summary.empty() ? "" : ", ") + title(c) + ": " + stateLabel(profile_[c].state);
         }
-        detail_ = summary;
         logf(0, "control setup finished: %s", summary.c_str());
         return;
     }
@@ -468,18 +470,18 @@ void SetupFlow::enterStep() {
 
 const char* SetupFlow::precondition(const Frame& live) const {
     const Control c = control();
-    if (c == Control::Gear) return onGround_ ? "Take off first." : nullptr;
-    if (!onGround_) return "Land and stop on the runway to continue.";
-    if (live.v[kGroundSpeed] > 2.0) return "Come to a stop first.";
+    if (c == Control::Gear) return onGround_ ? "Take off" : nullptr;
+    if (!onGround_) return "Land and stop on the runway";
+    if (live.v[kGroundSpeed] > 2.0) return "Come to a stop";
     if (c == Control::Throttle) {
-        if (!facts_.engineRunning) return "Start the engines first.";
-        if (!facts_.parkingBrake) return "Set the parking brake first.";
+        if (!facts_.engineRunning) return "Start the engines";
+        if (!facts_.parkingBrake) return "Set the parking brake";
         return nullptr;
     }
     // Ground spoilers stow when the thrust levers are advanced. Some aircraft's lever simvar
     // doesn't read 0 at idle, so this is loose (and "Continue anyway" skips it).
     const double thr = meanOf(live, kThrottle1, engineCount(facts_));
-    if (std::isfinite(thr) && thr > 25.0) return "Bring the throttles back to idle first.";
+    if (std::isfinite(thr) && thr > 25.0) return "Bring the throttles back to idle";
     return nullptr;
 }
 
@@ -491,7 +493,7 @@ void SetupFlow::onFrame(double dt, const Frame& live, const SetupFacts& facts) {
     switch (phase_) {
         case Phase::Prepare: {
             const char* need = precondition(live);
-            detail_ = need ? need : "";
+            need_ = need ? need : "";
             if (!need) beginUser();
             break;
         }
@@ -518,7 +520,11 @@ void SetupFlow::beginUser() {
     handlePeak_ = outcomePeak_ = 0.0;
     handleAnchor_ = outcomeAnchor_ = NAN;
     stableSince_ = 0.0;
-    detail_.clear();
+    handleStill_ = outcomeStill_ = NAN;
+    handleStillSince_ = outcomeStillSince_ = 0.0;
+    task_ = 0;
+    taskDone_ = false;
+    need_.clear();
     std::vector<ScanVar> vars;
     sim_->scanBegin(vars);
     scanning_ = true;
@@ -577,15 +583,32 @@ void SetupFlow::userFrame(double dt, const Frame& live) {
         stableSince_ = t_;
     }
     const bool enough = handlePeak_ >= tu.handleNeed || outcomePeak_ >= tu.outcomeNeed;
-    const bool back = dh <= std::max(tu.handleStart, 0.1 * handlePeak_) && dout <= std::max(tu.outcomeStart, 0.1 * outcomePeak_);
+    const bool handleBack = dh <= std::max(tu.handleStart, 0.1 * handlePeak_);
+    const bool back = handleBack && dout <= std::max(tu.outcomeStart, 0.1 * outcomePeak_);
     const bool stable = t_ - stableSince_ >= kStableSec;
-    if (!moved_ || !enough) {
-        detail_.clear();
-    } else if (!back) {
-        detail_ = backHint(control());
-    } else if (!stable) {
-        detail_ = control() == Control::Throttle ? "Waiting for the engines to spool down..." : "Waiting for it to settle...";
+
+    // Which instruction the pilot is on. The first is done once the control has gone far enough
+    // and stopped (or is coming back); then, for the flaps, the surfaces stopping (extended), for
+    // the throttle, the lever back at idle; the last once everything is back where it started.
+    if (movedFrom(h, handleStill_, 0.5 * tu.handleStart)) {
+        handleStill_ = h;
+        handleStillSince_ = t_;
     }
+    if (movedFrom(o, outcomeStill_, 0.5 * tu.outcomeStart)) {
+        outcomeStill_ = o;
+        outcomeStillSince_ = t_;
+    }
+    const size_t tasks = tasksFor(control()).count;
+    if (task_ == 0 && moved_ && enough &&
+        (t_ - handleStillSince_ >= kTaskStillSec || dh < handlePeak_ - tu.handleStart)) {
+        task_ = 1;
+    }
+    if (task_ == 1 && tasks == 3) {
+        const bool extended = t_ - outcomeStillSince_ >= kTaskStillSec && dout > tu.outcomeStart;
+        if (handleBack || (control() == Control::Flaps && extended)) task_ = 2;
+    }
+    taskDone_ = task_ + 1 == tasks && back;
+
     if (moved_ && enough && back && stable) {
         analyze();
         return;
@@ -596,7 +619,6 @@ void SetupFlow::userFrame(double dt, const Frame& live) {
         capture_.clear();
         phase_ = Phase::Retry;
         phaseT_ = 0.0;
-        detail_.clear();
         const std::string label = controlSpec(control()).label;
         note_ = moved_ ? "The " + label + " didn't go all the way and come back." : "Didn't see the " + label + " move.";
         logf(1, "control setup: %s", note_.c_str());
@@ -607,6 +629,8 @@ void SetupFlow::analyze() {
     endScan();
     const Control c = control();
     const Tuning tu = tuning(c);
+    attempts_.clear();
+    note_.clear();  // a note about the previous step has been seen by now
     // The replay starts just before whatever changed first: the control's simvar, or one of the
     // variables the methods use.
     windowFrom_ = std::max(0.0, movedAt_ - kSearchLeadSec);
@@ -723,6 +747,7 @@ void SetupFlow::startMethod(size_t i) {
     std::string why;
     if (!sim_->beginControl(c, m, why)) {
         logf(1, "control setup: can't try %s: %s", describeMethod(c, m).c_str(), why.c_str());
+        attempts_.push_back("unavailable");
         nextMethod();
         return;
     }
@@ -746,7 +771,6 @@ void SetupFlow::startMethod(size_t i) {
     stoppedEarly_ = false;
     phase_ = Phase::Replay;
     phaseT_ = 0.0;
-    detail_.clear();
     logf(0, "control setup: replaying the %s with %s (method %zu of %zu)", controlSpec(c).label,
          describeMethod(c, m).c_str(), i + 1, methods_.size());
 }
@@ -826,12 +850,11 @@ void SetupFlow::evaluate(const Frame& live) {
         note_ = stoppedEarly_ ? "Stopped early: the aircraft started to roll. Is the parking brake set?" : "";
         phase_ = Phase::Ask;
         phaseT_ = 0.0;
-        detail_.clear();
         return;
     }
     logf(0, "control setup: %s moved the %s %d%% as far as you did%s", desc.c_str(), controlSpec(c).label, pct,
          reached && !returned ? ", but didn't bring it back" : "");
-    note_ = "Method " + std::to_string(method_ + 1) + " didn't move the " + controlSpec(c).label + "; trying the next.";
+    attempts_.push_back("failed");  // the panel lists it as a row
     nextMethod();
 }
 
@@ -861,6 +884,7 @@ void SetupFlow::finishStep(ControlState state, const ControlMethod& method, bool
     tracker_.clear();
     mini_ = Clip();
     methods_.clear();
+    attempts_.clear();
     std::vector<Frame>().swap(capture_);
     ++step_;
     enterStep();
@@ -902,12 +926,13 @@ bool SetupFlow::answer(const std::string& a, std::string& error) {
     switch (phase_) {
         case Phase::Ask:
             if (a == "yes") {
-                note_ = title(control()) + " set up.";
+                note_.clear();  // the step tracker shows it
                 finishStep(ControlState::Ok, methods_[method_], true);
                 return true;
             }
             if (a == "no") {
-                note_ = "Trying the next method.";
+                attempts_.push_back("rejected");
+                note_.clear();
                 nextMethod();
                 return true;
             }
@@ -927,7 +952,7 @@ bool SetupFlow::answer(const std::string& a, std::string& error) {
             // The pilot says it's ready (e.g. an aircraft whose parking brake isn't the simvar).
             // Being on the ground (or in the air for the gear) still counts.
             if (a == "ready" && (control() == Control::Gear ? !onGround_ : onGround_)) {
-                logf(0, "control setup: continuing without \"%s\"", detail_.c_str());
+                logf(0, "control setup: continuing without \"%s\"", need_.c_str());
                 beginUser();
                 return true;
             }
@@ -941,7 +966,7 @@ bool SetupFlow::answer(const std::string& a, std::string& error) {
         default: break;
     }
     if (a == "skip" && phase_ != Phase::Done && phase_ != Phase::Replay && phase_ != Phase::Hold) {
-        note_ = title(control()) + " skipped.";
+        note_.clear();
         finishStep(ControlState::Skipped, ControlMethod(), false);
         return true;
     }
@@ -955,18 +980,19 @@ bool SetupFlow::takeChanged() {
     return c;
 }
 
+// One short instruction or question at a time.
 std::string SetupFlow::prompt() const {
-    if (phase_ == Phase::Done) return "Control setup finished.";
+    if (phase_ == Phase::Done) return "Setup finished";
     const Control c = control();
+    const TaskList tasks = tasksFor(c);
     switch (phase_) {
-        case Phase::Prepare:
-        case Phase::User: return instruction(c);
-        case Phase::Takeoff:
-            return "Take off. Once you're climbing, raise the gear, then lower it again. Stay well below the gear speed limit.";
-        case Phase::Retry: return "That didn't register. Try again?";
+        case Phase::Prepare: return need_.empty() ? tasks.items[0] : need_;
+        case Phase::User: return tasks.items[task_ < tasks.count ? task_ : tasks.count - 1];
+        case Phase::Takeoff: return "Take off";
+        case Phase::Retry: return "That didn't register";
         case Phase::Replay:
         case Phase::Hold:
-            return std::string(watchWhat(c)) + ": replaying your movement. Hands off the controls.";
+            return watchWhat(c);
         case Phase::Ask: return question(c);
         default: return "";
     }
@@ -983,19 +1009,33 @@ void SetupFlow::statusJson(JsonWriter& w) const {
     w.kv("stepNo", static_cast<int>(done ? plan_.size() : step_ + 1));
     w.kv("steps", static_cast<int>(plan_.size()));
     w.kv("prompt", prompt());
-    std::string detail = detail_;
-    if (phase_ == Phase::Replay || phase_ == Phase::Hold) {
-        detail = "Method " + std::to_string(method_ + 1) + " of " + std::to_string(methods_.size()) + ": " +
-                 describeMethod(control(), methods_[method_]) + ".";
-    }
-    w.kv("detail", detail);
+    // The pilot's instructions in this step: which one is showing, and whether it's done (the
+    // last one, while things settle).
+    w.kv("task", static_cast<int>(phase_ == Phase::User ? task_ : 0));
+    w.kv("tasks", static_cast<int>(done ? 0 : tasksFor(control()).count));
+    w.kv("taskDone", phase_ == Phase::User && taskDone_);
     w.kv("note", note_);
     w.kv("method", static_cast<int>(method_ + 1));
     w.kv("methods", static_cast<int>(methods_.size()));
+    // How each method before the current one ended: "failed" (the automatic check), "rejected"
+    // (the pilot said no) or "unavailable" (the aircraft hasn't got what it needs).
+    w.key("attempts").beginArray();
+    for (const std::string& a : attempts_) w.value(a);
+    w.endArray();
+    // Every step of this run: finished ones with their result, then "current" and "next".
+    w.key("plan").beginArray();
+    for (size_t i = 0; i < plan_.size(); ++i) {
+        const Control c = plan_[i];
+        w.beginObject();
+        w.kv("control", controlSpec(c).key);
+        w.kv("state", i < step_ ? stateKey(profile_[c].state) : i == step_ ? "current" : "next");
+        w.endObject();
+    }
+    w.endArray();
     w.key("buttons").beginArray();
     switch (phase_) {
         case Phase::Prepare:
-            if (!detail_.empty()) w.value("ready");
+            if (!need_.empty()) w.value("ready");
             w.value("skip").value("cancel");
             break;
         case Phase::User: w.value("skip").value("cancel"); break;

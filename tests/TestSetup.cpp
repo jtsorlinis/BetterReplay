@@ -177,6 +177,8 @@ struct SetupHarness {
     int asks = 0;
     double firstReplayAt = -1.0;  // harness time when the first replay started
     std::string lastPhase;
+    std::vector<std::string> prompts;  // every main text shown, in order
+    bool sawTaskDone = false;          // the last instruction was shown as done
 
     SetupHarness() {
         flow.setLogger(&testLog, nullptr);
@@ -213,7 +215,11 @@ struct SetupHarness {
             aircraft.step(kDt);
             flow.onFrame(kDt, aircraft.live(), facts);
             t += kDt;
-            const std::string p = phase();
+            const JsonValue st = status();
+            const std::string p = flow.active() ? st.getString("phase", "") : "idle";
+            const std::string prompt = st.getString("prompt", "");
+            if (!prompt.empty() && (prompts.empty() || prompts.back() != prompt)) prompts.push_back(prompt);
+            if (st.getBool("taskDone", false)) sawTaskDone = true;
             if (p == "ask" && lastPhase != "ask") ++asks;
             if (p == "replay" && firstReplayAt < 0.0) firstReplayAt = t;
             lastPhase = p;
@@ -230,6 +236,20 @@ struct SetupHarness {
         return ok;
     }
 };
+
+// Whether `want` appear in `seen` in this order (other prompts may come between).
+bool inOrder(const std::vector<std::string>& seen, const std::vector<std::string>& want) {
+    size_t i = 0;
+    for (const std::string& s : seen) {
+        if (i < want.size() && s == want[i]) ++i;
+    }
+    if (i < want.size()) {
+        std::printf("         prompts seen:");
+        for (const std::string& s : seen) std::printf(" [%s]", s.c_str());
+        std::printf("\n");
+    }
+    return i == want.size();
+}
 
 // Deploy the spoilers over 0.5 s at t0, hold 1 s, retract over 0.5 s.
 std::function<void(double)> deploySpoilers(FakeAircraft& a, double t0) {
@@ -255,6 +275,10 @@ TEST(Setup_FindsTheSpoilerInputEventByItsMovementAndAsksOnce) {
 
     CHECK(h.run(30.0, deploySpoilers(h.aircraft, 2.0), "ask"));
     CHECK_EQ(h.asks, 1);
+    // One instruction at a time, the last shown as done while things settle.
+    CHECK(inOrder(h.prompts, {"Deploy the spoilers", "Retract the spoilers", "Watch the spoilers",
+                              "Did the spoilers come up and go back down?"}));
+    CHECK(h.sawTaskDone);
     CHECK_EQ(h.aircraft.scans, 1);
     CHECK_EQ(h.aircraft.scanEnds, 1);
     REQUIRE(!h.aircraft.tried.empty());
@@ -264,6 +288,13 @@ TEST(Setup_FindsTheSpoilerInputEventByItsMovementAndAsksOnce) {
     CHECK_EQ(h.status().getString("step", ""), std::string("spoilers"));
 
     REQUIRE(h.answer("yes"));
+    const JsonValue afterSpoilers = h.status();
+    const JsonValue* plan = afterSpoilers.get("plan");
+    REQUIRE(plan && plan->isArray() && plan->array.size() == 2);
+    CHECK_EQ(plan->array[0].getString("control", ""), std::string("spoilers"));
+    CHECK_EQ(plan->array[0].getString("state", ""), std::string("ok"));
+    CHECK_EQ(plan->array[1].getString("control", ""), std::string("throttle"));
+    CHECK_EQ(plan->array[1].getString("state", ""), std::string("current"));
     const ControlProfile& sp = h.flow.profile()[Control::Spoilers];
     CHECK(sp.state == ControlState::Ok);
     CHECK(sp.confirmed);
@@ -275,7 +306,7 @@ TEST(Setup_FindsTheSpoilerInputEventByItsMovementAndAsksOnce) {
     h.facts.parkingBrake = false;
     h.run(0.5);
     CHECK_EQ(h.phase(), std::string("prepare"));
-    CHECK_EQ(h.status().getString("detail", ""), std::string("Set the parking brake first."));
+    CHECK_EQ(h.status().getString("prompt", ""), std::string("Set the parking brake"));
     const JsonValue prepare = h.status();
     const JsonValue* buttons = prepare.get("buttons");
     REQUIRE(buttons && buttons->isArray() && !buttons->array.empty());
@@ -298,6 +329,14 @@ TEST(Setup_FailingMethodsAreSkippedWithoutAskingAndANoTriesTheNext) {
     CHECK_EQ(h.asks, 1);
     // Both preset scalings failed the automatic check before the key event passed it.
     REQUIRE(h.aircraft.tried.size() == 3);
+    {
+        const JsonValue st = h.status();
+        const JsonValue* attempts = st.get("attempts");
+        REQUIRE(attempts && attempts->isArray() && attempts->array.size() == 2);
+        CHECK_EQ(attempts->array[0].string, std::string("failed"));
+        CHECK_EQ(attempts->array[1].string, std::string("failed"));
+        CHECK_EQ(st.getNumber("method", 0), 3.0);
+    }
     CHECK(h.aircraft.tried[0].kind == MethodKind::InputSet);
     CHECK(h.aircraft.tried[1].kind == MethodKind::InputSet);
     CHECK(h.aircraft.tried[2].kind == MethodKind::KeyEvent);
@@ -309,6 +348,12 @@ TEST(Setup_FailingMethodsAreSkippedWithoutAskingAndANoTriesTheNext) {
 
     // "No": the rest are tried and fail, so the spoilers end up not replayable.
     REQUIRE(h.answer("no"));
+    {
+        const JsonValue st = h.status();
+        const JsonValue* attempts = st.get("attempts");
+        REQUIRE(attempts && attempts->array.size() == 3);
+        CHECK_EQ(attempts->array[2].string, std::string("rejected"));  // the pilot said no
+    }
     h.run(60.0, nullptr, "prepare");
     CHECK_EQ(h.asks, 2);
     CHECK(h.flow.profile()[Control::Spoilers].state == ControlState::Failed);
@@ -340,6 +385,8 @@ TEST(Setup_ThrottleUsesOnePatternForBothEnginesAndWaitsForTheSpool) {
     CHECK(h.run(90.0, pilot, "ask"));
     // The lever is back at idle at 7 s, but the pilot's part only ends once N1 is back down (~13 s).
     CHECK(h.firstReplayAt > 11.0);
+    CHECK(inOrder(h.prompts, {"Advance the throttle to full", "Bring the throttle back to idle",
+                              "Wait for the engines to spool down", "Listen to the engines"}));
     REQUIRE(!h.aircraft.tried.empty());
     CHECK(h.aircraft.tried[0] == h.aircraft.throttleWorks);
     CHECK_NEAR(h.aircraft.thr[0], 0.0, 1.0);
@@ -384,6 +431,7 @@ TEST(Setup_GearAfterTakeoffFindsTheLeverAheadOfTheLegs) {
     REQUIRE(!h.aircraft.tried.empty());
     CHECK(h.aircraft.tried[0] == h.aircraft.gearWorks);
     CHECK_NEAR(h.aircraft.gearPos, 1.0, 1e-6);
+    CHECK(inOrder(h.prompts, {"Take off", "Raise the gear", "Lower the gear", "Watch the gear"}));
     REQUIRE(h.answer("yes"));
     CHECK_EQ(h.phase(), std::string("done"));
     CHECK(h.flow.profile()[Control::Gear].state == ControlState::Ok);
@@ -658,14 +706,36 @@ TEST(EngineSetup_OfferedOnTheRunwayWithEnginesRunning) {
     CHECK_EQ(h.setupStatus().getString("offer", "?"), std::string("new"));
     CHECK_EQ(h.setupStatus().getString("have", "?"), std::string("none"));
 
+    // Without a profile it's always offered; until the aircraft is ready it waits, saying what's
+    // missing.
+    auto ready = [&](const char* key) {
+        const JsonValue s = h.setupStatus();
+        const JsonValue* r = s.get("ready");
+        return r && r->getBool(key, false);
+    };
+    CHECK(ready("parkingBrake") && ready("onRunway") && ready("engines"));
     h.facts.onRunway = false;  // at the gate
     h.run(0.1);
-    CHECK_EQ(h.setupStatus().getString("offer", "?"), std::string(""));
+    CHECK_EQ(h.setupStatus().getString("offer", "?"), std::string("wait"));
+    CHECK(!ready("onRunway") && ready("parkingBrake"));
     h.facts.onRunway = true;
     h.facts.engineRunning = false;
     h.run(0.1);
-    CHECK_EQ(h.setupStatus().getString("offer", "?"), std::string(""));
+    CHECK_EQ(h.setupStatus().getString("offer", "?"), std::string("wait"));
+    CHECK(!ready("engines") && ready("onRunway"));
     h.facts.engineRunning = true;
+    h.facts.parkingBrake = false;
+    h.run(0.1);
+    CHECK_EQ(h.setupStatus().getString("offer", "?"), std::string("wait"));
+    CHECK(!ready("parkingBrake") && ready("engines"));
+    h.facts.parkingBrake = true;
+    h.aircraft.onGround = false;  // in the air: not on a runway
+    h.run(0.1);
+    CHECK_EQ(h.setupStatus().getString("offer", "?"), std::string("wait"));
+    CHECK(!ready("onRunway"));
+    h.aircraft.onGround = true;
+    h.run(0.1);
+    CHECK_EQ(h.setupStatus().getString("offer", "?"), std::string("new"));
 
     std::string err;
     CHECK(h.engine.setupLater(err));

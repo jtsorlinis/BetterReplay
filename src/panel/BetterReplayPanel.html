@@ -20,7 +20,7 @@
   <ingamepanel-betterreplay>
     <ingame-ui id="BetterReplayPanel" panel-id="PANEL_BETTERREPLAY" title="BETTERREPLAY" class="ingameUiFrame"
                content-fit="true" min-width="30" min-height="40">
-      <div class="br-root">
+      <div class="br-root" id="br-root">
         <header class="br-status">
           <span class="br-dot" id="br-dot"></span>
           <div class="br-status-text">
@@ -36,15 +36,29 @@
           <button type="button" class="br-btn br-small br-danger hidden" id="br-setup-reset">Reset</button>
         </div>
 
+        <!-- The control setup: fills the panel while it's offered or running (.setup-mode). -->
         <section class="br-setup hidden" id="br-setup">
           <div class="br-setup-head">
-            <strong id="br-setup-title"></strong>
-            <span id="br-setup-step"></span>
+            <span class="br-setup-kicker" id="br-setup-kicker"></span>
+            <span class="br-setup-aircraft" id="br-setup-aircraft"></span>
           </div>
-          <div class="br-setup-prompt" id="br-setup-prompt"></div>
-          <div class="br-setup-detail hidden" id="br-setup-detail"></div>
-          <div class="br-setup-note hidden" id="br-setup-note"></div>
-          <div class="br-setup-btns" id="br-setup-btns"></div>
+          <div class="br-steps hidden" id="br-setup-steps"></div>
+          <div class="br-setup-body">
+            <!-- centred in the body during the setup's steps (.stepping) -->
+            <div class="br-setup-inner">
+              <div class="br-phase hidden" id="br-setup-phase"></div>
+              <div class="br-setup-prompt">
+                <span id="br-setup-prompt"></span>
+                <span class="br-tick" id="br-setup-tick"></span>
+              </div>
+              <div class="br-setup-attempts hidden" id="br-setup-attempts"></div>
+              <div class="br-setup-detail hidden" id="br-setup-detail"></div>
+              <div class="br-setup-list hidden" id="br-setup-list"></div>
+              <div class="br-setup-note hidden" id="br-setup-note"></div>
+            </div>
+          </div>
+          <div class="br-setup-btns hidden" id="br-setup-btns"></div>
+          <div class="br-setup-minor hidden" id="br-setup-minor"></div>
         </section>
 
         <section class="br-player hidden" id="br-player">

@@ -139,7 +139,10 @@ public:
     bool takeChanged();  // true once after a step changed the profile (time to save it)
 
     // Writes the active setup's fields into the current JSON object: active, step, stepNo,
-    // steps, phase, title, prompt, detail, note, method, methods, buttons.
+    // steps, phase, title, prompt (one short instruction or question), task / tasks / taskDone
+    // (the pilot's instructions in this step), note, method, methods, attempts (how each method
+    // before the current one ended), plan (each step's control and its result, "current" or
+    // "next"), buttons.
     void statusJson(JsonWriter& w) const;
 
     // Tuning, per control (exposed for tests).
@@ -191,7 +194,7 @@ private:
     size_t step_ = 0;
     Phase phase_ = Phase::Idle;
     double phaseT_ = 0.0;  // time in the current phase
-    std::string detail_;
+    std::string need_;     // Prepare: what's missing ("Set the parking brake")
     std::string note_;     // outcome of the previous method or step
     bool scanning_ = false;
     bool driving_ = false;
@@ -211,6 +214,12 @@ private:
     double handleAnchor_ = NAN;
     double outcomeAnchor_ = NAN;
     double stableSince_ = 0.0;
+    double handleStill_ = NAN;  // where the handle / outcome last stopped, and since when
+    double outcomeStill_ = NAN;
+    double handleStillSince_ = 0.0;
+    double outcomeStillSince_ = 0.0;
+    size_t task_ = 0;        // the pilot's instruction showing ("Deploy the spoilers", "Retract...")
+    bool taskDone_ = false;  // the last one is done; waiting for things to settle
     bool moved_ = false;
     double movedAt_ = 0.0;
     double windowFrom_ = 0.0;
@@ -221,6 +230,7 @@ private:
     Clip mini_;  // the pilot's movement, t from 0
     std::vector<ControlMethod> methods_;
     size_t method_ = 0;
+    std::vector<std::string> attempts_;  // how each method before method_ ended (statusJson)
     double replayT_ = 0.0;
     size_t hint_ = 0;
     Frame frame_;

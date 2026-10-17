@@ -691,13 +691,15 @@ const char* Engine::setupOffer() const {
     for (int i = 0; p && i < kControlCount; ++i) {
         if (controlAt(i) != Control::Gear && p->controls[i].state == ControlState::Pending) groundPending = true;
     }
+    // Until the aircraft is ready for it, the offer says what's missing ("wait").
+    if (groundPending) return readyForSetup() ? "new" : "wait";
     const bool onGround = lastRaw_.v[kOnGround] >= 0.5;
-    const double gs = lastRaw_.v[kGroundSpeed];
-    if (groundPending) {
-        return onGround && facts_.onRunway && facts_.engineRunning && gs < 2.0 ? "new" : "";
-    }
     const bool gearPending = (*p)[Control::Gear].state == ControlState::Pending && facts_.gearRetractable;
     return gearPending && !onGround ? "gear" : "";
+}
+
+bool Engine::readyForSetup() const {
+    return facts_.parkingBrake && lastRaw_.v[kOnGround] >= 0.5 && facts_.onRunway && facts_.engineRunning;
 }
 
 // ---------------------------------------------------------------------------- status
@@ -729,6 +731,12 @@ void Engine::statusJson(std::string& out) const {
     w.endObject();
     w.key("setup").beginObject();
     w.kv("offer", setupOffer());
+    // What the setup needs before it can start, for the "wait" offer's checklist.
+    w.key("ready").beginObject();
+    w.kv("parkingBrake", facts_.parkingBrake);
+    w.kv("onRunway", facts_.onRunway && lastRaw_.v[kOnGround] >= 0.5);
+    w.kv("engines", facts_.engineRunning);
+    w.endObject();
     const AircraftProfile* p = currentProfile();
     w.kv("have", !p ? "none" : p->declined ? "declined" : p->anyPending() ? "partial" : "complete");
     w.key("controls").beginArray();

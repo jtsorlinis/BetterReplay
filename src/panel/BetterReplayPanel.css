@@ -137,56 +137,577 @@ button {
   font-size: 12px;
 }
 
+/* While the setup is offered or running it takes the whole panel. */
+.br-root.setup-mode .br-status,
+.br-root.setup-mode .br-error,
+.br-root.setup-mode .br-controls-line,
+.br-root.setup-mode .br-player,
+.br-root.setup-mode .br-list-header,
+.br-root.setup-mode .br-list {
+  display: none !important;
+}
+
 .br-setup {
-  margin-top: 10px;
-  padding: 10px;
-  border: 1px solid rgba(245, 177, 61, 0.5);
-  border-radius: 6px;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  padding: 22px 24px 18px;
+  border: 1px solid var(--br-line);
+  border-radius: 8px;
   background: var(--br-surface);
 }
 
-.br-setup.asking {
-  border-color: var(--br-green);
+.br-setup.phase-offer,
+.br-setup.phase-wait,
+.br-setup.phase-prepare,
+.br-setup.phase-user,
+.br-setup.phase-takeoff {
+  border-color: rgba(245, 177, 61, 0.55);
+}
+
+.br-setup.phase-replay,
+.br-setup.phase-hold {
+  border-color: rgba(74, 168, 255, 0.6);
+}
+
+.br-setup.phase-ask,
+.br-setup.phase-done {
+  border-color: rgba(79, 209, 127, 0.6);
+}
+
+.br-setup.phase-retry {
+  border-color: rgba(255, 107, 107, 0.6);
 }
 
 .br-setup-head {
   display: flex;
+  align-items: baseline;
   justify-content: space-between;
-  gap: 8px;
-  color: var(--br-amber);
-  font-size: 13px;
+  gap: 12px;
 }
 
-.br-setup-head span {
+.br-setup-kicker {
+  flex: 0 0 auto;
+  color: var(--br-amber);
+  font-size: 13px;
+  font-weight: bold;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.br-setup-aircraft {
+  min-width: 0;
+  overflow: hidden;
   color: var(--br-muted);
+  font-size: 13px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* progress: numbered dots joined by lines */
+
+.br-steps {
+  display: flex;
+  align-items: flex-start;
+  margin-top: 20px;
+}
+
+.br-step {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  width: 64px;
+}
+
+/* Centred by flex, and by line-height and text-align too in case the sim's browser lays the
+   flex out differently. */
+.br-step-dot {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 2px solid var(--br-line);
+  border-radius: 50%;
+  color: var(--br-muted);
+  font-size: 15px;
+  font-weight: bold;
+  line-height: 28px;
+  text-align: center;
+}
+
+.br-step-name {
+  margin-top: 6px;
+  color: var(--br-muted);
+  font-size: 12px;
+}
+
+.br-step-line {
+  flex: 1 1 auto;
+  height: 2px;
+  margin: 15px -16px 0;
+  background: var(--br-line);
+}
+
+.br-step-line.done {
+  background: var(--br-green);
+}
+
+.br-step.current .br-step-dot {
+  border-color: var(--br-amber);
+  background: rgba(245, 177, 61, 0.15);
+  color: var(--br-amber);
+  box-shadow: 0 0 12px rgba(245, 177, 61, 0.45);
+}
+
+.br-step.current .br-step-name {
+  color: var(--br-text);
+  font-weight: bold;
+}
+
+.br-step.ok .br-step-dot {
+  border-color: var(--br-green);
+  background: var(--br-green);
+  color: #06210f;
+}
+
+.br-step.failed .br-step-dot {
+  border-color: var(--br-red);
+  color: var(--br-red);
+}
+
+.br-step.skipped .br-step-dot {
+  border-style: dashed;
+  border-color: var(--br-grey);
+}
+
+/* the step itself */
+
+.br-setup-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  margin-top: 26px;
+  overflow-y: auto;
+}
+
+/* During the setup's steps the instruction sits centred in the page (auto margins, so a long
+   results list still scrolls from the top). */
+.br-setup.stepping .br-setup-inner {
+  margin: auto 0;
+  text-align: center;
+}
+
+.br-setup.stepping .br-setup-list {
+  text-align: left;
+}
+
+.br-phase {
+  display: inline-block;
+  padding: 5px 12px;
+  border-radius: 14px;
+  background: rgba(245, 177, 61, 0.15);
+  color: var(--br-amber);
+  font-size: 13px;
+  font-weight: bold;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.phase-replay .br-phase,
+.phase-hold .br-phase {
+  background: rgba(74, 168, 255, 0.15);
+  color: var(--br-blue);
+  animation: br-pulse 1.4s ease-in-out infinite;
+}
+
+.phase-ask .br-phase,
+.phase-done .br-phase {
+  background: rgba(79, 209, 127, 0.15);
+  color: var(--br-green);
+}
+
+.phase-retry .br-phase {
+  background: rgba(255, 107, 107, 0.15);
+  color: var(--br-red);
+}
+
+@keyframes br-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
 .br-setup-prompt {
-  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-top: 14px;
+  font-size: 28px;
+  font-weight: bold;
+  line-height: 1.25;
+}
+
+.br-setup.stepping .br-setup-prompt {
+  align-items: center;
+  margin-top: 18px;
+  font-size: 32px;
+}
+
+/* "Watch the spoilers" and the question after it share a two-line box, so the rows under them
+   stay put when the question (often two lines) comes up. */
+.br-setup.stepping.phase-replay .br-setup-prompt,
+.br-setup.stepping.phase-hold .br-setup-prompt,
+.br-setup.stepping.phase-ask .br-setup-prompt {
+  justify-content: center;
+  min-height: 2.5em;
+}
+
+/* the main text slides in when it changes */
+.br-enter {
+  animation: br-enter 0.3s ease-out;
+}
+
+@keyframes br-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* the methods tried while replaying, one row each */
+.br-setup-attempts {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 280px;  /* as wide as the longest row, so changing rows don't shift it sideways */
+  margin-top: 28px;
+  font-size: 18px;
+  text-align: left;
+}
+
+.br-attempt {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 0;
+  color: var(--br-muted);
+}
+
+.br-attempt.current {
+  color: var(--br-text);
+  font-weight: bold;
+}
+
+/* a method still to come: takes its row's space, so the text above doesn't move */
+.br-attempt.reserved {
+  visibility: hidden;
+}
+
+.br-attempt-mark {
+  position: relative;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+}
+
+/* failed: a red cross */
+.br-attempt.failed .br-attempt-mark {
+  background: rgba(255, 107, 107, 0.16);
+}
+
+.br-attempt.failed .br-attempt-mark::before,
+.br-attempt.failed .br-attempt-mark::after {
+  content: "";
+  position: absolute;
+  top: 10px;
+  left: 5px;
+  width: 12px;
+  height: 2px;
+  background: var(--br-red);
+  transform: rotate(45deg);
+}
+
+.br-attempt.failed .br-attempt-mark::after {
+  transform: rotate(-45deg);
+}
+
+/* current: a pulsing ring (blue while replaying, green when it passed the check) */
+.br-attempt.current .br-attempt-mark {
+  border: 3px solid var(--br-blue);
+  animation: br-pulse 1.4s ease-in-out infinite;
+}
+
+.phase-ask .br-attempt.current .br-attempt-mark {
+  border-color: var(--br-green);
+  animation: none;
+}
+
+/* the tick for a done instruction: pops in, then the check draws */
+/* Under the instruction. Its space is kept while hidden, so the text doesn't jump when it pops in. */
+.br-tick {
+  display: none;
+  position: relative;
+  flex: 0 0 auto;
+  width: 56px;
+  height: 56px;
+  margin-top: 22px;
+  border-radius: 50%;
+  background: var(--br-green);
+  box-shadow: 0 0 18px rgba(79, 209, 127, 0.55);
+}
+
+.br-setup.stepping.phase-prepare .br-tick,
+.br-setup.stepping.phase-takeoff .br-tick,
+.br-setup.stepping.phase-user .br-tick {
+  display: block;
+  visibility: hidden;
+}
+
+.br-setup.stepping .br-tick.on {
+  display: block;
+  visibility: visible;
+  animation: br-tick-pop 0.35s ease-out;
+}
+
+.br-tick::after {
+  content: "";
+  position: absolute;
+  top: 11px;
+  left: 20px;
+  width: 13px;
+  height: 25px;
+  border: solid #06210f;
+  border-width: 0 5px 5px 0;
+  transform: rotate(45deg);
+}
+
+.br-tick.on::after {
+  animation: br-tick-draw 0.3s 0.18s ease-out both;
+}
+
+@keyframes br-tick-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.2);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes br-tick-draw {
+  0% {
+    opacity: 0;
+    transform: rotate(45deg) scale(0.2);
+  }
+  100% {
+    opacity: 1;
+    transform: rotate(45deg) scale(1);
+  }
+}
+
+.br-setup-detail {
+  margin-top: 12px;
+  color: var(--br-muted);
+  font-size: 17px;
+  line-height: 1.4;
+}
+
+.br-setup-note {
+  margin-top: 18px;
+  padding: 10px 14px;
+  border-left: 3px solid var(--br-amber);
+  border-radius: 4px;
+  background: var(--br-surface-2);
   font-size: 15px;
   line-height: 1.35;
 }
 
-.br-setup-detail {
-  margin-top: 4px;
-  color: var(--br-muted);
-  font-size: 12px;
+.br-setup-list {
+  margin-top: 20px;
 }
 
-.br-setup-note {
-  margin-top: 6px;
-  padding: 4px 8px;
-  border-radius: 4px;
-  background: var(--br-surface-2);
-  font-size: 12px;
+/* the offer's outline */
+
+.br-outline {
+  display: flex;
+  gap: 14px;
+  margin-bottom: 16px;
 }
+
+.br-outline-title {
+  display: block;
+  font-size: 17px;
+  font-weight: bold;
+}
+
+.br-outline-text {
+  display: block;
+  margin-top: 4px;
+  color: var(--br-muted);
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+/* the "get ready" checklist */
+
+.br-check {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+  color: var(--br-muted);
+  font-size: 18px;
+}
+
+.br-check.ok {
+  color: var(--br-text);
+}
+
+.br-check-box {
+  position: relative;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border: 2px solid var(--br-line);
+  border-radius: 50%;
+}
+
+.br-check.ok .br-check-box {
+  border-color: var(--br-green);
+  background: var(--br-green);
+}
+
+.br-check.ok .br-check-box::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  left: 9px;
+  width: 7px;
+  height: 13px;
+  border: solid #06210f;
+  border-width: 0 3px 3px 0;
+  transform: rotate(45deg);
+}
+
+/* the finished setup's results */
+
+.br-result {
+  margin-bottom: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--br-line);
+  border-radius: 6px;
+  background: var(--br-surface-2);
+}
+
+.br-result-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 17px;
+}
+
+.br-result-name {
+  font-weight: bold;
+}
+
+.br-result.ok .br-result-state {
+  color: var(--br-green);
+}
+
+.br-result.failed .br-result-state {
+  color: var(--br-red);
+}
+
+.br-result.skipped .br-result-state,
+.br-result.pending .br-result-state {
+  color: var(--br-muted);
+}
+
+.br-result-method {
+  margin-top: 4px;
+  color: var(--br-muted);
+  font-size: 13px;
+}
+
+/* answers */
 
 .br-setup-btns {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 10px;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+/* During the steps the big buttons' row keeps its space even when there are none (while you move a
+   control, while it replays), so the page above doesn't shift when Yes / No appear. */
+.br-setup.stepping .br-setup-btns {
+  min-height: 54px;
+}
+
+.br-setup.stepping .br-setup-btns.hidden {
+  display: flex !important;
+  visibility: hidden;
+}
+
+.br-btn.br-big {
+  flex: 1 1 auto;
+  min-width: 120px;
+  padding: 14px 18px;
+  border-radius: 6px;
+  font-size: 18px;
+  font-weight: bold;
+}
+
+.br-btn.br-big.br-primary {
+  border-color: var(--br-blue);
+  background: var(--br-blue);
+  color: #04121f;
+}
+
+.br-btn.br-big.br-primary:hover {
+  border-color: #8cc8ff;
+  background: #6bb8ff;
+}
+
+.br-setup-minor {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 22px;
+  margin-top: 12px;
+}
+
+.br-btn.br-link {
+  padding: 4px 6px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--br-muted);
+  font-size: 14px;
+  text-decoration: underline;
+}
+
+.br-btn.br-link:hover {
+  border-color: transparent;
+  color: var(--br-text);
 }
 
 /* ---- buttons */

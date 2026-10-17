@@ -64,9 +64,9 @@ Recording pauses while the sim is paused, in slew, in the menus, during the sim'
 
 Aircraft differ in how their controls can be driven. Many 2024 aircraft keep their levers in their own input events or L:vars and overwrite the simvars playback would otherwise write. The setup finds out, once per aircraft, what actually works:
 
-1. **The offer.** On the runway with the engines running, an aircraft without a profile gets a card in the panel: **Start**, **Later** (until the next flight) or **Never for this aircraft**. **Set up** / **Redo** under the status line starts it any time, and **Reset** forgets the aircraft's profile.
+1. **The offer.** For an aircraft without a profile the panel always shows the setup. Until you're on a runway with the engines running it says so, with a checklist (parking brake set, on a runway, engines running) that ticks off as you get there; then it offers **Start setup**. Either way you can pick **Later** (until the next flight) or **Never for this aircraft**. While the setup is offered or running it fills the whole panel, with the steps across the top. **Set up** / **Redo** under the status line starts it any time, and **Reset** forgets the aircraft's profile.
 2. **Each control, in turn:** spoilers, flaps and throttle on the ground (throttle needs the parking brake set), then the gear after takeoff. Controls the aircraft doesn't have are skipped.
-   - **You move it:** "Deploy the spoilers fully, then retract them", "Advance the throttle to full, then back to idle", and so on. Meanwhile every input event and L:var the aircraft has is watched, to find the ones that moved with the control, whatever they're called.
+   - **You move it,** one instruction at a time: "Deploy the spoilers", then "Retract the spoilers"; "Advance the throttle to full", "Bring the throttle back to idle", "Wait for the engines to spool down". Each gets a green tick once it's done. Meanwhile every input event and L:var the aircraft has is watched, to find the ones that moved with the control, whatever they're called.
    - **It replays your movement**, with each candidate method in turn: the aircraft's own input event preset (the cockpit's path), the legacy key events, the simvars, the L:vars it found. Hands off the controls meanwhile.
    - **It checks the result automatically:** did the spoilers, flap surfaces, gear or N1 (RPM on pistons) move at least 60% as far as when you did it, and come back? Methods that fail move straight on to the next one.
    - **It asks you:** "Did the engines spool up and back down?" **Yes** keeps that method, **No** tries the next, **Watch again** replays it once more, **Skip** leaves the control as it is without a profile.
@@ -185,7 +185,7 @@ None of these could be verified without running the sim. Each is covered by a st
   - **Simvars** are written with `fsVarsAVarSet`, with the index (`:1`) passed as a parameter.
   - **L:var channels** (`lv_*`) are only recorded on aircraft whose profile chose an L:var.
   - **Readings the checks use:** `TURB ENG N1`, `GENERAL ENG RPM`, `SPOILERS LEFT POSITION`, `ENGINE TYPE`, `BRAKE PARKING POSITION`, `ON ANY RUNWAY`, `GENERAL ENG COMBUSTION`, `IS GEAR RETRACTABLE`, `SPOILER AVAILABLE` and `FLAPS NUM HANDLE POSITIONS`. N1, RPM and spoiler position are also recorded in clips (about 0.6 MB more per 5 minutes).
-  - **Parking brake:** if the aircraft's doesn't set the simvar, the throttle step waits on "Set the parking brake first". **Continue anyway** carries on.
+  - **Parking brake:** if the aircraft's doesn't set the simvar, the throttle step waits on "Set the parking brake". **Continue anyway** carries on.
 
 ## Future work (designed for, not built)
 

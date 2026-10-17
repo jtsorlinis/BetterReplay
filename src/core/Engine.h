@@ -118,16 +118,19 @@ public:
     bool playbackActive() const { return playbackActive_; }
     const PlaybackController& playback() const { return playback_; }
 
-    // Control setup (ControlSetup.h). Offered on the runway, with the engines running, for an
-    // aircraft without a profile; "later" hides the offer until the next flight, "never" for
-    // this aircraft; "reset" forgets its profile.
+    // Control setup (ControlSetup.h). Offered for every aircraft without a profile: it can start
+    // once on a runway with the engines running and the parking brake set. "later" hides the offer until the next
+    // flight, "never" for this aircraft; "reset" forgets its profile.
     bool setupStart(std::string& error);
     bool setupAnswer(const std::string& answer, std::string& error);
     bool setupLater(std::string& error);
     bool setupNever(std::string& error);
     bool setupReset(std::string& error);
     bool setupActive() const { return setup_.active(); }
-    const char* setupOffer() const;  // "new", "gear" or ""
+    // "new" (ready to start), "wait" (no profile yet, but not on a runway with the engines running
+    // and the parking brake set), "gear" (only the gear left, and airborne) or "".
+    const char* setupOffer() const;
+    bool readyForSetup() const;
     const ProfileStore& profiles() const { return profiles_; }
 
     // ---- status

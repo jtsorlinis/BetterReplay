@@ -194,13 +194,16 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 
 ## 12. Control setup
 
-Use an aircraft without a profile; the A320neo V2 is the interesting one. Line up on a runway with the engines running.
+Use an aircraft without a profile; the A320neo V2 is the interesting one. Start at the gate.
 
-- [ ] Open the panel. **Expect** the card *Set up replay controls for this aircraft?* with **Start**, **Later** and **Never for this aircraft**. Under the status: *Replay controls: not set up for this aircraft*.
-  - **Later** hides the card until the next flight. **Set up** under the status still starts it.
-- [ ] Click **Start**. **Expect** `control setup started on the ground: spoilers, flaps, throttle, gear (…)`. For each step, expect `setup scan: N input event(s), K of them readable, and M L:var(s)`.
+- [ ] Open the panel. **Expect** the whole panel to show *Get ready: Set up replay controls for this aircraft*, with a checklist: *Parking brake set*, *On a runway*, *Engines running*. Start the engines, taxi onto the runway and set the parking brake; each item should tick as it becomes true.
+  - If *Parking brake set* doesn't tick with the brake set, the aircraft's brake isn't the `BRAKE PARKING POSITION` simvar: note the aircraft. **Later**, then **Set up** under the status, starts the setup anyway.
+  - If *On a runway* never ticks on a runway, note the airport and runway: `ON ANY RUNWAY` isn't set there. **Later**, then **Set up** under the status, starts the setup anyway.
+- [ ] Once all three are ticked, **expect** the page to change to *Set up replay controls for this aircraft?* with **Start setup**, **Later** and **Never for this aircraft**.
+  - **Later** goes back to the normal panel until the next flight. The line under the status then says *Replay controls: not set up for this aircraft*, and **Set up** there still starts it.
+- [ ] Click **Start setup**. The steps show across the top, the current one highlighted. **Expect** `control setup started on the ground: spoilers, flaps, throttle, gear (…)`. For each step, expect `setup scan: N input event(s), K of them readable, and M L:var(s)`.
   - **Note K.** If it's 0, input events can't be read this way, and only L:vars can be found by their movement.
-- [ ] **Spoilers:** deploy them fully, retract them, and wait. **Expect:**
+- [ ] **Spoilers:** the panel says *Deploy the spoilers*; deploy them fully and hold. A green tick appears, then *Retract the spoilers*; retract them and wait. Note whether each tick comes at the right moment. **Expect:**
   ```
   control setup: the spoilers started moving (…)
   control setup:   input event … moved with it (score …, peak …)      (and/or L:var …)
@@ -212,16 +215,16 @@ Use an aircraft without a profile; the A320neo V2 is the interesting one. Line u
   - When one passes, the panel asks *Did the spoilers come up and go back down?* Watch the spoilers (the external view helps), then answer. **Watch again** replays it once more.
   - **Copy the `moved with it` lines, and note which method you said yes to.** On the A320neo V2 this step is the most likely to find something new, since it has no speed brake input event.
 - [ ] **Flaps:** one notch, wait for them to extend, retract them, and wait. Expect the same pattern. Going by your earlier test, `HANDLING_FLAPS` with its value as read should pass.
-- [ ] **Throttle:** set the parking brake first (the card says so if it isn't set). Full, then idle, and wait for the engines to spool down. Each method can take up to half a minute while the engines spool.
+- [ ] **Throttle:** set the parking brake first (the panel says so if it isn't set). Full, then idle, and wait for the engines to spool down. Each method can take up to half a minute while the engines spool.
   - If the aircraft starts to roll, the replay stops (`the aircraft started to roll …`), the throttle goes back to idle, and it asks anyway.
-  - If the card keeps saying *Set the parking brake first* although the brake is set, the aircraft's brake isn't the simvar. Click **Continue anyway** and note it.
-- [ ] **Gear:** the card says *Take off…*. Take off, then raise the gear and lower it again, staying slow. The replay raises and lowers it once more. Raise it again afterwards.
-- [ ] **Done:** the card lists each control's result. Click **Close**, then check:
+  - If the panel keeps saying *Set the parking brake* although the brake is set, the aircraft's brake isn't the simvar. Click **Continue anyway** and note it.
+- [ ] **Gear:** the panel says *Take off*. Take off, then follow *Raise the gear* and *Lower the gear*, staying slow. The replay raises and lowers it once more. Raise it again afterwards.
+- [ ] **Done:** the panel lists each control's result and method. Click **Done**, then check:
   - the line under the status (hover it to see the methods)
   - `aircraft.json` in the work folder
 - [ ] Fly a pattern, land, then play the landing clip. **Expect** `playback: spoilers via … (control profile)`, and the same for each set-up control. Note whether each control follows the clip now.
   - Clips from before the setup may log `… profile method … doesn't fit this clip …; using the defaults` instead. That's expected.
-- [ ] Restart the flight: no card, since the profile is known. **Reset** (click twice) brings the card back.
+- [ ] Restart the flight: no setup screen, since the profile is known. **Reset** (click twice) brings it back.
 
 ## 13. Library management
 
