@@ -26,11 +26,13 @@ enum class PlayMode : uint8_t {
     Event = 2,  // sent as a key event when the value changes, and again after every play/seek/stop
     Snap = 3,   // written only right after play/seek/stop (so the aircraft starts in the recorded
                 // state), then left to the sim to animate
+    Input = 4,  // an aircraft input event (B: var, e.g. a 2024 aircraft's own throttle lever),
+                // recorded from it and set back with SimConnect_SetInputEvent
 };
 
 struct ChannelDef {
     const char* key;        // stable id stored in clip files
-    const char* simvar;     // SimConnect simulation variable
+    const char* simvar;     // SimConnect simulation variable (nullptr for PlayMode::Input)
     const char* units;      // SimConnect units string
     Storage storage;        // on-disk representation
     Interp interp;
@@ -41,6 +43,13 @@ struct ChannelDef {
     const char* playEventOff = nullptr;  // event sent when the state turns off (e.g. GEAR_UP)
     uint8_t engine = 0;                  // 1-based engine index for per-engine channels; skipped on
                                          // aircraft with fewer engines (0 = not engine-specific)
+    // PlayMode::Input: the input event's name, or several alternatives separated by '|'. Only
+    // aircraft that have one of them record and replay the channel.
+    const char* inputEvent = nullptr;
+    // PlayMode::Input: the Set channels this input event drives, as a range [first, first+count).
+    // While it's replayed they aren't written, since the aircraft derives them from the input.
+    int16_t coversFirst = -1;
+    uint8_t coversCount = 0;
 };
 
 enum Channel : uint16_t {
@@ -93,6 +102,13 @@ enum Channel : uint16_t {
     kReverserNozzle2,
     kReverserNozzle3,
     kReverserNozzle4,
+    kInputThrottle1,
+    kInputThrottle2,
+    kInputThrottle3,
+    kInputThrottle4,
+    kInputGear,
+    kInputFlaps,
+    kInputSpeedBrakes,
     kChannelCount
 };
 

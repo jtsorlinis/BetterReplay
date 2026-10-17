@@ -104,6 +104,7 @@ Each row has a stable key, simvar, units, storage (`f64|f32|u8`), interp (`linea
 | l_nav/beacon/strobe/land/taxi | LIGHT NAV / BEACON / STROBE / LANDING / TAXI (`bool`) u8 | event: `NAV_LIGHTS_SET`, `BEACON_LIGHTS_SET`, `STROBES_SET`, `LANDING_LIGHTS_SET`, `TAXI_LIGHTS_SET` on change |
 | rev_1..rev_4 | GENERAL ENG REVERSE THRUST ENGAGED:1..4 (`bool`, not settable) u8 | event: `SET_THROTTLEn_REVERSE_THRUST_ON` / `_OFF` on change. The reverse amount is the negative `thr_N`; in axis-event mode it's sent as the axis once the aircraft reports reverse engaged, scaled to `THROTTLE LOWER LIMIT`. |
 | rnoz_1..rnoz_4 | TURB ENG REVERSE NOZZLE PERCENT:1..4 (`percent`, not settable) | none (analysis) |
+| ie_thr_1..4, ie_gear, ie_flaps, ie_spdbrk | Aircraft input events `ENGINE_THROTTLE_n`, `LANDING_GEAR_GEAR`, `HANDLING_FLAPS`, `HANDLING_SPEED_BRAKES` (alternatives allowed), resolved by name after each flight load. Recorded from `SubscribeInputEvent` plus a 2 Hz `GetInputEvent` poll. NaN on aircraft without them, so such clips don't replay them. | input: `SetInputEvent` on change, after jumps and every 15 frames; the simvars each one drives (thr_n, flaps, spoil_h) aren't written meanwhile |
 
 Event channels are also resent after every play, seek, replay-from-the-end and stop, so the aircraft can't stay out of step with the clip (e.g. gear left up by the end of the previous run).
 
@@ -145,7 +146,7 @@ When playing, channels are matched by **key**. Unknown keys are ignored, and cha
 
 ## Status (2026-10-17)
 
-Milestones 1–7 are implemented and committed. The core has 82 passing unit tests, the module builds with the SDK clang, and the panel has been exercised in a browser harness against a fake module. Still pending: in-sim verification ([MANUAL_TEST.md](MANUAL_TEST.md)) and compiling the panel `.spb` (`build.ps1 -Package`, which needs the sim's package builder).
+Milestones 1–7 are implemented and committed. The core has 84 passing unit tests, the module builds with the SDK clang, and the panel has been exercised in a browser harness against a fake module. Still pending: in-sim verification ([MANUAL_TEST.md](MANUAL_TEST.md)) and compiling the panel `.spb` (`build.ps1 -Package`, which needs the sim's package builder).
 
 ## 8. Decisions (answered: defaults approved)
 

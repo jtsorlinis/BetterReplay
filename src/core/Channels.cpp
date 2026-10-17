@@ -16,6 +16,7 @@ constexpr PlayMode NONE = PlayMode::None;
 constexpr PlayMode SET = PlayMode::Set;
 constexpr PlayMode EVT = PlayMode::Event;
 constexpr PlayMode SNAP = PlayMode::Snap;
+constexpr PlayMode INPUT = PlayMode::Input;
 }  // namespace
 
 // Names, units and settable flags verified against the MSFS 2024 SimVar documentation.
@@ -91,6 +92,18 @@ const ChannelDef kChannels[kChannelCount] = {
     {"rnoz_2", "TURB ENG REVERSE NOZZLE PERCENT:2", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 2},
     {"rnoz_3", "TURB ENG REVERSE NOZZLE PERCENT:3", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 3},
     {"rnoz_4", "TURB ENG REVERSE NOZZLE PERCENT:4", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 4},
+    // 2024 aircraft built on the Asobo templates keep their cockpit controls in input events and
+    // overwrite the simvars above from them (the A320neo V2 ignores the throttle, gear, flap and
+    // spoiler simvars and gear events). Their values are recorded as-is and set back, so they're
+    // exact whatever their units. Names from the aircraft's input event list (logged at load).
+    {"ie_thr_1", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 1, "ENGINE_THROTTLE_1", kThrottle1, 1},
+    {"ie_thr_2", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 2, "ENGINE_THROTTLE_2", kThrottle2, 1},
+    {"ie_thr_3", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 3, "ENGINE_THROTTLE_3", kThrottle3, 1},
+    {"ie_thr_4", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 4, "ENGINE_THROTTLE_4", kThrottle4, 1},
+    {"ie_gear", nullptr, nullptr, F32, STEP, INPUT, nullptr, nullptr, nullptr, 0, "LANDING_GEAR_GEAR"},
+    {"ie_flaps", nullptr, nullptr, F32, STEP, INPUT, nullptr, nullptr, nullptr, 0, "HANDLING_FLAPS", kFlapsLeft, 3},
+    {"ie_spdbrk", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 0,
+     "HANDLING_SPEED_BRAKES|HANDLING_SPOILERS|HANDLING_SPEEDBRAKES", kSpoilersHandle, 1},
 };
 
 int findChannel(const char* key) {

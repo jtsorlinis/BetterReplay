@@ -36,12 +36,17 @@ private:
         EVT_CHANNEL_FIRST = 200,       // + channel index, for PlayMode::Event channels
         EVT_CHANNEL_ON_FIRST = 300,    // + channel index, ChannelDef::playEventOn
         EVT_CHANNEL_OFF_FIRST = 400,   // + channel index, ChannelDef::playEventOff
-        EVT_MASK_FIRST = 500,          // + index into kMaskedInputEvents; the first four
-                                       // (THROTTLE1..4_AXIS_SET_EX1) also drive the levers
+        EVT_MASK_FIRST = 500,          // + index into kMaskedInputEvents
+        EVT_THROTTLE_AXIS_FIRST = 600, // + engine - 1: THROTTLEn_AXIS_SET_EX1, to drive the levers
     };
     enum Group : DWORD { GROUP_INPUT_MASK = 1 };
     enum Freeze { kFreezeLatLon, kFreezeAlt, kFreezeAtt, kFreezeCount };
-    enum Request : DWORD { REQ_RECORD = 1, REQ_TITLE = 2, REQ_INPUT_EVENTS = 3 };
+    enum Request : DWORD {
+        REQ_RECORD = 1,
+        REQ_TITLE = 2,
+        REQ_INPUT_EVENTS = 3,
+        REQ_INPUT_VALUE_FIRST = 100,  // + channel index: GetInputEvent for an input event channel
+    };
     enum SysEvent : DWORD {
         EVT_FLIGHT_LOADED = 1,
         EVT_SIM,
@@ -91,6 +96,16 @@ private:
     // Diagnostics: do the aircraft's lights/reversers follow the states playback sends?
     void trackEventChannels(const Frame& frame, bool jumped);
     void checkEventChannels();
+    // Input event channels: resolve them against the aircraft's list, replay and check them.
+    void resetInputEvents();
+    void resolveInputEvents();
+    void pollInputEvents();
+    void sendInputEvents(const Frame& frame, bool force);
+    void checkInputEvents();
+    // Set channels the aircraft keeps overriding (flaps, spoilers, surfaces) are dropped for the
+    // rest of the playback, so the two don't fight (visible flicker).
+    void yieldChannel(int channel, int overriddenPct);
+    void rebuildPlaybackDefinition();
     void onInputEvents(const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS* list, DWORD size);
     void onAircraftChanged();
     double liveGearExtension() const;
@@ -113,8 +128,31 @@ private:
     bool simReplay_ = false;
     bool rtc_ = false;
 
+    // recording: DEF_RECORD slot -> channel (channels with a simvar)
+    int recordChannels_[kChannelCount] = {};
+    int recordCount_ = 0;
+
+    // Input event channels (PlayMode::Input): hash on the current aircraft (0 = it doesn't have
+    // one), latest value from the subscription, and playback state.
+    uint64_t ieHash_[kChannelCount] = {};
+    char ieName_[kChannelCount][64] = {};
+    double ieValue_[kChannelCount] = {};
+    bool ieActive_[kChannelCount] = {};  // replayed in this playback
+    double ieSent_[kChannelCount] = {};
+    int ieSinceSend_[kChannelCount] = {};
+    int ieSettled_[kChannelCount] = {};  // frames since the sent value last changed
+    int ieChecked_[kChannelCount] = {};
+    int ieOff_[kChannelCount] = {};
+    bool ieNotified_[kChannelCount] = {};  // a subscription message has arrived (logged once)
+    int iePollFrames_ = 0;
+    bool firstInputSet_ = false;
+    static constexpr int kInputResendFrames = 15;
+
     // playback
     ChannelMask playPresent_;                  // channels the playing clip has
+    ChannelMask playSkip_;                     // Set channels not written (covered or yielded)
+    int windowFrames_ = 0;                     // rolling override window (yield/throttle)
+    int windowOverrides_[kChannelCount] = {};
     int playChannels_[kChannelCount] = {};     // PlayMode::Set channels written every frame
     int playChannelCount_ = 0;
     int restoreChannels_[kChannelCount] = {};  // PlayMode::Set channels (incl. body velocities)
@@ -133,7 +171,9 @@ private:
     double snapBuffer_[kChannelCount] = {};
     bool snapDefDefined_ = false;
     int snapFramesLeft_ = 0;
-    bool snapCheckPending_ = false;
+    static constexpr int kSnapCheckFrames = 30;
+    int snapCheckFrames_ = 0;  // countdown to checkSnap()
+    bool snapRejected_ = false;  // the aircraft moved snapped values straight back; learned per aircraft
     Frame restoreSnap_;  // snapshot to snap back to after a restore
     // Hardware throttle input is masked during playback so the physical lever can't fight it.
     bool masking_ = false;
@@ -142,12 +182,12 @@ private:
     // If the aircraft keeps overriding the simvar (its own throttle handling, e.g. 2024 input
     // events), playback switches to sending THROTTLEn_AXIS_SET_EX1, which the aircraft handles
     // like hardware input. Learned per aircraft.
-    static constexpr int kThrottleWindowFrames = 30;  // overridden in half of these: switch
+    static constexpr int kOverrideWindowFrames = 30;  // overridden in half of these: switch/yield
     static constexpr int kThrottleResendFrames = 15;  // re-assert an unchanged lever this often
     bool clipHasThrottle_ = false;
     bool throttleViaEvents_ = false;
-    int throttleWindowFrames_ = 0;
-    int throttleWindowOverrides_ = 0;
+    bool throttleViaInput_ = false;  // this playback drives the levers through input events
+    int yieldedCount_ = 0;
     int32_t throttleSent_[4] = {};
     int throttleSinceSend_[4] = {};
     double throttleTarget_[4] = {};

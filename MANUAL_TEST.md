@@ -27,7 +27,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   [BetterReplay] BetterReplay 0.1.0, debug logging on
   [BetterReplay] no index found; starting a new library        (first run only)
   [BetterReplay] library: 0 clip(s)
-  [BetterReplay] SimConnect ready: 49 channels + 8 extras per frame
+  [BetterReplay] SimConnect ready: 49 simvar channels + 8 extras per frame, 7 input event channels
   [BetterReplay] CommBus: listening on BetterReplay.Cmd
   [BetterReplay] connected to … (SimConnect …)
   ```
@@ -53,6 +53,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   - lat/lon are your real position in **degrees**
   - AGL is about 0
   - on ground = 1
+- [ ] About 2 s after the flight loads: `input event channels: recording ie_thr_1, ie_thr_2, ie_gear…; not on this aircraft: …`. That says which of the aircraft's own controls get recorded.
 - [ ] **No clip is created by the spawn**: no `saved` line.
 - [ ] After a minute: `status: recording, phase ground, buffer 60 s, …` (the heartbeat repeats every 60 s).
 
@@ -142,8 +143,9 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   DEBUG lat/lon freeze on confirmed        (Debug build; x3)
   DEBUG playback: setting gear_c 1.00, gear_l 1.00, gear_r 1.00     (Debug build)
   ```
-  - The last part of the second line says how the throttle is driven:
-    - `throttle via simvars, hardware throttle input blocked`: the default.
+  - The second line also says how many of the aircraft's input events are replayed, and how the throttle is driven:
+    - `throttle via the aircraft's input events`: the aircraft has `ENGINE_THROTTLE_n` and the clip recorded them. At the end, expect `input events followed the clip: ENGINE_THROTTLE_1, …`.
+    - `throttle via simvars, hardware throttle input blocked`: the default for other aircraft.
     - `throttle via axis events (this aircraft overrides the lever simvar)`: this aircraft already showed it handles its levers itself (see below).
     - `no throttle data in this clip …`: the clip is older than throttle support. The levers stay with your hardware; record a new clip.
   - If you see `freeze still off after SET; sending TOGGLE`, note it. Note whether it then worked.

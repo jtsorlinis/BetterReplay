@@ -13,6 +13,10 @@ namespace br {
 // Returns true if the channel was rewritten.
 bool deriveGearCommand(Clip& clip);
 
+// Clears `present` for channels the clip has but never recorded a value for (all NaN), e.g. an
+// input event the recording aircraft didn't have, so playback leaves them alone.
+void dropEmptyChannels(Clip& clip);
+
 class PlaybackController {
 public:
     static constexpr double kMinSpeed = 0.25;

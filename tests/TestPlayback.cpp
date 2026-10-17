@@ -97,6 +97,12 @@ double firstTimeHandleIs(const Clip& c, double state) {
     return -1.0;
 }
 
+int handleChanges(const Clip& c) {
+    int n = 0;
+    for (size_t i = 1; i < c.frames.size(); ++i) n += c.frames[i].v[kGearHandle] != c.frames[i - 1].v[kGearHandle];
+    return n;
+}
+
 }  // namespace
 
 TEST(Playback_GearCommandFollowsPositionsNotLaggingHandle) {
@@ -105,6 +111,21 @@ TEST(Playback_GearCommandFollowsPositionsNotLaggingHandle) {
     CHECK_NEAR(firstTimeHandleIs(c, 0.0), 10.0 + 0.03 * 8.0, 2.0 / 30.0);  // as soon as it moves
     CHECK_NEAR(c.frames.front().v[kGearHandle], 1.0, 0);
     CHECK_NEAR(c.frames.back().v[kGearHandle], 0.0, 0);
+    CHECK_EQ(handleChanges(c), 1);  // no flip-flopping while the gear is in mid-travel
+}
+
+TEST(Playback_GearCommandFollowsReversal) {
+    // Gear raised, then lowered again halfway up: up, then down, nothing in between.
+    Clip c = makeClip(20.0);
+    for (Frame& f : c.frames) {
+        const double ext = f.t < 2.0 ? 1.0 : (f.t < 6.0 ? 1.0 - (f.t - 2.0) / 8.0 : 0.5 + (f.t - 6.0) / 8.0);
+        f.v[kGearCenter] = f.v[kGearLeft] = f.v[kGearRight] = ext > 1.0 ? 1.0 : ext;
+        f.v[kGearHandle] = 1.0;
+    }
+    REQUIRE(deriveGearCommand(c));
+    CHECK_EQ(handleChanges(c), 2);
+    CHECK_NEAR(firstTimeHandleIs(c, 0.0), 2.0 + 0.03 * 8.0, 2.0 / 30.0);
+    CHECK_NEAR(c.frames.back().v[kGearHandle], 1.0, 0);
 }
 
 TEST(Playback_GearCommandForExtension) {
@@ -128,6 +149,18 @@ TEST(Playback_FixedGearKeepsRecordedHandle) {
     Clip none = makeClip(10.0);
     none.present.reset(kGearCenter).reset(kGearLeft).reset(kGearRight);
     CHECK(!deriveGearCommand(none));
+}
+
+TEST(Playback_ChannelsWithoutValuesAreNotPlayed) {
+    // e.g. an input event the recording aircraft didn't have: in the file, but all NaN.
+    Clip c = makeClip(2.0);
+    for (Frame& f : c.frames) f.v[kInputGear] = NAN;
+    c.frames[5].v[kInputThrottle1] = NAN;  // a gap is fine
+    PlaybackController p;
+    p.load(std::move(c), "a.rpl");
+    CHECK(!p.present().test(kInputGear));
+    CHECK(p.present().test(kInputThrottle1));
+    CHECK(p.present().test(kLat));
 }
 
 TEST(Playback_InterpolatesHeadingThroughNorth) {

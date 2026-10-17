@@ -37,8 +37,8 @@ const char* flowName(DWORD f) {
 }
 
 // Throttle events a hardware lever or keyboard sends (2024 Key Events docs, Throttle section).
-// The first four, in engine order, also drive the levers on aircraft that override the throttle
-// simvar (SimBridge::sendThrottleEvents).
+// The first four, in engine order, are also mapped under EVT_THROTTLE_AXIS_FIRST to drive the
+// levers on aircraft that override the throttle simvar (SimBridge::sendThrottleEvents).
 const char* const kMaskedInputEvents[] = {
     "THROTTLE1_AXIS_SET_EX1", "THROTTLE2_AXIS_SET_EX1", "THROTTLE3_AXIS_SET_EX1", "THROTTLE4_AXIS_SET_EX1",
     "THROTTLE_AXIS_SET_EX1",  "THROTTLE_SET",           "THROTTLE1_SET",          "THROTTLE2_SET",
@@ -49,6 +49,11 @@ const char* const kMaskedInputEvents[] = {
 constexpr size_t kMaskedInputEventCount = sizeof(kMaskedInputEvents) / sizeof(kMaskedInputEvents[0]);
 
 bool isThrottle(int channel) { return channel >= kThrottle1 && channel <= kThrottle4; }
+
+// Set channels playback stops writing when the aircraft keeps overriding them: flaps, spoilers
+// and control surfaces. Position, attitude and velocities are always written (they're frozen or
+// drive the instruments); the throttle has its own fallback.
+bool canYield(int channel) { return channel >= kFlapsLeft && channel <= kRudder; }
 
 double onOff(double v) { return std::isnan(v) ? NAN : (v >= 0.5 ? 1.0 : 0.0); }
 
@@ -86,9 +91,16 @@ bool SimBridge::open() {
         return false;
     }
 
-    // Recording definition: every channel, then the extras, all as FLOAT64.
-    for (const ChannelDef& c : kChannels) {
-        track(SimConnect_AddToDataDefinition(h_, DEF_RECORD, c.simvar, c.units, SIMCONNECT_DATATYPE_FLOAT64), c.simvar);
+    // Recording definition: every simvar channel, then the extras, all as FLOAT64. Input event
+    // channels are filled from their subscriptions instead.
+    recordCount_ = 0;
+    for (int c = 0; c < kChannelCount; ++c) {
+        const ChannelDef& ch = kChannels[c];
+        ieValue_[c] = NAN;
+        if (!ch.simvar) continue;
+        recordChannels_[recordCount_++] = c;
+        track(SimConnect_AddToDataDefinition(h_, DEF_RECORD, ch.simvar, ch.units, SIMCONNECT_DATATYPE_FLOAT64),
+              ch.simvar);
     }
     static const struct {
         const char* simvar;
@@ -113,6 +125,12 @@ bool SimBridge::open() {
     for (size_t i = 0; i < kMaskedInputEventCount; ++i) {
         track(SimConnect_MapClientEventToSimEvent(h_, EVT_MASK_FIRST + static_cast<DWORD>(i), kMaskedInputEvents[i]),
               kMaskedInputEvents[i]);
+    }
+    // The same axis events under their own IDs for driving the levers: transmitting the IDs
+    // that had been in the mask group failed with SimConnect ERROR in the sim.
+    for (DWORD e = 0; e < 4; ++e) {
+        track(SimConnect_MapClientEventToSimEvent(h_, EVT_THROTTLE_AXIS_FIRST + e, kMaskedInputEvents[e]),
+              kMaskedInputEvents[e]);
     }
 
     // Key events used by playback (names verified against the 2024 Key Events docs).
@@ -161,8 +179,8 @@ bool SimBridge::open() {
     hr = SimConnect_CallDispatch(h_, &SimBridge::dispatchThunk, this);
     if (FAILED(hr)) log::error("SimConnect_CallDispatch failed (0x%08lx)", static_cast<unsigned long>(hr));
 
-    log::info("SimConnect ready: %d channels + %d extras per frame", static_cast<int>(kChannelCount),
-              static_cast<int>(kExtraCount));
+    log::info("SimConnect ready: %d simvar channels + %d extras per frame, %d input event channels", recordCount_,
+              static_cast<int>(kExtraCount), static_cast<int>(kChannelCount) - recordCount_);
     return true;
 }
 
@@ -252,6 +270,31 @@ void SimBridge::dispatch(SIMCONNECT_RECV* p, DWORD size) {
         case SIMCONNECT_RECV_ID_ENUMERATE_INPUT_EVENTS:
             onInputEvents(reinterpret_cast<const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS*>(p), size);
             break;
+        case SIMCONNECT_RECV_ID_GET_INPUT_EVENT: {
+            const auto* g = reinterpret_cast<const SIMCONNECT_RECV_GET_INPUT_EVENT*>(p);
+            const DWORD c = g->dwRequestID - REQ_INPUT_VALUE_FIRST;
+            const size_t offset = reinterpret_cast<const uint8_t*>(&g->Value) - reinterpret_cast<const uint8_t*>(g);
+            if (c < static_cast<DWORD>(kChannelCount) && g->eType == SIMCONNECT_INPUT_EVENT_TYPE_DOUBLE &&
+                size >= offset + sizeof(double)) {
+                std::memcpy(&ieValue_[c], reinterpret_cast<const uint8_t*>(g) + offset, sizeof(double));
+            }
+            break;
+        }
+        case SIMCONNECT_RECV_ID_SUBSCRIBE_INPUT_EVENT: {
+            const auto* s = reinterpret_cast<const SIMCONNECT_RECV_SUBSCRIBE_INPUT_EVENT*>(p);
+            const size_t offset = reinterpret_cast<const uint8_t*>(&s->Value) - reinterpret_cast<const uint8_t*>(s);
+            if (s->eType != SIMCONNECT_INPUT_EVENT_TYPE_DOUBLE || size < offset + sizeof(double)) break;
+            for (int c = 0; c < kChannelCount; ++c) {
+                if (ieHash_[c] != 0 && ieHash_[c] == s->Hash) {
+                    std::memcpy(&ieValue_[c], reinterpret_cast<const uint8_t*>(s) + offset, sizeof(double));
+                    if (!ieNotified_[c]) {
+                        ieNotified_[c] = true;
+                        log::debug("input event %s changed to %.4f (subscription works)", ieName_[c], ieValue_[c]);
+                    }
+                }
+            }
+            break;
+        }
         case SIMCONNECT_RECV_ID_QUIT:
             log::info("SimConnect quit");
             break;
@@ -333,46 +376,54 @@ void SimBridge::onFlowEvent(DWORD flow, const char* path) {
 }
 
 void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size) {
-    constexpr size_t kValues = kChannelCount + kExtraCount;
+    const size_t values = static_cast<size_t>(recordCount_) + kExtraCount;
     const size_t offset = payloadOffset(d);
-    if (size < offset + kValues * sizeof(double)) {
+    if (size < offset + values * sizeof(double)) {
         if (!sizeWarned_) {
             sizeWarned_ = true;
             log::error("recording data too small: %lu bytes, expected %zu", static_cast<unsigned long>(size),
-                       offset + kValues * sizeof(double));
+                       offset + values * sizeof(double));
         }
         return;
     }
-    double v[kValues];
-    std::memcpy(v, reinterpret_cast<const uint8_t*>(d) + offset, sizeof(v));
-    for (int c = 0; c < kChannelCount; ++c) input_.raw.v[c] = v[c];
-    input_.simTimeSec = v[kChannelCount + kExSimTime];
-    input_.slewActive = v[kChannelCount + kExSlew] >= 0.5;
-    input_.touchdownNormalVelFps = v[kChannelCount + kExTouchdownNormalVel];
+    double v[kChannelCount + kExtraCount];
+    std::memcpy(v, reinterpret_cast<const uint8_t*>(d) + offset, values * sizeof(double));
+    for (int i = 0; i < recordCount_; ++i) input_.raw.v[recordChannels_[i]] = v[i];
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (kChannels[c].play == PlayMode::Input) input_.raw.v[c] = ieValue_[c];
+    }
+    const double* ex = v + recordCount_;
+    input_.simTimeSec = ex[kExSimTime];
+    input_.slewActive = ex[kExSlew] >= 0.5;
+    input_.touchdownNormalVelFps = ex[kExTouchdownNormalVel];
     input_.fallbackDtSec = pendingDt_;
     pendingDt_ = 0.0f;
-    freezeState_[kFreezeLatLon] = v[kChannelCount + kExFreezeLatLon] >= 0.5;
-    freezeState_[kFreezeAlt] = v[kChannelCount + kExFreezeAlt] >= 0.5;
-    freezeState_[kFreezeAtt] = v[kChannelCount + kExFreezeAtt] >= 0.5;
-    const double engines = v[kChannelCount + kExNumEngines];
+    freezeState_[kFreezeLatLon] = ex[kExFreezeLatLon] >= 0.5;
+    freezeState_[kFreezeAlt] = ex[kExFreezeAlt] >= 0.5;
+    freezeState_[kFreezeAtt] = ex[kExFreezeAtt] >= 0.5;
+    const double engines = ex[kExNumEngines];
     if (std::isfinite(engines) && engines >= 0.0 && engines <= 16.0) numEngines_ = static_cast<int>(engines);
-    throttleLowerLimit_ = v[kChannelCount + kExThrottleLowerLimit];
+    throttleLowerLimit_ = ex[kExThrottleLowerLimit];
     if (freezeCheckFrames_ > 0 && --freezeCheckFrames_ == 0) verifyFreeze();
     if (playChannelCount_ > 0 && haveWritten_) checkOverrides();
     if (playing_ && throttleViaEvents_ && clipHasThrottle_) checkThrottleEvents();
     if (playing_) checkEventChannels();
-    if (snapCheckPending_) checkSnap();
+    if (playing_) checkInputEvents();
+    pollInputEvents();
+    if (snapCheckFrames_ > 0 && --snapCheckFrames_ == 0) checkSnap();
     if (!playing_ && snapFramesLeft_ > 0) writeSnap(restoreSnap_);
     if (restoreWaitFrames_ > 0) checkRestoreGear();
     if (gearCheckFrames_ > 0 && --gearCheckFrames_ == 0) checkGearResponse();
     if (frameCount_ == enumerateAtFrame_) {
         inputEventsLogged_ = 0;
+        resetInputEvents();
         track(SimConnect_EnumerateInputEvents(h_, REQ_INPUT_EVENTS), "EnumerateInputEvents");
     }
 
     if (frameCount_++ == 0) {
+        const double* r = input_.raw.v;
         log::info("first data frame: lat %.5f lon %.5f alt %.0f ft, AGL %.0f ft, on ground %d, sim time %.1f",
-                  v[kLat], v[kLon], v[kAlt], v[kAgl], v[kOnGround] >= 0.5 ? 1 : 0, input_.simTimeSec);
+                  r[kLat], r[kLon], r[kAlt], r[kAgl], r[kOnGround] >= 0.5 ? 1 : 0, input_.simTimeSec);
     }
     engine_.onFrame(input_, utcNowMs());
 }
@@ -472,20 +523,49 @@ void SimBridge::checkOverrides() {
         const double tolerance = 0.02 * (std::fabs(w) > 1.0 ? std::fabs(w) : 1.0);
         if (std::fabs(diff) > tolerance) {
             ++overrideFrames_[c];
-            if (isThrottle(c)) throttleOverridden = true;
+            if (isThrottle(c)) {
+                throttleOverridden = true;
+            } else {
+                ++windowOverrides_[c];
+            }
         }
     }
+    if (throttleOverridden) ++windowOverrides_[kThrottle1];  // any lever counts once per frame
 
-    // If the aircraft keeps overriding the throttle simvar for half a second, it handles the levers
-    // itself, so drive them the way the hardware does. Checked in rolling windows rather than once,
-    // because the override only shows once the clip's lever differs from the aircraft's.
-    if (throttleViaEvents_ || !clipHasThrottle_) return;
-    if (throttleOverridden) ++throttleWindowOverrides_;
-    if (++throttleWindowFrames_ < kThrottleWindowFrames) return;
-    const int pct = throttleWindowOverrides_ * 100 / throttleWindowFrames_;
-    throttleWindowFrames_ = 0;
-    throttleWindowOverrides_ = 0;
-    if (pct >= 50) switchThrottleToEvents(pct);
+    // Checked in rolling half-second windows rather than once, because an override only shows
+    // once the clip's value differs from the aircraft's.
+    if (++windowFrames_ < kOverrideWindowFrames) return;
+    const int frames = windowFrames_;
+    windowFrames_ = 0;
+    int throttlePct = 0;
+    for (int c = 0; c < kChannelCount; ++c) {
+        const int pct = windowOverrides_[c] * 100 / frames;
+        windowOverrides_[c] = 0;
+        if (c == kThrottle1) throttlePct = pct;
+        // Flaps, spoilers and surfaces the aircraft keeps moving itself: stop fighting it.
+        if (canYield(c) && pct >= 50 && !playSkip_.test(static_cast<size_t>(c))) yieldChannel(c, pct);
+    }
+    // If the aircraft keeps overriding the throttle simvar, it handles the levers itself, so
+    // drive them the way the hardware does.
+    if (!throttleViaEvents_ && clipHasThrottle_ && !throttleViaInput_ && throttlePct >= 50) {
+        switchThrottleToEvents(throttlePct);
+    }
+}
+
+void SimBridge::yieldChannel(int channel, int overriddenPct) {
+    log::warn("playback: the aircraft overrode %s (%s) in %d%% of the last %d frames; leaving it to the aircraft "
+              "for the rest of this playback",
+              kChannels[channel].key, kChannels[channel].simvar, overriddenPct, kOverrideWindowFrames);
+    playSkip_.set(static_cast<size_t>(channel));
+    ++yieldedCount_;
+    rebuildPlaybackDefinition();
+}
+
+void SimBridge::rebuildPlaybackDefinition() {
+    const ChannelMask set = playPresent_ & ~playSkip_;
+    playChannelCount_ = buildDefinition(DEF_PLAYBACK, playDefDefined_, PlayMode::Set, &set, playChannels_);
+    firstPlaybackWrite_ = true;
+    haveWritten_ = false;  // the next comparison needs a write with the new layout
 }
 
 void SimBridge::logOverrides() {
@@ -516,6 +596,21 @@ void SimBridge::logOverrides() {
     if (eventsChecked > 0 && eventsOff == 0) {
         log::info("playback: all %d checked light/reverser channels followed the clip", eventsChecked);
     }
+    char followed[256] = {};
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (!ieActive_[c] || ieChecked_[c] < 30) continue;
+        const int pct = ieOff_[c] * 100 / ieChecked_[c];
+        if (pct >= 20) {
+            log::warn("playback: %s (input event %s) didn't hold the clip's value in %d%% of frames (last sent %.4f, "
+                      "aircraft reports %.4f)",
+                      kChannels[c].key, ieName_[c], pct, ieSent_[c], ieValue_[c]);
+        } else {
+            const size_t used = std::strlen(followed);
+            std::snprintf(followed + used, sizeof(followed) - used, "%s%s", used ? ", " : "", ieName_[c]);
+        }
+    }
+    if (followed[0]) log::info("playback: input events followed the clip: %s", followed);
+    if (yieldedCount_ > 0) log::info("playback: %d channel(s) were left to the aircraft (see above)", yieldedCount_);
     if (throttleViaEvents_ && clipHasThrottle_ && throttleCheckedFrames_ >= 30) {
         const int pct = throttleOffFrames_ * 100 / throttleCheckedFrames_;
         if (pct >= 20) {
@@ -535,11 +630,8 @@ void SimBridge::switchThrottleToEvents(int overriddenPct) {
               overriddenPct);
     throttleViaEvents_ = true;
     setInputMasking(false);  // the mask would swallow our own throttle events too
-    ChannelMask set = playPresent_;
-    for (int c = kThrottle1; c <= kThrottle4; ++c) set.reset(static_cast<size_t>(c));
-    playChannelCount_ = buildDefinition(DEF_PLAYBACK, playDefDefined_, PlayMode::Set, &set, playChannels_);
-    firstPlaybackWrite_ = true;
-    haveWritten_ = false;
+    for (int c = kThrottle1; c <= kThrottle4; ++c) playSkip_.set(static_cast<size_t>(c));
+    rebuildPlaybackDefinition();
     firstThrottleEvent_ = true;
     throttleCheckedFrames_ = 0;
     throttleOffFrames_ = 0;
@@ -576,7 +668,7 @@ void SimBridge::sendThrottleEvents(const Frame& frame, bool force) {
         throttleSent_[e] = axis;
         throttleSinceSend_[e] = 0;
         const HRESULT hr = SimConnect_TransmitClientEvent_EX1(
-            h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, EVT_MASK_FIRST + static_cast<DWORD>(e),
+            h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, EVT_THROTTLE_AXIS_FIRST + static_cast<DWORD>(e),
             SIMCONNECT_GROUP_PRIORITY_HIGHEST, SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY, static_cast<DWORD>(axis));
         if (firstThrottleEvent_) {
             firstThrottleEvent_ = false;
@@ -630,21 +722,42 @@ void SimBridge::beginPlayback(const ChannelMask& present) {
     if (!h_) return;
     restoreWaitFrames_ = 0;  // a new clip started while still settling a restore: playback wins
     snapFramesLeft_ = 0;
+    snapCheckFrames_ = 0;
     playing_ = true;
     playPresent_ = present;
+    playSkip_.reset();
+    yieldedCount_ = 0;
+
+    // Input events this aircraft has and the clip recorded: replay them, and don't write the
+    // simvars they drive.
+    throttleViaInput_ = false;
+    int inputs = 0;
+    for (int c = 0; c < kChannelCount; ++c) {
+        const ChannelDef& ch = kChannels[c];
+        ieActive_[c] = ch.play == PlayMode::Input && present.test(static_cast<size_t>(c)) && ieHash_[c] != 0 &&
+                       ch.engine <= numEngines_;
+        ieSinceSend_[c] = kInputResendFrames;
+        ieSent_[c] = NAN;
+        ieSettled_[c] = 0;
+        ieChecked_[c] = 0;
+        ieOff_[c] = 0;
+        if (!ieActive_[c]) continue;
+        ++inputs;
+        for (int k = 0; k < ch.coversCount; ++k) playSkip_.set(static_cast<size_t>(ch.coversFirst + k));
+        if (ch.coversFirst == kThrottle1 + ch.engine - 1 && ch.engine > 0) throttleViaInput_ = true;
+    }
+    firstInputSet_ = true;
+
     clipHasThrottle_ = false;
     for (int e = 0; e < 4 && e < numEngines_; ++e) clipHasThrottle_ |= present.test(static_cast<size_t>(kThrottle1 + e));
-    ChannelMask set = present;
-    if (throttleViaEvents_) {
-        for (int c = kThrottle1; c <= kThrottle4; ++c) set.reset(static_cast<size_t>(c));
+    if (throttleViaEvents_ || throttleViaInput_) {
+        for (int c = kThrottle1; c <= kThrottle4; ++c) playSkip_.set(static_cast<size_t>(c));
     }
-    playChannelCount_ = buildDefinition(DEF_PLAYBACK, playDefDefined_, PlayMode::Set, &set, playChannels_);
-    firstPlaybackWrite_ = true;
-    haveWritten_ = false;
+    rebuildPlaybackDefinition();
     checkedFrames_ = 0;
     for (int& n : overrideFrames_) n = 0;
-    throttleWindowFrames_ = 0;
-    throttleWindowOverrides_ = 0;
+    windowFrames_ = 0;
+    for (int& n : windowOverrides_) n = 0;
     throttleCheckedFrames_ = 0;
     throttleOffFrames_ = 0;
     firstThrottleEvent_ = true;
@@ -662,7 +775,10 @@ void SimBridge::beginPlayback(const ChannelMask& present) {
     sendFreeze(true);
 
     const char* throttle;
-    if (!clipHasThrottle_) {
+    if (throttleViaInput_) {
+        setInputMasking(false);
+        throttle = "throttle via the aircraft's input events";
+    } else if (!clipHasThrottle_) {
         setInputMasking(false);
         throttle = "no throttle data in this clip (recorded before throttle support), so the levers stay with your "
                    "hardware";
@@ -673,8 +789,12 @@ void SimBridge::beginPlayback(const ChannelMask& present) {
         setInputMasking(true);
         throttle = "throttle via simvars, hardware throttle input blocked";
     }
-    log::info("playback: writing %d channels per frame (%d engine(s)); freezing position/altitude/attitude; %s",
-              playChannelCount_, numEngines_, throttle);
+    log::info("playback: writing %d channels per frame and %d input event(s) (%d engine(s)); freezing "
+              "position/altitude/attitude; %s",
+              playChannelCount_, inputs, numEngines_, throttle);
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (ieActive_[c]) log::debug("playback: replaying %s via input event %s", kChannels[c].key, ieName_[c]);
+    }
 }
 
 void SimBridge::writeSnap(const Frame& frame) {
@@ -695,17 +815,20 @@ void SimBridge::writeSnap(const Frame& frame) {
                    snapChannelCount_ > 1 ? kChannels[snapChannels_[1]].key : "-", snapChannelCount_ > 1 ? snapBuffer_[1] : 0.0,
                    snapChannelCount_ > 2 ? kChannels[snapChannels_[2]].key : "-", snapChannelCount_ > 2 ? snapBuffer_[2] : 0.0);
     }
-    if (--snapFramesLeft_ == 0) snapCheckPending_ = true;
+    if (--snapFramesLeft_ == 0) snapCheckFrames_ = kSnapCheckFrames;
 }
 
-// One frame after the last snap write: did the values stick, or does the aircraft move them?
+// Half a second after the last snap write: did the values stick, or did the aircraft move them
+// back? The A320neo V2 does (its gear has its own state), and the snap then only shows as a
+// flicker, so stop snapping on this aircraft.
 void SimBridge::checkSnap() {
-    snapCheckPending_ = false;
     for (int i = 0; i < snapChannelCount_; ++i) {
         const int c = snapChannels_[i];
         const double live = input_.raw.v[c];
-        if (std::isfinite(live) && std::fabs(live - snapBuffer_[i]) > 0.05) {
-            log::info("playback: %s is %.2f right after being set to %.2f; the aircraft moves it back itself",
+        if (std::isfinite(live) && std::fabs(live - snapBuffer_[i]) > 0.25) {
+            snapRejected_ = true;
+            log::info("playback: %s went back to %.2f after being set to %.2f; the aircraft keeps its own gear state, "
+                      "so the gear won't be snapped on this aircraft again",
                       kChannels[c].key, live, snapBuffer_[i]);
             return;
         }
@@ -715,8 +838,9 @@ void SimBridge::checkSnap() {
 
 void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
     if (!h_ || !playing_) return;
-    if (jumped) snapFramesLeft_ = kSnapFrames;
+    if (jumped && !snapRejected_) snapFramesLeft_ = kSnapFrames;
     if (snapFramesLeft_ > 0) writeSnap(frame);
+    sendInputEvents(frame, jumped);
     if (throttleViaEvents_ && clipHasThrottle_) sendThrottleEvents(frame, jumped);
     trackEventChannels(frame, jumped);
     if (playChannelCount_ == 0) return;
@@ -804,26 +928,122 @@ void SimBridge::onInputEvents(const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS* list
     const size_t header = sizeof(SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS) - sizeof(SIMCONNECT_INPUT_EVENT_DESCRIPTOR);
     const size_t fits = size > header ? (size - header) / sizeof(SIMCONNECT_INPUT_EVENT_DESCRIPTOR) : 0;
     const size_t count = list->dwArraySize < fits ? list->dwArraySize : fits;
+    static const char* const kInteresting[] = {"GEAR", "THROTTLE", "FLAP", "SPOILER", "SPEED_BRAKE", "REVERS"};
     for (size_t i = 0; i < count; ++i) {
         const SIMCONNECT_INPUT_EVENT_DESCRIPTOR& d = list->rgData[i];
         char name[sizeof(d.Name) + 1] = {};
         std::memcpy(name, d.Name, sizeof(d.Name));
         char upper[sizeof(name)] = {};
         for (size_t k = 0; name[k]; ++k) upper[k] = static_cast<char>(name[k] >= 'a' && name[k] <= 'z' ? name[k] - 32 : name[k]);
-        if (std::strstr(upper, "GEAR") || std::strstr(upper, "THROTTLE")) {
+        const bool number = d.eType == SIMCONNECT_INPUT_EVENT_TYPE_DOUBLE;
+        bool interesting = false;
+        for (const char* word : kInteresting) interesting |= std::strstr(upper, word) != nullptr;
+        if (interesting) {
             ++inputEventsLogged_;
-            log::info("aircraft input event: %s (%s)", name,
-                      d.eType == SIMCONNECT_INPUT_EVENT_TYPE_DOUBLE ? "number" : "string");
+            log::info("aircraft input event: %s (%s)", name, number ? "number" : "string");
+        } else {
+            log::debug("aircraft input event: %s (%s)", name, number ? "number" : "string");
+        }
+        if (!number) continue;
+        // Match the input event channels; a channel lists alternative names separated by '|'.
+        for (int c = 0; c < kChannelCount; ++c) {
+            const ChannelDef& ch = kChannels[c];
+            if (ch.play != PlayMode::Input || ieHash_[c] != 0 || !ch.inputEvent) continue;
+            const char* alt = ch.inputEvent;
+            while (*alt) {
+                const char* end = std::strchr(alt, '|');
+                const size_t len = end ? static_cast<size_t>(end - alt) : std::strlen(alt);
+                if (len == std::strlen(upper) && std::strncmp(alt, upper, len) == 0) {
+                    ieHash_[c] = d.Hash;
+                    std::snprintf(ieName_[c], sizeof(ieName_[c]), "%s", name);
+                    break;
+                }
+                alt += len + (end ? 1 : 0);
+            }
         }
     }
-    if (list->dwEntryNumber + 1 >= list->dwOutOf && inputEventsLogged_ == 0) {
-        log::info("aircraft input events: none with GEAR or THROTTLE in the name");
+    if (list->dwEntryNumber + 1 >= list->dwOutOf) {
+        if (inputEventsLogged_ == 0) log::info("aircraft input events: none for gear, throttle, flaps or spoilers");
+        resolveInputEvents();
+    }
+}
+
+void SimBridge::resetInputEvents() {
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (ieHash_[c] != 0) SimConnect_UnsubscribeInputEvent(h_, ieHash_[c]);
+        ieHash_[c] = 0;
+        ieName_[c][0] = '\0';
+        ieValue_[c] = NAN;
+        ieNotified_[c] = false;
+    }
+}
+
+// Subscriptions report changes; this also reads the values twice a second, in case a change
+// doesn't get reported (e.g. one the aircraft makes itself).
+void SimBridge::pollInputEvents() {
+    if (++iePollFrames_ < 30) return;
+    iePollFrames_ = 0;
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (ieHash_[c] == 0) continue;
+        SimConnect_GetInputEvent(h_, REQ_INPUT_VALUE_FIRST + static_cast<DWORD>(c), ieHash_[c]);
+    }
+}
+
+// After the aircraft's input events are listed: subscribe to the ones we record, and read their
+// current values (the subscription only reports changes).
+void SimBridge::resolveInputEvents() {
+    char found[256] = {};
+    char missing[256] = {};
+    for (int c = 0; c < kChannelCount; ++c) {
+        const ChannelDef& ch = kChannels[c];
+        if (ch.play != PlayMode::Input || ch.engine > numEngines_) continue;
+        char* list = ieHash_[c] ? found : missing;
+        const size_t used = std::strlen(list);
+        std::snprintf(list + used, sizeof(found) - used, "%s%s", used ? ", " : "", ch.key);
+        if (!ieHash_[c]) continue;
+        track(SimConnect_SubscribeInputEvent(h_, ieHash_[c]), ieName_[c]);
+        track(SimConnect_GetInputEvent(h_, REQ_INPUT_VALUE_FIRST + static_cast<DWORD>(c), ieHash_[c]), ieName_[c]);
+    }
+    log::info("input event channels: recording %s%s%s", found[0] ? found : "none", missing[0] ? "; not on this aircraft: " : "",
+              missing);
+}
+
+void SimBridge::sendInputEvents(const Frame& frame, bool force) {
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (!ieActive_[c]) continue;
+        double v = frame.v[c];
+        if (!std::isfinite(v)) continue;
+        const bool changed = !(std::fabs(v - ieSent_[c]) <= 1e-6 * (std::fabs(v) > 1.0 ? std::fabs(v) : 1.0));
+        if (changed) ieSettled_[c] = 0;
+        // Re-assert an unchanged value now and then, in case the hardware moved it.
+        if (!force && !changed && ++ieSinceSend_[c] < kInputResendFrames) continue;
+        ieSent_[c] = v;
+        ieSinceSend_[c] = 0;
+        const HRESULT hr = SimConnect_SetInputEvent(h_, ieHash_[c], sizeof(double), &v);
+        if (firstInputSet_) {
+            firstInputSet_ = false;
+            track(hr, "SetInputEvent");
+        }
+    }
+}
+
+// Diagnostics: once a sent value has been steady for a few frames, does the aircraft report it?
+void SimBridge::checkInputEvents() {
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (!ieActive_[c] || !std::isfinite(ieSent_[c])) continue;
+        if (++ieSettled_[c] < 10) continue;
+        const double live = ieValue_[c];
+        if (!std::isfinite(live)) continue;
+        ++ieChecked_[c];
+        const double w = ieSent_[c];
+        if (std::fabs(live - w) > 0.02 * (std::fabs(w) > 1.0 ? std::fabs(w) : 1.0)) ++ieOff_[c];
     }
 }
 
 void SimBridge::onAircraftChanged() {
     if (throttleViaEvents_) log::info("aircraft changed: trying the throttle simvars first again");
     throttleViaEvents_ = false;
+    snapRejected_ = false;
 }
 
 void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
@@ -832,12 +1052,16 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     playing_ = false;
     playChannelCount_ = 0;
     snapFramesLeft_ = 0;
-    snapCheckPending_ = false;
+    snapCheckFrames_ = 0;
     setInputMasking(false);
     if (!restore) {
+        for (bool& a : ieActive_) a = false;
         sendFreeze(false);
         return;
     }
+    // Input events back to the aircraft's own values from before playback.
+    sendInputEvents(snapshot, true);
+    for (bool& a : ieActive_) a = false;
     restoreChannelCount_ =
         buildDefinition(DEF_RESTORE, restoreDefDefined_, PlayMode::Set, nullptr, restoreChannels_);
     for (int i = 0; i < restoreChannelCount_; ++i) setBuffer_[i] = snapshot.v[restoreChannels_[i]];
@@ -853,8 +1077,10 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     // that and it's on the ground, stay frozen until the gear is back down, or it would drop
     // onto its belly. In the air it can finish moving while flying.
     restoreSnap_ = snapshot;
-    snapFramesLeft_ = kSnapFrames;
-    writeSnap(restoreSnap_);
+    if (!snapRejected_) {
+        snapFramesLeft_ = kSnapFrames;
+        writeSnap(restoreSnap_);
+    }
     restoreGear_[0] = snapshot.v[kGearCenter];
     restoreGear_[1] = snapshot.v[kGearLeft];
     restoreGear_[2] = snapshot.v[kGearRight];

@@ -37,17 +37,29 @@ bool deriveGearCommand(Clip& clip) {
     }
     if (!(hi - lo > 0.1)) return false;  // no gear positions, or the gear never moved
 
+    // The command flips when the gear moves the other way by more than the threshold from its
+    // furthest point since the last flip, so a gear in mid-travel doesn't flip-flop.
     constexpr double kMoveThreshold = 0.03;  // ignore noise at the end stops
     double state = NAN;                      // 1 = down, 0 = up
+    double extreme = NAN;                    // most extended (state 1) / most retracted (state 0)
     for (Frame& f : clip.frames) {
         const double g = gearExtension(f, clip.present);
         if (!std::isnan(g)) {
             if (std::isnan(state)) {
                 state = g >= 0.5 ? 1.0 : 0.0;
-            } else if (state == 1.0 && g < 1.0 - kMoveThreshold) {
-                state = 0.0;  // started retracting
-            } else if (state == 0.0 && g > kMoveThreshold) {
-                state = 1.0;  // started extending
+                extreme = g;
+            } else if (state == 1.0) {
+                if (g > extreme) extreme = g;
+                if (g < extreme - kMoveThreshold) {
+                    state = 0.0;  // started retracting
+                    extreme = g;
+                }
+            } else {
+                if (g < extreme) extreme = g;
+                if (g > extreme + kMoveThreshold) {
+                    state = 1.0;  // started extending
+                    extreme = g;
+                }
             }
         }
         f.v[kGearHandle] = std::isnan(state) ? f.v[kGearHandle] : state;
@@ -56,8 +68,23 @@ bool deriveGearCommand(Clip& clip) {
     return true;
 }
 
+void dropEmptyChannels(Clip& clip) {
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (!clip.present.test(static_cast<size_t>(c))) continue;
+        bool any = false;
+        for (const Frame& f : clip.frames) {
+            if (std::isfinite(f.v[c])) {
+                any = true;
+                break;
+            }
+        }
+        if (!any) clip.present.reset(static_cast<size_t>(c));
+    }
+}
+
 void PlaybackController::load(Clip&& clip, const std::string& file) {
     clip_ = std::move(clip);
+    dropEmptyChannels(clip_);
     deriveGearCommand(clip_);
     file_ = file;
     loaded_ = !clip_.frames.empty();
