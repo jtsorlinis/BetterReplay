@@ -207,7 +207,7 @@ TEST(ClipFormat_FileSizeIsCompact) {
     std::vector<uint8_t> bytes;
     writeClip(makeMeta(), VectorFrameSource(frames), bytes);
     std::printf("       5-minute clip: %zu bytes\n", bytes.size());
-    // About 270 bytes a frame since the control setup's channels (N1, RPM, spoiler position,
-    // L:vars) were added: ~1.3 MB for a typical landing clip.
+    // About 305 bytes a frame since the control setup's channels (N1, N2, RPM, spoiler position,
+    // L:vars, throttle axis) were added: ~1.4 MB for a typical landing clip.
     CHECK(bytes.size() < 3u * 1024u * 1024u);
 }

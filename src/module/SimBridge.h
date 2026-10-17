@@ -291,6 +291,26 @@ private:
     bool flapsSettled(const Frame& target);
     void checkRestoreFlaps();
     void cancelRestoreFlaps();
+    // Engines (trial): on turbine aircraft playback writes the clip's N1 and N2 every frame, so
+    // the engine sound and animation follow the recording instead of what the aircraft's own
+    // thrust logic (autothrust holding a detent) makes of the replayed lever. If the aircraft
+    // doesn't keep the values, the engines are left to it for the rest of the playback.
+    static constexpr double kEngineKeptPct = 2.0;  // read back within this of what was written
+    static constexpr int kEngineWindowFrames = 60;
+    FsAVarId engineVarId_[2] = {FS_VAR_INVALID_ID, FS_VAR_INVALID_ID};  // TURB ENG N1, N2
+    FsUnitId percentUnit_ = FS_INVALID_UNIT;
+    bool engineWrite_[2] = {};  // this playback writes N1 / N2
+    double engineWritten_[2][4] = {};
+    int engineWriteErrors_ = 0;
+    int engineWrites_ = 0;      // frames written
+    int engineChecked_ = 0;     // frames whose N1 read back was compared with what was written
+    int engineKept_ = 0;
+    int engineWindowChecked_ = 0;
+    int engineWindowOff_ = 0;
+    int64_t engineCheckFromMs_ = 0;  // a moment after each jump
+    int engineType_ = 1;             // ENGINE TYPE: 0 piston, 1 jet, 3 helo turbine, 5 turboprop
+    void beginEngineWrites(const ChannelMask& present);
+    void writeEngines(const Frame& frame, bool jumped);
     // Diagnostics for the engine sound: does each engine's N1 follow the clip, or hunt?
     int64_t engineStartMs_ = 0;
     int64_t engineLastMs_ = 0;

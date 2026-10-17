@@ -134,6 +134,10 @@ enum Channel : uint16_t {
     kThrottleAxis2,
     kThrottleAxis3,
     kThrottleAxis4,
+    kEngineN2_1,
+    kEngineN2_2,
+    kEngineN2_3,
+    kEngineN2_4,
     kChannelCount
 };
 
