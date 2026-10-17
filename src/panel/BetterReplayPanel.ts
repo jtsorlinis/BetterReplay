@@ -119,13 +119,7 @@ function formatLocalDate(utcMs: number): string {
 function eventLabel(event: string): string {
     if (event === "takeoff") return "Takeoff";
     if (event === "landing") return "Landing";
-    return "Saved";
-}
-
-function eventBadge(event: string): string {
-    if (event === "takeoff") return "TO";
-    if (event === "landing") return "LDG";
-    return "SAVE";
+    return "Manual";
 }
 
 function escapeHtml(s: string): string {
@@ -507,9 +501,9 @@ class BetterReplayPanel extends UIElement {
             const confirming = this.confirmFile === c.file;
             html +=
                 '<div class="br-clip' + (c.file === playing ? " playing" : "") + '" data-file="' + file + '">' +
-                '<span class="br-badge ' + escapeHtml(c.event) + '">' + eventBadge(c.event) + "</span>" +
+                '<span class="br-badge ' + escapeHtml(c.event) + '">' + eventLabel(c.event) + "</span>" +
                 '<div class="br-clip-text">' +
-                '<div class="br-clip-title">' + eventLabel(c.event) + " · " + formatLocalDate(c.utcMs) + "</div>" +
+                '<div class="br-clip-title">' + formatLocalDate(c.utcMs) + "</div>" +
                 '<div class="br-clip-sub">' + parts.join(" · ") + "</div>" +
                 "</div>" +
                 '<div class="br-clip-btns">' +

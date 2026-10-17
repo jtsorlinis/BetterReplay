@@ -75,7 +75,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   detector: takeoff finished: N s clip (liftoff at +N s)
   saved YYYY-MM-DD_HHMM_takeoff.rpl: N s, N frames, N KB
   ```
-- [ ] The panel shows **TO · Takeoff · <local date/time>** with the aircraft and duration.
+- [ ] The panel shows a green **Takeoff** tag and the local date/time, with the aircraft and duration.
 - [ ] Check the clip: `node tools\rpl-dump.mjs "<work folder>\<file>.rpl"`.
   - It starts with ground speed under 10 kt.
   - `ongnd` goes 1 → 0 at the liftoff offset.
@@ -90,7 +90,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   detector: landing finished: N s clip, VS -N fpm, peak N.NN G, 0 bounce(s)
   saved YYYY-MM-DD_HHMM_landing.rpl: …
   ```
-- [ ] The panel shows **LDG · Landing**, with VS, G and duration (about 120 s plus the rollout).
+- [ ] The panel shows a blue **Landing** tag, with VS, G and duration (about 120 s plus the rollout).
 - [ ] **Compare the VS with another source** (a landing-rate tool, or the sim's own). The clip uses `PLANE TOUCHDOWN NORMAL VELOCITY`; note its sign and magnitude.
 
 ## 6. Bounce
