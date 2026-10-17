@@ -102,10 +102,12 @@ Each row has a stable key, simvar, units, storage (`f64|f32|u8`), interp (`linea
 | ail_pos, elev_pos, rud_pos | AILERON / ELEVATOR / RUDDER POSITION (`position`): the pilot input, recorded for analysis | none |
 | thr_1..thr_4 | GENERAL ENG THROTTLE LEVER POSITION:1..4 (`percent`), added after the first in-sim test | set, only for engines the aircraft has; hardware throttle events (`THROTTLE_SET`, `AXIS_THROTTLE*_SET`, `THROTTLE*_AXIS_SET_EX1`…) are masked while playing. If the aircraft overrides the simvar in half of a 30-frame window (its own throttle handling, e.g. 2024 input events), playback switches to sending `THROTTLEn_AXIS_SET_EX1` for that aircraft, with the mask off. |
 | l_nav/beacon/strobe/land/taxi | LIGHT NAV / BEACON / STROBE / LANDING / TAXI (`bool`) u8 | event: `NAV_LIGHTS_SET`, `BEACON_LIGHTS_SET`, `STROBES_SET`, `LANDING_LIGHTS_SET`, `TAXI_LIGHTS_SET` on change |
+| rev_1..rev_4 | GENERAL ENG REVERSE THRUST ENGAGED:1..4 (`bool`, not settable) u8 | event: `SET_THROTTLEn_REVERSE_THRUST_ON` / `_OFF` on change. The reverse amount is the negative `thr_N`; in axis-event mode it's sent as the axis once the aircraft reports reverse engaged, scaled to `THROTTLE LOWER LIMIT`. |
+| rnoz_1..rnoz_4 | TURB ENG REVERSE NOZZLE PERCENT:1..4 (`percent`, not settable) | none (analysis) |
 
 Event channels are also resent after every play, seek, replay-from-the-end and stop, so the aircraft can't stay out of step with the clip (e.g. gear left up by the end of the previous run).
 
-Not channels: `TITLE` (string, read on flight load), `PLANE TOUCHDOWN NORMAL VELOCITY` (ft/s, read at touchdown → stored as fpm), `IS SLEW ACTIVE`, `SIMULATION TIME`, `IS LATITUDE LONGITUDE/ALTITUDE/ATTITUDE FREEZE ON`.
+Not channels: `TITLE` (string, read on flight load), `PLANE TOUCHDOWN NORMAL VELOCITY` (ft/s, read at touchdown → stored as fpm), `IS SLEW ACTIVE`, `SIMULATION TIME`, `IS LATITUDE LONGITUDE/ALTITUDE/ATTITUDE FREEZE ON`, `NUMBER OF ENGINES`, `THROTTLE LOWER LIMIT`.
 
 Known risk: complex add-ons (e.g. PMDG, iniBuilds) drive gear, surface and light animations from their own LVars and systems, so a replay may show positions correct but animations wrong. That's what the future LVar change-log is for.
 
@@ -143,7 +145,7 @@ When playing, channels are matched by **key**. Unknown keys are ignored, and cha
 
 ## Status (2026-10-17)
 
-Milestones 1–7 are implemented and committed. The core has 81 passing unit tests, the module builds with the SDK clang, and the panel has been exercised in a browser harness against a fake module. Still pending: in-sim verification ([MANUAL_TEST.md](MANUAL_TEST.md)) and compiling the panel `.spb` (`build.ps1 -Package`, which needs the sim's package builder).
+Milestones 1–7 are implemented and committed. The core has 82 passing unit tests, the module builds with the SDK clang, and the panel has been exercised in a browser harness against a fake module. Still pending: in-sim verification ([MANUAL_TEST.md](MANUAL_TEST.md)) and compiling the panel `.spb` (`build.ps1 -Package`, which needs the sim's package builder).
 
 ## 8. Decisions (answered: defaults approved)
 

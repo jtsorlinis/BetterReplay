@@ -210,8 +210,13 @@ struct FakeSim : ISimOutput {
     }
 };
 
-// Event channels in makeClip(): gear handle and the five lights.
-constexpr size_t kClipEventChannels = 6;
+// Event channels in makeClip() (it has every channel): gear handle, lights, reversers.
+size_t eventChannelCount() {
+    size_t n = 0;
+    for (const ChannelDef& ch : kChannels) n += ch.play == PlayMode::Event ? 1 : 0;
+    return n;
+}
+const size_t kClipEventChannels = eventChannelCount();
 
 FrameInput liveFrame(double simTime, double lat) {
     FrameInput in;
@@ -431,6 +436,28 @@ TEST(EnginePlayback_EventChannelsSendStateChangesOnly) {
     CHECK(h.sim.eventsFor(kGearHandle) == (std::vector<double>{0.0, 1.0}));
     REQUIRE(h.engine.stopPlayback(err));  // live aircraft had the handle up: send it back up
     CHECK(h.sim.eventsFor(kGearHandle) == (std::vector<double>{0.0, 1.0, 0.0}));
+}
+
+TEST(EnginePlayback_ReversersFollowTheClip) {
+    PlaybackHarness h;
+    Clip clip = makeClip(6.0);
+    for (Frame& f : clip.frames) {
+        const bool rev = f.t >= 2.0 && f.t < 4.0;  // reverse on the rollout, then stowed
+        f.v[kReverser1] = f.v[kReverser2] = rev ? 1.0 : 0.0;
+        f.v[kThrottle1] = f.v[kThrottle2] = rev ? -20.0 : 0.0;
+    }
+    std::vector<uint8_t> bytes;
+    writeClip(clip.meta, VectorFrameSource(clip.frames), bytes);
+    h.storage.files[h.clipFile] = bytes;
+    std::string err;
+    REQUIRE(h.engine.play(h.clipFile, err));
+    h.frames(60 * 5, -33.0);
+    CHECK(h.sim.eventsFor(kReverser1) == (std::vector<double>{0.0, 1.0, 0.0}));
+    CHECK(h.sim.eventsFor(kReverser2) == (std::vector<double>{0.0, 1.0, 0.0}));
+    // The reverse amount is the negative throttle lever, written as a Set channel.
+    bool wroteReverse = false;
+    for (const Frame& f : h.sim.written) wroteReverse |= f.v[kThrottle1] < -19.0;
+    CHECK(wroteReverse);
 }
 
 TEST(EnginePlayback_GearRetractsWhenRecordedGearStartedMoving) {

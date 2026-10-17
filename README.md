@@ -6,7 +6,7 @@ An in-sim auto replay recorder for Microsoft Flight Simulator 2024. It records y
 - **Auto clips:** takeoffs and landings, including touchdown vertical speed, peak G and bounce count. They're written to disk as soon as each event finishes.
 - **Toolbar panel:** shows recorder status and the clip list, and has play/pause, seek, speed (0.25x–4x), stop, keep, delete and "save last 5 min".
 
-> **Status: MVP, early in-sim testing.** The platform-independent core has 81 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
+> **Status: MVP, early in-sim testing.** The platform-independent core has 82 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
 
 ## Requirements
 
@@ -65,6 +65,7 @@ Recording pauses while the sim is paused, in slew, in the menus, during the sim'
 
 - `YYYY-MM-DD_HHMM_<takeoff|landing|manual>.rpl`: one file per clip, timestamped in **UTC**.
 - `index.json`: the library (event, date, aircraft, duration, touchdown VS, peak G, bounces, keep flag). If it's lost, it's rebuilt from the clip headers, but keep flags are lost.
+- `betterreplay.log` and `betterreplay.prev.log`: the module's log for this and the previous sim session.
 
 Only the newest 50 auto clips that aren't marked keep are retained. Manual and kept clips are never deleted automatically.
 
@@ -73,6 +74,7 @@ To inspect a clip outside the sim:
 ```powershell
 node tools\rpl-dump.mjs <clip.rpl>                  # header + a sample row per second
 node tools\rpl-dump.mjs <clip.rpl> --csv clip.csv   # every frame, every channel
+node tools\rpl-dump.mjs <clip.rpl> --cols gs,thr_1,rev_1,rnoz_1 --every 15   # chosen channels, every 0.5 s
 ```
 
 ## Configuration
@@ -136,6 +138,8 @@ Two detector rules go slightly beyond the original spec:
 
 Every line is prefixed `[BetterReplay]`. In DevMode, open the Console and filter on it. Debug builds (`-Configuration Debug`) also log commands, freeze confirmations and light events. A status heartbeat is logged every 60 s. [MANUAL_TEST.md](MANUAL_TEST.md) lists the lines to expect at each step.
 
+The module also writes every line, with a UTC timestamp, to `betterreplay.log` in the work folder (see [Where clips live](#where-clips-live)). You don't need DevMode or the console for it. Each sim start begins a new file and keeps the previous session's as `betterreplay.prev.log`.
+
 ## Known gaps
 
 None of these could be verified without running the sim. Each is covered by a step in MANUAL_TEST.md.
@@ -145,7 +149,9 @@ None of these could be verified without running the sim. Each is covered by a st
 - **SimConnect dispatch in WASM.** `SimConnect_CallDispatch` is called once at init. If no messages arrive within 2 s, the module falls back to calling it every frame and logs that.
 - **Freeze event parameter is undocumented.** `FREEZE_*_SET` is sent with 1/0 and verified through `IS … FREEZE ON`. If it didn't take, the module sends `FREEZE_*_TOGGLE` and logs it.
 - **Flaps, spoilers, surfaces and throttle levers** are written every frame via simvars. Aircraft systems, especially complex add-ons that animate from their own LVars, may override them during playback. That's what the future LVar recording is for. At the end of each playback, the module logs which channels the aircraft overrode.
-- **Throttle** is written as the lever simvars, and the hardware throttle is blocked by masking the standard throttle events. Many 2024 aircraft handle the lever themselves: their input events intercept the hardware before SimConnect masking sees it, and they overwrite the simvar. When playback sees the aircraft overriding the throttle simvar, it switches to sending `THROTTLEn_AXIS_SET_EX1`, the same events a hardware axis sends, and logs it. That mode can't block the hardware lever, so leave it alone while a clip plays. Reverse thrust isn't replayed in that mode.
+- **Throttle** is written as the lever simvars, and the hardware throttle is blocked by masking the standard throttle events. Many 2024 aircraft handle the lever themselves: their input events intercept the hardware before SimConnect masking sees it, and they overwrite the simvar. When playback sees the aircraft overriding the throttle simvar, it switches to sending `THROTTLEn_AXIS_SET_EX1`, the same events a hardware axis sends, and logs it. That mode can't block the hardware lever, so leave it alone while a clip plays.
+  - Some aircraft don't put the lever position in that simvar. The A320neo V2's value climbs slowly during the takeoff roll, which looks like its thrust command rather than the lever. Replaying it still approximates the lever, but exact detents need the aircraft's own variables (the LVar work).
+- **Reversers** are recorded per engine (`GENERAL ENG REVERSE THRUST ENGAGED`, plus `TURB ENG REVERSE NOZZLE PERCENT` for analysis). The engaged flag isn't settable, so playback sends `SET_THROTTLEn_REVERSE_THRUST_ON/OFF`, and the reverse amount is the negative throttle lever. In axis-event mode, the axis carries the reverse amount once the aircraft reports its reverser engaged, scaled to its `THROTTLE LOWER LIMIT`. At the end of each playback, the log says whether the lights and reversers followed the clip.
 - **Gear** is replayed as commands, not positions, because writing gear positions every frame made the gear flicker. The command comes from when the *recorded gear positions* start moving, since some aircraft (e.g. the A320neo V2) only update `GEAR HANDLE POSITION` once the gear has finished moving. Playback sends `GEAR_SET` plus `GEAR_UP`/`GEAR_DOWN` and lets the sim animate the gear. After play, seek, replay and stop, the gear (and lights) are resent and the gear positions are snapped for a moment, so a jump starts with the gear where the clip has it. If the aircraft moves the gear back itself, the log says so; when stopping on the ground, the aircraft then stays frozen until the gear is back down.
   - Aircraft that ignore all of these events need their own gear input event. The module logs a warning if the gear doesn't respond, and lists the aircraft's gear- and throttle-related input events after each flight load.
 - **Light key events** are sent with circuit index 0, assumed to mean "all circuits".

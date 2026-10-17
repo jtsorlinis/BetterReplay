@@ -31,7 +31,12 @@ struct App {
         br::log::info("BetterReplay %s starting", kVersion);
         engine.setLogger(&engineLog, nullptr);
         engine.setSimOutput(&sim);
-        files.probe();
+        if (files.probe()) {
+            // A copy of the log in the work folder, so it can be read after a session without
+            // the DevMode console. The previous session's log is kept next to it.
+            br::log::openFile(files.dir() + "betterreplay.log", files.dir() + "betterreplay.prev.log");
+            br::log::info("BetterReplay %s, debug logging %s", kVersion, br::log::g_debug ? "on" : "off");
+        }
         engine.init();
         sim.open();
         comm.open();
@@ -41,6 +46,7 @@ struct App {
         comm.close();
         sim.close();
         br::log::info("BetterReplay stopped");
+        br::log::closeFile();
     }
 };
 

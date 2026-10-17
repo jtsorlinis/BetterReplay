@@ -2,6 +2,8 @@
 
 Work through these in order. Each step says what to do, what you should see, and the console lines to look for. Every module log line starts with `[BetterReplay]`.
 
+The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\Microsoft Flight Simulator 2024\WASM\MSFS2024\betterreplay-recorder\work\`. The previous sim session's log is `betterreplay.prev.log`. So after a test you can send that file, or have it read from there, instead of copying lines from the console.
+
 **If anything differs, note the step and copy the surrounding console lines.** Most of the unknowns flagged in the README show up here as a specific warning.
 
 ## 0. Setup
@@ -21,9 +23,11 @@ Work through these in order. Each step says what to do, what you should see, and
   ```
   [BetterReplay] BetterReplay 0.1.0 starting
   [BetterReplay] work folder: '\work\'
+  [BetterReplay] log file started (UTC times; …)
+  [BetterReplay] BetterReplay 0.1.0, debug logging on
   [BetterReplay] no index found; starting a new library        (first run only)
   [BetterReplay] library: 0 clip(s)
-  [BetterReplay] SimConnect ready: 41 channels + 7 extras per frame
+  [BetterReplay] SimConnect ready: 49 channels + 8 extras per frame
   [BetterReplay] CommBus: listening on BetterReplay.Cmd
   [BetterReplay] connected to … (SimConnect …)
   ```
@@ -152,6 +156,10 @@ Work through these in order. Each step says what to do, what you should see, and
   - If the aircraft overrides the lever simvar, within about half a second of the clip's lever differing from yours you'll see `playback: the aircraft overrode the throttle lever simvar in N% of the last 30 frames; driving the levers with THROTTLEn_AXIS_SET_EX1 events …`. From then on the levers should follow the clip for that aircraft. Your hardware lever isn't blocked in this mode, so don't touch it.
     - At the end you'll see either `throttle levers followed the clip via axis events` or `… were still more than 3% away from the clip …`. The second means the aircraft needs its own variables (LVars, future work). Copy the `aircraft input event: …THROTTLE…` lines.
   - Note the aircraft, the mode line, N and the follow/away line.
+- [ ] **Reversers** (clips recorded with reverser support): play a landing where you used reverse.
+  - **Expect** `playback: rev_1 1 + SET_THROTTLE1_REVERSE_THRUST_ON` (and the other engines) at the point you engaged reverse, and `… 0 + SET_THROTTLE1_REVERSE_THRUST_OFF` when you stowed it.
+  - The reverser doors deploy on the aircraft, and the engines spool up in reverse.
+  - At the end: `all N checked light/reverser channels followed the clip`, or `rev_1 (…) didn't follow the clip in N% of frames`. The second means this aircraft ignores the reverse thrust events.
 - [ ] At the end of each playback, look for `playback: <channel> (...) was overridden by the aircraft in N% of frames`. That names any channel (throttle, flaps, spoilers…) the aircraft's own systems keep overwriting. `all N written channels held their values` means nothing fought the replay.
 - [ ] Check visually, and note what doesn't follow the clip:
   - gear: playback commands the gear when the *recorded gear* starts moving and lets the sim animate it, so expect no flicker. It can lag the recording by the aircraft's own door/sequence time, and more after a seek. Look for `playback: GEAR_SET 0 + GEAR_UP` (or `GEAR_SET 1 + GEAR_DOWN`).
@@ -192,7 +200,7 @@ Work through these in order. Each step says what to do, what you should see, and
 
 Send:
 
-- the console lines around anything that didn't match
+- `betterreplay.log` from the work folder (or `betterreplay.prev.log` if the sim has been restarted since), or the console lines around anything that didn't match
 - `BuilderLogError.txt`, if packaging failed
 - the aircraft used
 - for a suspicious clip, `node tools\rpl-dump.mjs <clip> --csv clip.csv`

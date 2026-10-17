@@ -76,6 +76,21 @@ const ChannelDef kChannels[kChannelCount] = {
     {"thr_2", "GENERAL ENG THROTTLE LEVER POSITION:2", "percent", F32, LIN, SET, nullptr, nullptr, nullptr, 2},
     {"thr_3", "GENERAL ENG THROTTLE LEVER POSITION:3", "percent", F32, LIN, SET, nullptr, nullptr, nullptr, 3},
     {"thr_4", "GENERAL ENG THROTTLE LEVER POSITION:4", "percent", F32, LIN, SET, nullptr, nullptr, nullptr, 4},
+    // Thrust reversers. The engaged flag isn't settable, so it's replayed with the reverse thrust
+    // on/off events; the reverse amount is the (negative) throttle lever above. The nozzle
+    // deployment isn't settable either and is recorded for analysis.
+    {"rev_1", "GENERAL ENG REVERSE THRUST ENGAGED:1", "bool", U8, STEP, EVT, nullptr, "SET_THROTTLE1_REVERSE_THRUST_ON",
+     "SET_THROTTLE1_REVERSE_THRUST_OFF", 1},
+    {"rev_2", "GENERAL ENG REVERSE THRUST ENGAGED:2", "bool", U8, STEP, EVT, nullptr, "SET_THROTTLE2_REVERSE_THRUST_ON",
+     "SET_THROTTLE2_REVERSE_THRUST_OFF", 2},
+    {"rev_3", "GENERAL ENG REVERSE THRUST ENGAGED:3", "bool", U8, STEP, EVT, nullptr, "SET_THROTTLE3_REVERSE_THRUST_ON",
+     "SET_THROTTLE3_REVERSE_THRUST_OFF", 3},
+    {"rev_4", "GENERAL ENG REVERSE THRUST ENGAGED:4", "bool", U8, STEP, EVT, nullptr, "SET_THROTTLE4_REVERSE_THRUST_ON",
+     "SET_THROTTLE4_REVERSE_THRUST_OFF", 4},
+    {"rnoz_1", "TURB ENG REVERSE NOZZLE PERCENT:1", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 1},
+    {"rnoz_2", "TURB ENG REVERSE NOZZLE PERCENT:2", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 2},
+    {"rnoz_3", "TURB ENG REVERSE NOZZLE PERCENT:3", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 3},
+    {"rnoz_4", "TURB ENG REVERSE NOZZLE PERCENT:4", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 4},
 };
 
 int findChannel(const char* key) {

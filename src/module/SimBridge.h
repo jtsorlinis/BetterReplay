@@ -61,6 +61,7 @@ private:
         kExFreezeAlt,
         kExFreezeAtt,
         kExNumEngines,
+        kExThrottleLowerLimit,
         kExtraCount
     };
 
@@ -87,6 +88,9 @@ private:
     void switchThrottleToEvents(int overriddenPct);
     void sendThrottleEvents(const Frame& frame, bool force);
     void checkThrottleEvents();
+    // Diagnostics: do the aircraft's lights/reversers follow the states playback sends?
+    void trackEventChannels(const Frame& frame, bool jumped);
+    void checkEventChannels();
     void onInputEvents(const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS* list, DWORD size);
     void onAircraftChanged();
     double liveGearExtension() const;
@@ -150,6 +154,14 @@ private:
     int throttleCheckedFrames_ = 0;
     int throttleOffFrames_ = 0;
     bool firstThrottleEvent_ = false;
+    double throttleLowerLimit_ = NAN;  // THROTTLE LOWER LIMIT (percent, negative with reversers)
+    // Event channel diagnostics (gear has its own check): the state each should be in, checked
+    // after a grace period following every change, since reversers take a moment to move.
+    static constexpr int kEventGraceFrames = 180;  // ~3 s at 60 fps
+    double eventWant_[kChannelCount] = {};
+    int eventGrace_[kChannelCount] = {};
+    int eventChecked_[kChannelCount] = {};
+    int eventOff_[kChannelCount] = {};
     char lastTitle_[64] = {};
     // Diagnostics: how often the aircraft overrode what playback wrote, per channel.
     double written_[kChannelCount] = {};

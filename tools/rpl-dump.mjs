@@ -1,16 +1,17 @@
 // Prints a BetterReplay clip (.rpl): header, channel list and a sample of frames, or the whole
 // thing as CSV. Mirrors src/core/ClipFormat.h.
-// Usage: node tools/rpl-dump.mjs <clip.rpl> [--csv out.csv] [--every N]
+// Usage: node tools/rpl-dump.mjs <clip.rpl> [--csv out.csv] [--every N] [--cols key,key,...]
 import { readFileSync, writeFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
 const file = args[0];
 if (!file) {
-  console.error('usage: node tools/rpl-dump.mjs <clip.rpl> [--csv out.csv] [--every N]');
+  console.error('usage: node tools/rpl-dump.mjs <clip.rpl> [--csv out.csv] [--every N] [--cols key,key,...]');
   process.exit(2);
 }
 const csvOut = args.includes('--csv') ? args[args.indexOf('--csv') + 1] : null;
 const every = args.includes('--every') ? Number(args[args.indexOf('--every') + 1]) : 30;
+const colsArg = args.includes('--cols') ? args[args.indexOf('--cols') + 1] : null;
 
 const buf = readFileSync(file);
 const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -94,7 +95,9 @@ if (csvOut) {
   writeFileSync(csvOut, lines.join('\n'));
   console.log(`wrote ${csvOut}`);
 } else {
-  const show = ['lat', 'lon', 'alt', 'agl', 'pitch', 'bank', 'hdg', 'gs', 'vs', 'ongnd', 'g', 'gear_c', 'flap_l', 'l_land'];
+  const show = colsArg
+    ? colsArg.split(',')
+    : ['lat', 'lon', 'alt', 'agl', 'pitch', 'bank', 'hdg', 'gs', 'vs', 'ongnd', 'g', 'gear_c', 'flap_l', 'l_land'];
   const cols = show.map((k) => channels.find((c) => c.key === k)).filter(Boolean);
   console.log(['t', ...cols.map((c) => c.key)].map((s) => s.padStart(11)).join(''));
   for (let f = 0; f < samples.frames; f += every) {

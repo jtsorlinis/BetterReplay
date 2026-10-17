@@ -36,8 +36,9 @@ struct ChannelDef {
     Interp interp;
     PlayMode play;
     const char* playEvent;     // key event for PlayMode::Event (sent with 1/0), otherwise nullptr
-    const char* playEventOn = nullptr;   // optional extra event sent when the state turns on (e.g. GEAR_DOWN)
-    const char* playEventOff = nullptr;  // optional extra event sent when the state turns off (e.g. GEAR_UP)
+    const char* playEventOn = nullptr;   // event sent when the state turns on (e.g. GEAR_DOWN), in
+                                         // addition to playEvent or instead of it
+    const char* playEventOff = nullptr;  // event sent when the state turns off (e.g. GEAR_UP)
     uint8_t engine = 0;                  // 1-based engine index for per-engine channels; skipped on
                                          // aircraft with fewer engines (0 = not engine-specific)
 };
@@ -84,6 +85,14 @@ enum Channel : uint16_t {
     kThrottle2,
     kThrottle3,
     kThrottle4,
+    kReverser1,
+    kReverser2,
+    kReverser3,
+    kReverser4,
+    kReverserNozzle1,
+    kReverserNozzle2,
+    kReverserNozzle3,
+    kReverserNozzle4,
     kChannelCount
 };
 

@@ -101,6 +101,7 @@ bool SimBridge::open() {
         {"IS ALTITUDE FREEZE ON", "bool"},
         {"IS ATTITUDE FREEZE ON", "bool"},
         {"NUMBER OF ENGINES", "number"},
+        {"THROTTLE LOWER LIMIT", "percent"},
     };
     for (const auto& e : kExtras) {
         track(SimConnect_AddToDataDefinition(h_, DEF_RECORD, e.simvar, e.units, SIMCONNECT_DATATYPE_FLOAT64), e.simvar);
@@ -125,8 +126,10 @@ bool SimBridge::open() {
     }
     for (int c = 0; c < kChannelCount; ++c) {
         const ChannelDef& ch = kChannels[c];
-        if (ch.play != PlayMode::Event || !ch.playEvent) continue;
-        track(SimConnect_MapClientEventToSimEvent(h_, EVT_CHANNEL_FIRST + c, ch.playEvent), ch.playEvent);
+        if (ch.play != PlayMode::Event) continue;
+        if (ch.playEvent) {
+            track(SimConnect_MapClientEventToSimEvent(h_, EVT_CHANNEL_FIRST + c, ch.playEvent), ch.playEvent);
+        }
         if (ch.playEventOn) {
             track(SimConnect_MapClientEventToSimEvent(h_, EVT_CHANNEL_ON_FIRST + c, ch.playEventOn), ch.playEventOn);
         }
@@ -353,9 +356,11 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     freezeState_[kFreezeAtt] = v[kChannelCount + kExFreezeAtt] >= 0.5;
     const double engines = v[kChannelCount + kExNumEngines];
     if (std::isfinite(engines) && engines >= 0.0 && engines <= 16.0) numEngines_ = static_cast<int>(engines);
+    throttleLowerLimit_ = v[kChannelCount + kExThrottleLowerLimit];
     if (freezeCheckFrames_ > 0 && --freezeCheckFrames_ == 0) verifyFreeze();
     if (playChannelCount_ > 0 && haveWritten_) checkOverrides();
     if (playing_ && throttleViaEvents_ && clipHasThrottle_) checkThrottleEvents();
+    if (playing_) checkEventChannels();
     if (snapCheckPending_) checkSnap();
     if (!playing_ && snapFramesLeft_ > 0) writeSnap(restoreSnap_);
     if (restoreWaitFrames_ > 0) checkRestoreGear();
@@ -496,6 +501,21 @@ void SimBridge::logOverrides() {
         }
         if (reported == 0) log::info("playback: all %d written channels held their values", playChannelCount_);
     }
+    int eventsChecked = 0;
+    int eventsOff = 0;
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (eventChecked_[c] < 30) continue;
+        ++eventsChecked;
+        const int pct = eventOff_[c] * 100 / eventChecked_[c];
+        if (pct < 20) continue;
+        ++eventsOff;
+        const ChannelDef& ch = kChannels[c];
+        log::warn("playback: %s (%s) didn't follow the clip in %d%% of frames; the aircraft seems to ignore %s",
+                  ch.key, ch.simvar, pct, ch.playEvent ? ch.playEvent : (ch.playEventOn ? ch.playEventOn : "its events"));
+    }
+    if (eventsChecked > 0 && eventsOff == 0) {
+        log::info("playback: all %d checked light/reverser channels followed the clip", eventsChecked);
+    }
     if (throttleViaEvents_ && clipHasThrottle_ && throttleCheckedFrames_ >= 30) {
         const int pct = throttleOffFrames_ * 100 / throttleCheckedFrames_;
         if (pct >= 20) {
@@ -532,11 +552,26 @@ void SimBridge::sendThrottleEvents(const Frame& frame, bool force) {
         if (!playPresent_.test(static_cast<size_t>(c))) continue;
         const double pct = frame.v[c];
         if (!std::isfinite(pct)) continue;
-        // The axis runs -16384..16384 from idle to full. Reverse (negative percent) can't be
-        // reached this way, so it's held at idle.
-        const double clamped = pct < 0.0 ? 0.0 : (pct > 100.0 ? 100.0 : pct);
-        const int32_t axis = static_cast<int32_t>(std::lround(clamped * 327.68 - 16384.0));
-        throttleTarget_[e] = clamped;
+        // The axis runs -16384..16384. Out of reverse that's idle..full. With the reverser engaged
+        // the event sets the reverse amount instead: idle..full reverse (the throttle lower
+        // limit). The reverser itself is switched by the rev_N on/off events, so go by the
+        // aircraft's live reverser state and hold idle until it matches the clip.
+        const double rev = frame.v[kReverser1 + e];
+        const bool clipReverse = std::isfinite(rev) ? rev >= 0.5 : pct < 0.0;
+        const bool liveReverse = input_.raw.v[kReverser1 + e] >= 0.5;
+        const double lower = std::isfinite(throttleLowerLimit_) && throttleLowerLimit_ < -1.0 ? throttleLowerLimit_ : 0.0;
+        double fraction = 0.0;
+        double target = 0.0;
+        if (clipReverse && liveReverse && lower < 0.0) {
+            fraction = pct / lower;
+            target = pct < lower ? lower : (pct > 0.0 ? 0.0 : pct);
+        } else if (!clipReverse && !liveReverse) {
+            fraction = pct / 100.0;
+            target = pct < 0.0 ? 0.0 : (pct > 100.0 ? 100.0 : pct);
+        }
+        fraction = fraction < 0.0 ? 0.0 : (fraction > 1.0 ? 1.0 : fraction);
+        const int32_t axis = static_cast<int32_t>(std::lround(fraction * 32768.0 - 16384.0));
+        throttleTarget_[e] = target;
         if (!force && axis == throttleSent_[e] && ++throttleSinceSend_[e] < kThrottleResendFrames) continue;
         throttleSent_[e] = axis;
         throttleSinceSend_[e] = 0;
@@ -566,6 +601,31 @@ void SimBridge::checkThrottleEvents() {
     if (off) ++throttleOffFrames_;
 }
 
+void SimBridge::trackEventChannels(const Frame& frame, bool jumped) {
+    for (int c = 0; c < kChannelCount; ++c) {
+        const ChannelDef& ch = kChannels[c];
+        if (ch.play != PlayMode::Event || c == kGearHandle) continue;
+        if (!playPresent_.test(static_cast<size_t>(c)) || ch.engine > numEngines_) continue;
+        const double want = onOff(frame.v[c]);
+        if (jumped || !(want == eventWant_[c])) eventGrace_[c] = kEventGraceFrames;
+        eventWant_[c] = want;
+    }
+}
+
+void SimBridge::checkEventChannels() {
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (!std::isfinite(eventWant_[c])) continue;
+        if (eventGrace_[c] > 0) {
+            --eventGrace_[c];
+            continue;
+        }
+        const double live = onOff(input_.raw.v[c]);
+        if (std::isnan(live)) continue;
+        ++eventChecked_[c];
+        if (live != eventWant_[c]) ++eventOff_[c];
+    }
+}
+
 void SimBridge::beginPlayback(const ChannelMask& present) {
     if (!h_) return;
     restoreWaitFrames_ = 0;  // a new clip started while still settling a restore: playback wins
@@ -592,7 +652,13 @@ void SimBridge::beginPlayback(const ChannelMask& present) {
         throttleTarget_[e] = NAN;
         throttleSinceSend_[e] = kThrottleResendFrames;
     }
-    for (int c = 0; c < kChannelCount; ++c) lastSentEvent_[c] = onOff(input_.raw.v[c]);
+    for (int c = 0; c < kChannelCount; ++c) {
+        lastSentEvent_[c] = onOff(input_.raw.v[c]);
+        eventWant_[c] = NAN;
+        eventGrace_[c] = 0;
+        eventChecked_[c] = 0;
+        eventOff_[c] = 0;
+    }
     sendFreeze(true);
 
     const char* throttle;
@@ -652,6 +718,7 @@ void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
     if (jumped) snapFramesLeft_ = kSnapFrames;
     if (snapFramesLeft_ > 0) writeSnap(frame);
     if (throttleViaEvents_ && clipHasThrottle_) sendThrottleEvents(frame, jumped);
+    trackEventChannels(frame, jumped);
     if (playChannelCount_ == 0) return;
     for (int i = 0; i < playChannelCount_; ++i) {
         const int c = playChannels_[i];
@@ -671,13 +738,16 @@ void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
 void SimBridge::sendChannelEvent(int channel, double value) {
     if (!h_ || channel < 0 || channel >= kChannelCount) return;
     const ChannelDef& ch = kChannels[channel];
+    if (ch.engine > numEngines_) return;  // e.g. reverser 3/4 on a twin
     const DWORD state = value >= 0.5 ? 1 : 0;
     // Lights: parameter 0 on/off, parameter 1 circuit index (0 = all circuits).
     // GEAR_SET: parameter 0 is 1 = down, 0 = up; parameter 1 is ignored.
-    track(SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, EVT_CHANNEL_FIRST + channel,
-                                             SIMCONNECT_GROUP_PRIORITY_HIGHEST,
-                                             SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY, state, 0),
-          ch.playEvent);
+    if (ch.playEvent) {
+        track(SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, EVT_CHANNEL_FIRST + channel,
+                                                 SIMCONNECT_GROUP_PRIORITY_HIGHEST,
+                                                 SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY, state, 0),
+              ch.playEvent);
+    }
     const char* extra = state ? ch.playEventOn : ch.playEventOff;
     if (extra) {
         track(SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT,
@@ -689,11 +759,11 @@ void SimBridge::sendChannelEvent(int channel, double value) {
     // Play/seek/stop resend every event channel; only log the ones that actually change.
     const bool changed = lastSentEvent_[channel] != static_cast<double>(state);
     lastSentEvent_[channel] = state;
+    const char* name = ch.playEvent ? ch.playEvent : ch.key;
     if (changed) {
-        log::info("playback: %s %lu%s%s", ch.playEvent, static_cast<unsigned long>(state), extra ? " + " : "",
-                  extra ? extra : "");
+        log::info("playback: %s %lu%s%s", name, static_cast<unsigned long>(state), extra ? " + " : "", extra ? extra : "");
     } else {
-        log::debug("playback: %s %lu (resync)", ch.playEvent, static_cast<unsigned long>(state));
+        log::debug("playback: %s %lu (resync)", name, static_cast<unsigned long>(state));
     }
 
     if (channel == kGearHandle && changed && playing_) {
