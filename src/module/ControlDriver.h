@@ -31,6 +31,7 @@ public:
         const int* flapPositions = nullptr;
         const double* throttleLowerLimit = nullptr;  // percent, negative with reversers
         const std::vector<InputEventInfo>* inputEvents = nullptr;
+        const ChannelMask* clipChannels = nullptr;  // the playing clip's channels (empty otherwise)
     };
     void setContext(const Context& c) { ctx_ = c; }
 
@@ -66,9 +67,14 @@ private:
         double sent[4] = {NAN, NAN, NAN, NAN};
         int since[4] = {};
         int errors = 0;
+        int sends = 0;  // values sent, logged at the end (key events should be rare)
     };
     // Whether value v for output i is due (changed, forced or time to resend); records it.
     static bool due(Slot& s, int i, double v, bool force);
+    // For key events, which act like moving the hardware: due only when forced or when v moved at
+    // least minStep from what was last sent. No periodic resend, and no creeping in tiny steps:
+    // every event makes the aircraft re-evaluate its lever.
+    static bool dueOnChange(Slot& s, int i, double v, bool force, double minStep);
     void applyKeyEvent(Control c, Slot& s, const Frame& f, bool force);
     static void keyEvent(int id, int32_t value);
 

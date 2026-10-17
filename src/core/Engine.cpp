@@ -562,6 +562,11 @@ bool Engine::stopPlayback(std::string& error) {
 }
 
 void Engine::playbackFrame(double dt) {
+    if (jumpPending_ && out_) {
+        playback_.current(playFrame_);  // where the jump goes, without moving the playhead
+        preparing_ = !out_->prepareJump(playFrame_);
+        if (preparing_) return;
+    }
     playback_.advance(dt);
     playback_.current(playFrame_);
     // After play or seek the aircraft can be in any state (gear up from the end of the last run,
@@ -594,6 +599,7 @@ void Engine::endPlayback(bool restore, const char* why) {
         out_->endPlayback(snapshot_, restore);
     }
     jumpPending_ = false;
+    preparing_ = false;
     playback_.unload();
     playbackActive_ = false;
     settleFrames_ = kSettleFrames;
@@ -728,6 +734,7 @@ void Engine::statusJson(std::string& out) const {
     w.kv("dur", playback_.duration());
     w.kv("speed", playback_.speed());
     w.kv("playing", playback_.playing());
+    w.kv("preparing", preparing_);
     w.kv("eventT", playback_.loaded() ? static_cast<double>(playback_.clip().meta.eventOffsetSec) : 0.0);
     w.endObject();
     w.key("setup").beginObject();

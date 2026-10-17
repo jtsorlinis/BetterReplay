@@ -249,6 +249,19 @@ struct FakeSim : ISimOutput {
         restored = snapshot;
     }
     bool restoring() const override { return busyRestoring; }
+    // prepareJump: not ready for this many more calls.
+    int prepareFrames = 0;
+    int prepareCalls = 0;
+    double prepareTarget = NAN;
+    bool prepareJump(const Frame& target) override {
+        ++prepareCalls;
+        prepareTarget = target.t;
+        if (prepareFrames > 0) {
+            --prepareFrames;
+            return false;
+        }
+        return true;
+    }
 
     // Events sent for one channel, in order.
     std::vector<double> eventsFor(int channel) const {
@@ -486,6 +499,36 @@ TEST(EnginePlayback_EventChannelsSendStateChangesOnly) {
     CHECK(h.sim.eventsFor(kGearHandle) == (std::vector<double>{0.0, 1.0}));
     REQUIRE(h.engine.stopPlayback(err));  // live aircraft had the handle up: send it back up
     CHECK(h.sim.eventsFor(kGearHandle) == (std::vector<double>{0.0, 1.0, 0.0}));
+}
+
+TEST(EnginePlayback_HoldsBeforeAJumpUntilTheSimIsReady) {
+    PlaybackHarness h;
+    std::string err;
+    h.sim.prepareFrames = 30;  // e.g. half a second lowering the gear before going to the runway
+    REQUIRE(h.engine.play(h.clipFile, err));
+    h.frames(30, -33.0);
+    CHECK(h.sim.written.empty());  // nothing written: the aircraft stays where it was
+    CHECK(h.sim.events.empty());
+    CHECK_NEAR(h.engine.playback().time(), 0.0, 0);  // the playhead waits
+    CHECK_NEAR(h.sim.prepareTarget, 0.0, 1e-9);
+    std::string status;
+    h.engine.statusJson(status);
+    CHECK(status.find("\"preparing\":true") != std::string::npos);
+
+    h.frames(1, -33.0);  // ready: the jump happens and playback runs on
+    CHECK_EQ(h.sim.jumps, 1);
+    REQUIRE(h.sim.written.size() == 1);
+    h.engine.statusJson(status);
+    CHECK(status.find("\"preparing\":false") != std::string::npos);
+    h.frames(60, -33.0);
+    CHECK_NEAR(h.engine.playback().time(), 1.0 + 1.0 / 60.0, 1e-6);
+
+    // A seek asks again, for the new target; frames in between don't.
+    const int calls = h.sim.prepareCalls;
+    REQUIRE(h.engine.seek(5.0, err));
+    h.frames(1, -33.0);
+    CHECK_EQ(h.sim.prepareCalls, calls + 1);
+    CHECK_NEAR(h.sim.prepareTarget, 5.0, 1e-9);
 }
 
 TEST(EnginePlayback_ReversersFollowTheClip) {

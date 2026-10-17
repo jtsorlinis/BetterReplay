@@ -130,6 +130,10 @@ enum Channel : uint16_t {
     kLVarGear,
     kLVarFlaps,
     kLVarSpeedBrakes,
+    kThrottleAxis1,
+    kThrottleAxis2,
+    kThrottleAxis3,
+    kThrottleAxis4,
     kChannelCount
 };
 

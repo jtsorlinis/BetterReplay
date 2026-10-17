@@ -26,6 +26,7 @@ interface PlayState {
     dur: number;
     speed: number;
     playing: boolean;
+    preparing?: boolean;  // holding before a jump, e.g. lowering the gear before going to the runway
     eventT: number;
 }
 interface SetupControl {
@@ -939,7 +940,11 @@ class BetterReplayPanel extends UIElement {
 
         const clip = this.findClip(p.file);
         byId("br-now").textContent = clip ? eventLabel(clip.event) + " · " + formatLocalDate(clip.utcMs) : p.file;
-        byId("br-now-sub").textContent = clip ? clipFacts(clip).join(" · ") : "";
+        byId("br-now-sub").textContent = p.preparing
+            ? "Lowering the gear before the replay starts…"
+            : clip
+              ? clipFacts(clip).join(" · ")
+              : "";
         if (!this.seekDragging) this.renderSeek(p.dur > 0 ? p.t / p.dur : 0);
 
         const marker = byId("br-seek-marker");

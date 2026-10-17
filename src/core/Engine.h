@@ -30,6 +30,14 @@ public:
     // A PlayMode::Event channel's state: sent when it changes, and for every such channel in the
     // clip after play, seek and stop, so the aircraft can't stay out of step with the clip.
     virtual void sendChannelEvent(int channel, double value) = 0;
+    // Called before playback jumps (play, seek, replay) to `target`, every frame until it returns
+    // true; meanwhile the playhead holds and nothing is written, so the aircraft stays where it
+    // is. Lets the sim side get ready first, e.g. lower the gear in the air before the jump puts
+    // the aircraft on the runway (an aircraft that animates its own gear can't extend it there).
+    virtual bool prepareJump(const Frame& target) {
+        (void)target;
+        return true;
+    }
     // Optionally restore the pre-playback snapshot (Set and Snap channels), then unfreeze.
     virtual void endPlayback(const Frame& snapshot, bool restore) = 0;
     // True while the sim side is still settling the restored aircraft (e.g. waiting for the gear
@@ -204,6 +212,7 @@ private:
     Frame snapshot_;  // aircraft state when playback started
     double lastEventValue_[kChannelCount] = {};
     bool jumpPending_ = false;  // play/seek happened: resync event channels and snap the next frame
+    bool preparing_ = false;    // holding before a jump until ISimOutput::prepareJump is ready
     Frame playFrame_;
     // After a restore the sim may report the old position for a frame or two; don't record those.
     static constexpr int kSettleFrames = 30;

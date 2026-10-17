@@ -30,6 +30,15 @@ bool ControlDriver::due(Slot& s, int i, double v, bool force) {
     if (!force && !changed && ++s.since[i] < kResendFrames) return false;
     s.sent[i] = v;
     s.since[i] = 0;
+    ++s.sends;
+    return true;
+}
+
+bool ControlDriver::dueOnChange(Slot& s, int i, double v, bool force, double minStep) {
+    if (!force && std::isfinite(s.sent[i]) && std::fabs(v - s.sent[i]) < minStep) return false;
+    s.sent[i] = v;
+    s.since[i] = 0;
+    ++s.sends;
     return true;
 }
 
@@ -203,24 +212,34 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
     switch (c) {
         case Control::Throttle:
             for (int e = 0; e < s.count; ++e) {
-                const double pct = f.v[kThrottle1 + e];
-                if (!std::isfinite(pct)) continue;
-                // As a hardware axis: idle..full out of reverse; with the reverser engaged
-                // (switched by the clip's reverser events), idle..full reverse. Hold idle until
-                // the aircraft's reverser matches the clip.
-                const double rev = f.v[kReverser1 + e];
-                const bool clipReverse = std::isfinite(rev) ? rev >= 0.5 : pct < 0.0;
-                const bool liveReverse = ctx_.live && ctx_.live->v[kReverser1 + e] >= 0.5;
-                const double limit = ctx_.throttleLowerLimit ? *ctx_.throttleLowerLimit : NAN;
-                const double lower = std::isfinite(limit) && limit < -1.0 ? limit : 0.0;
-                double fraction = 0.0;
-                if (clipReverse && liveReverse && lower < 0.0) {
-                    fraction = pct / lower;
-                } else if (!clipReverse && !liveReverse) {
-                    fraction = pct / 100.0;
+                double fraction = NAN;
+                const double hw = f.v[kThrottleAxis1 + e];
+                if (std::isfinite(hw)) {
+                    // The pilot's own hardware axis: puts the lever exactly where it was, detents
+                    // and any reverse zone on the axis included.
+                    fraction = hw;
+                } else if (ctx_.clipChannels && ctx_.clipChannels->test(static_cast<size_t>(kThrottleAxis1 + e))) {
+                    continue;  // the clip has the axis, but not yet here (before the hardware moved): hold
+                } else {
+                    // Older clips: from the lever simvar. Idle..full out of reverse; with the
+                    // reverser engaged (switched by the clip's reverser events), idle..full
+                    // reverse. Hold idle until the aircraft's reverser matches the clip.
+                    const double pct = f.v[kThrottle1 + e];
+                    if (!std::isfinite(pct)) continue;
+                    const double rev = f.v[kReverser1 + e];
+                    const bool clipReverse = std::isfinite(rev) ? rev >= 0.5 : pct < 0.0;
+                    const bool liveReverse = ctx_.live && ctx_.live->v[kReverser1 + e] >= 0.5;
+                    const double limit = ctx_.throttleLowerLimit ? *ctx_.throttleLowerLimit : NAN;
+                    const double lower = std::isfinite(limit) && limit < -1.0 ? limit : 0.0;
+                    fraction = 0.0;
+                    if (clipReverse && liveReverse && lower < 0.0) {
+                        fraction = pct / lower;
+                    } else if (!clipReverse && !liveReverse) {
+                        fraction = pct / 100.0;
+                    }
                 }
                 const double axis = static_cast<double>(std::lround(clamp(fraction, 0.0, 1.0) * 32768.0 - 16384.0));
-                if (due(s, e, axis, force)) keyEvent(kThrottleAxisKeys[e], static_cast<int32_t>(axis));
+                if (dueOnChange(s, e, axis, force, 48.0)) keyEvent(kThrottleAxisKeys[e], static_cast<int32_t>(axis));
             }
             break;
         case Control::Flaps: {
@@ -228,14 +247,14 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
             const int positions = ctx_.flapPositions ? *ctx_.flapPositions : 0;
             if (!std::isfinite(idx) || positions < 2) break;
             const double value = std::round(clamp(std::round(idx), 0.0, positions - 1.0) / (positions - 1.0) * 16383.0);
-            if (due(s, 0, value, force)) keyEvent(KEY_FLAPS_SET, static_cast<int32_t>(value));
+            if (dueOnChange(s, 0, value, force, 1.0)) keyEvent(KEY_FLAPS_SET, static_cast<int32_t>(value));
             break;
         }
         case Control::Spoilers: {
             const double h = f.v[kSpoilersHandle];
             if (!std::isfinite(h)) break;
             const double value = std::round(clamp(h, 0.0, 1.0) * 16383.0);
-            if (due(s, 0, value, force)) keyEvent(KEY_SPOILERS_SET, static_cast<int32_t>(value));
+            if (dueOnChange(s, 0, value, force, 24.0)) keyEvent(KEY_SPOILERS_SET, static_cast<int32_t>(value));
             break;
         }
         case Control::Gear: {
@@ -256,6 +275,8 @@ void ControlDriver::end(Control c) {
     Slot& s = slots_[static_cast<int>(c)];
     if (!s.active) return;
     s.active = false;
+    log::info("controls: %d value(s) sent to the %s with %s", s.sends, controlSpec(c).label,
+              describeMethod(c, s.method).c_str());
     if (s.errors > 0) log::warn("controls: %d error(s) driving the %s", s.errors, controlSpec(c).label);
 }
 

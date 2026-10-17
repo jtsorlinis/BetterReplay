@@ -3,6 +3,7 @@
 #pragma once
 
 #include <MSFS/MSFS_WindowsTypes.h>
+#include <MSFS/MSFS_Events.h>
 #include <MSFS/MSFS_Vars.h>
 #include <SimConnect.h>
 
@@ -31,6 +32,7 @@ public:
     void sendChannelEvent(int channel, double value) override;
     void endPlayback(const Frame& snapshot, bool restore) override;
     bool restoring() const override { return restoreWaitFrames_ > 0; }
+    bool prepareJump(const Frame& target) override;
     void applyProfile(const AircraftProfile* profile) override;
 
     // IControlSim (the control setup)
@@ -96,6 +98,9 @@ private:
     };
 
     static void CALLBACK dispatchThunk(SIMCONNECT_RECV* data, DWORD size, void* ctx);
+    static void keyEventThunk(FsEventId id, FsVarParamArray* params, void* ctx);
+    // Hardware throttle key events: tracks the pilot's throttle axis for the thr_axis_N channels.
+    void onKeyEvent(FsEventId id, const FsVarParamArray* params);
     void dispatch(SIMCONNECT_RECV* data, DWORD size);
     void onSystemEvent(DWORD id, DWORD data);
     void onFlowEvent(DWORD flow, const char* path);
@@ -254,6 +259,20 @@ private:
     int throttleOffFrames_ = 0;
     bool firstThrottleEvent_ = false;
     double throttleLowerLimit_ = NAN;  // THROTTLE LOWER LIMIT (percent, negative with reversers)
+    // The pilot's hardware throttle axis per engine (0..1), from the key events; NaN until it moves
+    // (and after a flight load, when the aircraft's levers start from scratch).
+    double throttleAxis_[4] = {NAN, NAN, NAN, NAN};
+    bool throttleAxisLogged_ = false;
+    // Before a jump onto the ground with the gear down, on an aircraft whose gear can't be snapped:
+    // lower it where the aircraft is first (see prepareJump).
+    static constexpr int kPrepareGearMaxFrames = 1800;  // ~30 s at 60 fps
+    int prepareFrames_ = 0;
+    bool prepareGearSent_ = false;
+    bool snapAccepted_ = false;    // a gear snap held on this aircraft: no need to lower it first
+    bool restoreDeferred_ = false;  // Stop: lowering the gear before putting the aircraft back
+    static double gearExtensionOf(const Frame& f);
+    void commandGearDown(const Frame& target);
+    void writeRestore(const Frame& snapshot);
     // Event channel diagnostics (gear has its own check): the state each should be in, checked
     // after a grace period following every change, since reversers take a moment to move.
     static constexpr int kEventGraceFrames = 180;  // ~3 s at 60 fps

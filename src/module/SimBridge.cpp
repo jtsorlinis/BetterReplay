@@ -199,7 +199,9 @@ bool SimBridge::open() {
     ctx.flapPositions = &flapPositions_;
     ctx.throttleLowerLimit = &throttleLowerLimit_;
     ctx.inputEvents = &inputEvents_;
+    ctx.clipChannels = &playPresent_;
     driver_.setContext(ctx);
+    fsEventsRegisterKeyEventHandler(&SimBridge::keyEventThunk, this);
     requestAircraftPath();
 
     log::info("SimConnect ready: %d simvar channels + %d extras per frame, %d input event / L:var channels",
@@ -234,8 +236,60 @@ void SimBridge::onSystemState(const SIMCONNECT_RECV_SYSTEM_STATE* s) {
 
 void SimBridge::close() {
     if (h_) {
+        fsEventsUnregisterKeyEventHandler(&SimBridge::keyEventThunk, this);
         SimConnect_Close(h_);
         h_ = 0;
+    }
+}
+
+void SimBridge::keyEventThunk(FsEventId id, FsVarParamArray* params, void* ctx) {
+    static_cast<SimBridge*>(ctx)->onKeyEvent(id, params);
+}
+
+// The hardware throttle arrives as key events. Their values are the pilot's actual lever, which
+// the lever simvar isn't on every aircraft (on the A320neo V2 under autothrust it's the thrust
+// demand), so they're recorded as the thr_axis_N channels for the key-event throttle method.
+void SimBridge::onKeyEvent(FsEventId id, const FsVarParamArray* params) {
+    // While playback or the control setup drives the throttle, these are our own events.
+    if (playing_ || driver_.active(Control::Throttle)) return;
+    struct Mapping {
+        int id;
+        int engine;  // 1-4, 0 = all engines
+        int kind;    // 0: axis -16384..16384, 1: 0..16383, 2: full, 3: cut, 4: unknown (increment)
+    };
+    static const Mapping kMappings[] = {
+        {KEY_THROTTLE_AXIS_SET_EX1, 0, 0},  {KEY_THROTTLE1_AXIS_SET_EX1, 1, 0}, {KEY_THROTTLE2_AXIS_SET_EX1, 2, 0},
+        {KEY_THROTTLE3_AXIS_SET_EX1, 3, 0}, {KEY_THROTTLE4_AXIS_SET_EX1, 4, 0}, {KEY_AXIS_THROTTLE_SET, 0, 0},
+        {KEY_AXIS_THROTTLE1_SET, 1, 0},     {KEY_AXIS_THROTTLE2_SET, 2, 0},     {KEY_AXIS_THROTTLE3_SET, 3, 0},
+        {KEY_AXIS_THROTTLE4_SET, 4, 0},     {KEY_THROTTLE_SET, 0, 1},           {KEY_THROTTLE1_SET, 1, 1},
+        {KEY_THROTTLE2_SET, 2, 1},          {KEY_THROTTLE3_SET, 3, 1},          {KEY_THROTTLE4_SET, 4, 1},
+        {KEY_THROTTLE_FULL, 0, 2},          {KEY_THROTTLE_FULL_EX1, 0, 2},      {KEY_THROTTLE_CUT, 0, 3},
+        {KEY_THROTTLE_CUT_EX1, 0, 3},       {KEY_THROTTLE_INCR, 0, 4},          {KEY_THROTTLE_DECR, 0, 4},
+        {KEY_THROTTLE_INCR_SMALL, 0, 4},    {KEY_THROTTLE_DECR_SMALL, 0, 4},    {KEY_THROTTLE_INCREASE_EX1, 0, 4},
+        {KEY_THROTTLE_DECREASE_EX1, 0, 4},
+    };
+    const Mapping* m = nullptr;
+    for (const Mapping& k : kMappings) {
+        if (k.id == id) m = &k;
+    }
+    if (!m) return;
+    const int32_t raw = params && params->size > 0 && params->array ? static_cast<int32_t>(params->array[0].intValue) : 0;
+    double v = NAN;  // increments: the lever's position is no longer known
+    switch (m->kind) {
+        case 0: v = (raw + 16384.0) / 32768.0; break;
+        case 1: v = raw / 16383.0; break;
+        case 2: v = 1.0; break;
+        case 3: v = 0.0; break;
+        default: break;
+    }
+    if (std::isfinite(v)) v = v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
+    for (int e = 0; e < 4; ++e) {
+        if (m->engine == 0 || m->engine == e + 1) throttleAxis_[e] = v;
+    }
+    if (!throttleAxisLogged_) {
+        throttleAxisLogged_ = true;
+        log::info("throttle hardware: key event %d, value %ld; recording the throttle axis from now on", id,
+                  static_cast<long>(raw));
     }
 }
 
@@ -298,6 +352,8 @@ void SimBridge::dispatch(SIMCONNECT_RECV* p, DWORD size) {
                 engine_.onFlightLoaded("FlightLoaded event");
                 onAircraftChanged();
                 resetInputEvents(false);  // the old aircraft's input events are gone; don't poll them
+                for (double& a : throttleAxis_) a = NAN;  // the new aircraft's levers start from scratch
+                throttleAxisLogged_ = false;
                 inputEvents_.clear();
                 inputEventsListed_ = false;
                 enumerateAtFrame_ = frameCount_ + 120;  // list the new aircraft's input events once it's settled
@@ -453,6 +509,7 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
             input_.raw.v[c] = lv;
         }
     }
+    for (int e = 0; e < 4; ++e) input_.raw.v[kThrottleAxis1 + e] = e < numEngines_ ? throttleAxis_[e] : NAN;
     const double* ex = v + recordCount_;
     input_.simTimeSec = ex[kExSimTime];
     input_.slewActive = ex[kExSlew] >= 0.5;
@@ -800,6 +857,9 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     if (!h_) return;
     const ChannelMask& present = clip.present;
     restoreWaitFrames_ = 0;  // a new clip started while still settling a restore: playback wins
+    restoreDeferred_ = false;
+    prepareGearSent_ = false;
+    prepareFrames_ = 0;
     snapFramesLeft_ = 0;
     snapCheckFrames_ = 0;
     if (playing_) driver_.endAll();  // switching clips
@@ -960,7 +1020,58 @@ void SimBridge::checkSnap() {
             return;
         }
     }
+    snapAccepted_ = true;
     log::debug("playback: snapped values held");
+}
+
+double SimBridge::gearExtensionOf(const Frame& f) {
+    double sum = 0.0;
+    int n = 0;
+    for (int c : {static_cast<int>(kGearCenter), static_cast<int>(kGearLeft), static_cast<int>(kGearRight)}) {
+        if (std::isfinite(f.v[c])) {
+            sum += f.v[c];
+            ++n;
+        }
+    }
+    return n > 0 ? sum / n : NAN;
+}
+
+void SimBridge::commandGearDown(const Frame& target) {
+    if (profileDrives_[static_cast<int>(Control::Gear)]) {
+        driver_.apply(Control::Gear, target, true);
+    } else {
+        sendChannelEvent(kGearHandle, 1.0);
+    }
+}
+
+// A jump onto the ground with the gear down while the aircraft's gear is up: unless gear
+// positions are known to snap on this aircraft, lower the gear first, here, frozen where the
+// aircraft is. Lowering it after the jump puts the extending gear into the runway, and on the
+// A320neo V2 the gear then stops half way.
+bool SimBridge::prepareJump(const Frame& target) {
+    if (!h_ || !playing_) return true;
+    const double live = liveGearExtension();
+    const bool needed = !snapAccepted_ && target.v[kOnGround] >= 0.5 && gearExtensionOf(target) >= 0.95 &&
+                        std::isfinite(live) && live < 0.95;
+    if (!needed) {
+        if (prepareGearSent_) log::info("playback: gear down after %.1f s; going to the clip", prepareFrames_ / 60.0);
+        prepareGearSent_ = false;
+        prepareFrames_ = 0;
+        return true;
+    }
+    if (!prepareGearSent_) {
+        prepareGearSent_ = true;
+        prepareFrames_ = 0;
+        log::info("playback: lowering the gear before going to the runway (gear at %.2f)", live);
+        commandGearDown(target);
+    }
+    if (++prepareFrames_ >= kPrepareGearMaxFrames) {
+        log::warn("playback: the gear didn't come down within %d s; going to the clip anyway", kPrepareGearMaxFrames / 60);
+        prepareGearSent_ = false;
+        prepareFrames_ = 0;
+        return true;
+    }
+    return false;
 }
 
 void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
@@ -1323,6 +1434,7 @@ void SimBridge::onAircraftChanged() {
     if (throttleViaEvents_) log::info("aircraft changed: trying the throttle simvars first again");
     throttleViaEvents_ = false;
     snapRejected_ = false;
+    snapAccepted_ = false;
 }
 
 void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
@@ -1348,34 +1460,49 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     // Input events back to the aircraft's own values from before playback.
     sendInputEvents(snapshot, true);
     for (bool& a : ieActive_) a = false;
-    restoreChannelCount_ =
-        buildDefinition(DEF_RESTORE, restoreDefDefined_, PlayMode::Set, nullptr, restoreChannels_);
-    for (int i = 0; i < restoreChannelCount_; ++i) setBuffer_[i] = snapshot.v[restoreChannels_[i]];
-    track(SimConnect_SetDataOnSimObject(h_, DEF_RESTORE, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, 0, 0,
-                                        static_cast<DWORD>(restoreChannelCount_ * sizeof(double)), setBuffer_),
-          "SetDataOnSimObject (restore snapshot)");
     if (throttleViaEvents_ && clipHasThrottle_) sendThrottleEvents(snapshot, true);
-    log::info("playback: restored aircraft to lat %.5f lon %.5f alt %.0f ft", snapshot.v[kLat], snapshot.v[kLon],
-              snapshot.v[kAlt]);
+    playPresent_.reset();
 
     // The gear handle was just put back (GEAR_SET). Snap the gear positions back too, for a few
     // frames, so it doesn't animate from wherever the clip left it. If the aircraft won't take
     // that and it's on the ground, stay frozen until the gear is back down, or it would drop
     // onto its belly. In the air it can finish moving while flying.
     restoreSnap_ = snapshot;
+    restoreGear_[0] = snapshot.v[kGearCenter];
+    restoreGear_[1] = snapshot.v[kGearLeft];
+    restoreGear_[2] = snapshot.v[kGearRight];
+    const bool ground = snapshot.v[kOnGround] >= 0.5;
+    const double live = liveGearExtension();
+    if (ground && !snapAccepted_ && gearExtensionOf(snapshot) >= 0.95 && std::isfinite(live) && live < 0.95) {
+        // Going back onto the ground with the gear up: lower it here first (still frozen where the
+        // clip left the aircraft), then put the aircraft back; see prepareJump.
+        restoreDeferred_ = true;
+        restoreWaitFrames_ = kRestoreGearMaxFrames;
+        log::info("playback: lowering the gear before putting the aircraft back on the ground (gear at %.2f)", live);
+        return;
+    }
+    writeRestore(snapshot);
     if (!snapRejected_) {
         snapFramesLeft_ = kSnapFrames;
         writeSnap(restoreSnap_);
     }
-    restoreGear_[0] = snapshot.v[kGearCenter];
-    restoreGear_[1] = snapshot.v[kGearLeft];
-    restoreGear_[2] = snapshot.v[kGearRight];
-    if (snapshot.v[kOnGround] >= 0.5) {
+    if (ground) {
         restoreWaitFrames_ = kRestoreGearMaxFrames;
         checkRestoreGear();
     } else {
         sendFreeze(false);
     }
+}
+
+void SimBridge::writeRestore(const Frame& snapshot) {
+    restoreChannelCount_ =
+        buildDefinition(DEF_RESTORE, restoreDefDefined_, PlayMode::Set, nullptr, restoreChannels_);
+    for (int i = 0; i < restoreChannelCount_; ++i) setBuffer_[i] = snapshot.v[restoreChannels_[i]];
+    track(SimConnect_SetDataOnSimObject(h_, DEF_RESTORE, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, 0, 0,
+                                        static_cast<DWORD>(restoreChannelCount_ * sizeof(double)), setBuffer_),
+          "SetDataOnSimObject (restore snapshot)");
+    log::info("playback: restored aircraft to lat %.5f lon %.5f alt %.0f ft", snapshot.v[kLat], snapshot.v[kLon],
+              snapshot.v[kAlt]);
 }
 
 void SimBridge::checkRestoreGear() {
@@ -1386,9 +1513,19 @@ void SimBridge::checkRestoreGear() {
         const double live = input_.raw.v[kGear[i]];
         if (std::isfinite(target) && std::isfinite(live) && std::fabs(live - target) > 0.02) settled = false;
     }
+    const bool timedOut = !settled && --restoreWaitFrames_ <= 0;
+    if (restoreDeferred_) {
+        // The gear was being lowered before putting the aircraft back on the ground (endPlayback).
+        if (!settled && !timedOut) return;
+        if (timedOut) log::warn("playback: the gear didn't come down within 20 s; putting the aircraft back anyway");
+        restoreDeferred_ = false;
+        writeRestore(restoreSnap_);
+        restoreWaitFrames_ = 10;  // a few frames for the position to land before unfreezing
+        return;
+    }
     if (settled) {
         if (restoreWaitFrames_ < kRestoreGearMaxFrames) log::info("playback: gear back in place; unfreezing");
-    } else if (--restoreWaitFrames_ > 0) {
+    } else if (!timedOut) {
         if (restoreWaitFrames_ == kRestoreGearMaxFrames - 1) log::info("playback: waiting for the gear before unfreezing");
         return;
     } else {

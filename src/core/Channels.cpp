@@ -129,6 +129,15 @@ const ChannelDef kChannels[kChannelCount] = {
     {"lv_gear", nullptr, nullptr, F32, STEP, LVAR, nullptr},
     {"lv_flaps", nullptr, nullptr, F32, STEP, LVAR, nullptr},
     {"lv_spdbrk", nullptr, nullptr, F32, LIN, LVAR, nullptr},
+    // The pilot's hardware throttle axis per engine, 0 (idle end) .. 1 (full), taken from the
+    // throttle key events the module sees (SimBridge::onKeyEvent); NaN until the hardware moves.
+    // The key-event throttle method replays it, which puts the lever exactly where the pilot had
+    // it, detents included. GENERAL ENG THROTTLE LEVER POSITION isn't the lever on every aircraft:
+    // on the A320neo V2 under autothrust it's the thrust demand, so CLB looked like TOGA.
+    {"thr_axis_1", nullptr, nullptr, F32, LIN, NONE, nullptr, nullptr, nullptr, 1},
+    {"thr_axis_2", nullptr, nullptr, F32, LIN, NONE, nullptr, nullptr, nullptr, 2},
+    {"thr_axis_3", nullptr, nullptr, F32, LIN, NONE, nullptr, nullptr, nullptr, 3},
+    {"thr_axis_4", nullptr, nullptr, F32, LIN, NONE, nullptr, nullptr, nullptr, 4},
 };
 
 int findChannel(const char* key) {

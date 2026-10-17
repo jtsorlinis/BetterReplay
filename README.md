@@ -7,7 +7,7 @@ An in-sim auto replay recorder for Microsoft Flight Simulator 2024. It records y
 - **Toolbar panel:** shows recorder status and the clip list, and has play/pause, seek, speed (0.25x–4x), stop, delete and "save last 5 min".
 - **Control setup:** a guided setup per aircraft that finds out how replays can move its spoilers, flaps, throttle and gear, by watching you move each one and testing ways to replay it. See [Control setup](#control-setup).
 
-> **Status: MVP, early in-sim testing.** The platform-independent core has 103 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. The control setup hasn't run in the sim yet. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
+> **Status: MVP, early in-sim testing.** The platform-independent core has 104 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. The control setup hasn't run in the sim yet. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
 
 ## Requirements
 
@@ -180,7 +180,9 @@ None of these could be verified without running the sim. Each is covered by a st
 - **Control setup** (untested in the sim). Each of these logs what it found:
   - **Aircraft identity** is the path from `SimConnect_RequestSystemState("AircraftLoaded")`, falling back to the title. If 2024 gives each livery its own path, each livery needs its own setup. Look for `aircraft path: …`.
   - **Watching input events** reads them with `fsVarsBVarGet`. If that can't read them, only L:vars are found by their movement. Look for `setup scan: N input event(s), M of them readable`.
-  - **Key events** are sent from WASM with `fsEventsTriggerKeyEvent` (not SimConnect, where the throttle axis events failed on the A320neo V2).
+  - **Key events** are sent from WASM with `fsEventsTriggerKeyEvent` (not SimConnect, where the throttle axis events failed on the A320neo V2). They act like moving the hardware, so they're only sent when the value really changes (no periodic resend).
+  - **Throttle with key events** replays the pilot's hardware axis (`thr_axis_N`), recorded from the throttle key events the module sees (`fsEventsRegisterKeyEventHandler`), so the lever lands where it was, detents included. The lever simvar isn't the lever on every aircraft: on the A320neo V2 under autothrust it's the thrust demand, so CLB replayed as TOGA. Clips without the axis (older ones, or before the hardware first moved) fall back to the simvar. Look for `throttle hardware: key event …` after you first move the throttle; if it never appears, the aircraft takes the hardware another way.
+- **Gear before a jump onto the ground.** On aircraft where the gear can't be snapped into place (the A320neo V2 animates its own), lowering it after the jump puts the extending gear into the runway and it stops half way. So when Play, a seek or Stop goes onto the ground with the gear down while the aircraft's gear is up, the aircraft stays frozen where it is while the gear comes down (the panel says "Lowering the gear before the replay starts…"), then jumps; 30 s at most. Look for `playback: lowering the gear before going to the runway`.
   - **Simvars** are written with `fsVarsAVarSet`, with the index (`:1`) passed as a parameter.
   - **L:var channels** (`lv_*`) are only recorded on aircraft whose profile chose an L:var.
   - **Readings the checks use:** `TURB ENG N1`, `GENERAL ENG RPM`, `SPOILERS LEFT POSITION`, `ENGINE TYPE`, `BRAKE PARKING POSITION`, `ON ANY RUNWAY`, `GENERAL ENG COMBUSTION`, `IS GEAR RETRACTABLE`, `SPOILER AVAILABLE` and `FLAPS NUM HANDLE POSITIONS`. N1, RPM and spoiler position are also recorded in clips (about 0.6 MB more per 5 minutes).
