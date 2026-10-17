@@ -41,11 +41,14 @@ const ChannelDef kChannels[kChannelCount] = {
     {"ongnd", "SIM ON GROUND", "bool", U8, STEP, NONE, nullptr},
     {"g", "G FORCE", "gforce", F32, LIN, NONE, nullptr},
     // Writing gear positions every frame fights the aircraft's gear system (visible flicker), so
-    // playback only moves the handle (on change) and lets the sim animate the gear.
+    // playback only commands the gear (on change) and lets the sim animate it. The command is
+    // derived from the recorded gear positions at playback time (see PlaybackController), because
+    // some aircraft (e.g. the 2024 A320neo V2) only update GEAR HANDLE POSITION once the gear has
+    // finished moving. Aircraft differ in which gear events they honour, so all of them are sent.
     {"gear_c", "GEAR CENTER POSITION", "percent over 100", F32, LIN, NONE, nullptr},
     {"gear_l", "GEAR LEFT POSITION", "percent over 100", F32, LIN, NONE, nullptr},
     {"gear_r", "GEAR RIGHT POSITION", "percent over 100", F32, LIN, NONE, nullptr},
-    {"gear_h", "GEAR HANDLE POSITION", "percent over 100", F32, STEP, EVT, "GEAR_SET"},
+    {"gear_h", "GEAR HANDLE POSITION", "percent over 100", F32, STEP, EVT, "GEAR_SET", "GEAR_DOWN", "GEAR_UP"},
     {"flap_l", "TRAILING EDGE FLAPS LEFT PERCENT", "percent over 100", F32, LIN, SET, nullptr},
     {"flap_r", "TRAILING EDGE FLAPS RIGHT PERCENT", "percent over 100", F32, LIN, SET, nullptr},
     {"flap_idx", "FLAPS HANDLE INDEX", "number", F32, STEP, SET, nullptr},

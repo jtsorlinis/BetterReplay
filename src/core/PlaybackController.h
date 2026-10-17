@@ -7,6 +7,12 @@
 
 namespace br {
 
+// Replaces the clip's gear-handle channel with the gear command implied by the recorded gear
+// positions: "up" from the moment the gear starts retracting, "down" from the moment it starts
+// extending. Leaves the clip alone if it has no gear positions or the gear never moved (fixed gear).
+// Returns true if the channel was rewritten.
+bool deriveGearCommand(Clip& clip);
+
 class PlaybackController {
 public:
     static constexpr double kMinSpeed = 0.25;

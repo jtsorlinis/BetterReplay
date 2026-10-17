@@ -33,7 +33,9 @@ struct ChannelDef {
     Storage storage;        // on-disk representation
     Interp interp;
     PlayMode play;
-    const char* playEvent;  // key event for PlayMode::Event, otherwise nullptr
+    const char* playEvent;     // key event for PlayMode::Event (sent with 1/0), otherwise nullptr
+    const char* playEventOn = nullptr;   // optional extra event sent when the state turns on (e.g. GEAR_DOWN)
+    const char* playEventOff = nullptr;  // optional extra event sent when the state turns off (e.g. GEAR_UP)
 };
 
 enum Channel : uint16_t {

@@ -7,8 +7,58 @@
 
 namespace br {
 
+namespace {
+
+// Mean extension (0 = up, 1 = down) of whichever gear legs the clip recorded, or NaN.
+double gearExtension(const Frame& f, const ChannelMask& present) {
+    static const int kLegs[] = {kGearCenter, kGearLeft, kGearRight};
+    double sum = 0.0;
+    int n = 0;
+    for (int c : kLegs) {
+        if (present.test(static_cast<size_t>(c)) && std::isfinite(f.v[c])) {
+            sum += f.v[c];
+            ++n;
+        }
+    }
+    return n > 0 ? sum / n : NAN;
+}
+
+}  // namespace
+
+bool deriveGearCommand(Clip& clip) {
+    if (clip.frames.empty()) return false;
+    double lo = 1e9;
+    double hi = -1e9;
+    for (const Frame& f : clip.frames) {
+        const double g = gearExtension(f, clip.present);
+        if (std::isnan(g)) continue;
+        lo = g < lo ? g : lo;
+        hi = g > hi ? g : hi;
+    }
+    if (!(hi - lo > 0.1)) return false;  // no gear positions, or the gear never moved
+
+    constexpr double kMoveThreshold = 0.03;  // ignore noise at the end stops
+    double state = NAN;                      // 1 = down, 0 = up
+    for (Frame& f : clip.frames) {
+        const double g = gearExtension(f, clip.present);
+        if (!std::isnan(g)) {
+            if (std::isnan(state)) {
+                state = g >= 0.5 ? 1.0 : 0.0;
+            } else if (state == 1.0 && g < 1.0 - kMoveThreshold) {
+                state = 0.0;  // started retracting
+            } else if (state == 0.0 && g > kMoveThreshold) {
+                state = 1.0;  // started extending
+            }
+        }
+        f.v[kGearHandle] = std::isnan(state) ? f.v[kGearHandle] : state;
+    }
+    clip.present.set(static_cast<size_t>(kGearHandle));
+    return true;
+}
+
 void PlaybackController::load(Clip&& clip, const std::string& file) {
     clip_ = std::move(clip);
+    deriveGearCommand(clip_);
     file_ = file;
     loaded_ = !clip_.frames.empty();
     duration_ = clip_.duration();

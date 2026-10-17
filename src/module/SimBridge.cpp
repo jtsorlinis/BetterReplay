@@ -111,9 +111,15 @@ bool SimBridge::open() {
         track(SimConnect_MapClientEventToSimEvent(h_, EVT_FREEZE_TOGGLE_FIRST + i, kFreezeToggle[i]), kFreezeToggle[i]);
     }
     for (int c = 0; c < kChannelCount; ++c) {
-        if (kChannels[c].play != PlayMode::Event || !kChannels[c].playEvent) continue;
-        track(SimConnect_MapClientEventToSimEvent(h_, EVT_CHANNEL_FIRST + c, kChannels[c].playEvent),
-              kChannels[c].playEvent);
+        const ChannelDef& ch = kChannels[c];
+        if (ch.play != PlayMode::Event || !ch.playEvent) continue;
+        track(SimConnect_MapClientEventToSimEvent(h_, EVT_CHANNEL_FIRST + c, ch.playEvent), ch.playEvent);
+        if (ch.playEventOn) {
+            track(SimConnect_MapClientEventToSimEvent(h_, EVT_CHANNEL_ON_FIRST + c, ch.playEventOn), ch.playEventOn);
+        }
+        if (ch.playEventOff) {
+            track(SimConnect_MapClientEventToSimEvent(h_, EVT_CHANNEL_OFF_FIRST + c, ch.playEventOff), ch.playEventOff);
+        }
     }
 
     track(SimConnect_RequestDataOnSimObject(h_, REQ_RECORD, DEF_RECORD, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT,
@@ -208,6 +214,7 @@ void SimBridge::dispatch(SIMCONNECT_RECV* p, DWORD size) {
             if (e->uEventID == EVT_FLIGHT_LOADED) {
                 log::info("FlightLoaded: %s", e->szFileName);
                 engine_.onFlightLoaded("FlightLoaded event");
+                enumerateAtFrame_ = frameCount_ + 120;  // list the new aircraft's input events once it's settled
             }
             break;
         }
@@ -225,6 +232,9 @@ void SimBridge::dispatch(SIMCONNECT_RECV* p, DWORD size) {
             }
             break;
         }
+        case SIMCONNECT_RECV_ID_ENUMERATE_INPUT_EVENTS:
+            onInputEvents(reinterpret_cast<const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS*>(p), size);
+            break;
         case SIMCONNECT_RECV_ID_QUIT:
             log::info("SimConnect quit");
             break;
@@ -328,6 +338,11 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     freezeState_[kFreezeAtt] = v[kChannelCount + kExFreezeAtt] >= 0.5;
     if (freezeCheckFrames_ > 0 && --freezeCheckFrames_ == 0) verifyFreeze();
     if (restoreWaitFrames_ > 0) checkRestoreGear();
+    if (gearCheckFrames_ > 0 && --gearCheckFrames_ == 0) checkGearResponse();
+    if (frameCount_ == enumerateAtFrame_) {
+        gearInputEventsLogged_ = 0;
+        track(SimConnect_EnumerateInputEvents(h_, REQ_INPUT_EVENTS), "EnumerateInputEvents");
+    }
 
     if (frameCount_++ == 0) {
         log::info("first data frame: lat %.5f lon %.5f alt %.0f ft, AGL %.0f ft, on ground %d, sim time %.1f",
@@ -414,14 +429,78 @@ void SimBridge::writePlaybackFrame(const Frame& frame) {
 
 void SimBridge::sendChannelEvent(int channel, double value) {
     if (!h_ || channel < 0 || channel >= kChannelCount) return;
+    const ChannelDef& ch = kChannels[channel];
     const DWORD state = value >= 0.5 ? 1 : 0;
     // Lights: parameter 0 on/off, parameter 1 circuit index (0 = all circuits).
     // GEAR_SET: parameter 0 is 1 = down, 0 = up; parameter 1 is ignored.
     track(SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, EVT_CHANNEL_FIRST + channel,
                                              SIMCONNECT_GROUP_PRIORITY_HIGHEST,
                                              SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY, state, 0),
-          kChannels[channel].playEvent);
-    log::debug("playback: %s %lu", kChannels[channel].playEvent, static_cast<unsigned long>(state));
+          ch.playEvent);
+    const char* extra = state ? ch.playEventOn : ch.playEventOff;
+    if (extra) {
+        track(SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT,
+                                                 (state ? EVT_CHANNEL_ON_FIRST : EVT_CHANNEL_OFF_FIRST) + channel,
+                                                 SIMCONNECT_GROUP_PRIORITY_HIGHEST,
+                                                 SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY, 0),
+              extra);
+    }
+    log::info("playback: %s %lu%s%s", ch.playEvent, static_cast<unsigned long>(state), extra ? " + " : "",
+              extra ? extra : "");
+
+    if (channel == kGearHandle && playChannelCount_ > 0) {
+        // Watch whether the aircraft's gear follows; some aircraft ignore the legacy gear events.
+        gearCheckFrames_ = kGearResponseFrames;
+        gearCheckFrom_ = liveGearExtension();
+        gearCheckTarget_ = state ? 1.0 : 0.0;
+    }
+}
+
+double SimBridge::liveGearExtension() const {
+    double sum = 0.0;
+    int n = 0;
+    for (int c : {static_cast<int>(kGearCenter), static_cast<int>(kGearLeft), static_cast<int>(kGearRight)}) {
+        if (std::isfinite(input_.raw.v[c])) {
+            sum += input_.raw.v[c];
+            ++n;
+        }
+    }
+    return n > 0 ? sum / n : NAN;
+}
+
+void SimBridge::checkGearResponse() {
+    const double now = liveGearExtension();
+    if (!std::isfinite(now) || !std::isfinite(gearCheckFrom_)) return;
+    const bool alreadyThere = std::fabs(gearCheckFrom_ - gearCheckTarget_) < 0.05;
+    const bool moved = std::fabs(now - gearCheckFrom_) > 0.05;
+    if (alreadyThere || moved) {
+        log::debug("playback: gear responded (%.2f -> %.2f)", gearCheckFrom_, now);
+        return;
+    }
+    log::warn("playback: the aircraft's gear did not move 3 s after GEAR_SET/GEAR_%s (still %.2f). It probably "
+              "ignores these events; see the 'aircraft input event' lines logged after the flight loaded.",
+              gearCheckTarget_ > 0.5 ? "DOWN" : "UP", now);
+}
+
+void SimBridge::onInputEvents(const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS* list, DWORD size) {
+    const size_t header = sizeof(SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS) - sizeof(SIMCONNECT_INPUT_EVENT_DESCRIPTOR);
+    const size_t fits = size > header ? (size - header) / sizeof(SIMCONNECT_INPUT_EVENT_DESCRIPTOR) : 0;
+    const size_t count = list->dwArraySize < fits ? list->dwArraySize : fits;
+    for (size_t i = 0; i < count; ++i) {
+        const SIMCONNECT_INPUT_EVENT_DESCRIPTOR& d = list->rgData[i];
+        char name[sizeof(d.Name) + 1] = {};
+        std::memcpy(name, d.Name, sizeof(d.Name));
+        char upper[sizeof(name)] = {};
+        for (size_t k = 0; name[k]; ++k) upper[k] = static_cast<char>(name[k] >= 'a' && name[k] <= 'z' ? name[k] - 32 : name[k]);
+        if (std::strstr(upper, "GEAR")) {
+            ++gearInputEventsLogged_;
+            log::info("aircraft input event: %s (%s)", name,
+                      d.eType == SIMCONNECT_INPUT_EVENT_TYPE_DOUBLE ? "number" : "string");
+        }
+    }
+    if (list->dwEntryNumber + 1 >= list->dwOutOf && gearInputEventsLogged_ == 0) {
+        log::info("aircraft input events: none with GEAR in the name");
+    }
 }
 
 void SimBridge::endPlayback(const Frame& snapshot, bool restore) {

@@ -5,6 +5,8 @@
 #include <MSFS/MSFS_WindowsTypes.h>
 #include <SimConnect.h>
 
+#include <cmath>
+
 #include "Engine.h"
 
 namespace br {
@@ -32,9 +34,11 @@ private:
         EVT_FREEZE_SET_FIRST = 100,    // + Freeze
         EVT_FREEZE_TOGGLE_FIRST = 110, // + Freeze
         EVT_CHANNEL_FIRST = 200,       // + channel index, for PlayMode::Event channels
+        EVT_CHANNEL_ON_FIRST = 300,    // + channel index, ChannelDef::playEventOn
+        EVT_CHANNEL_OFF_FIRST = 400,   // + channel index, ChannelDef::playEventOff
     };
     enum Freeze { kFreezeLatLon, kFreezeAlt, kFreezeAtt, kFreezeCount };
-    enum Request : DWORD { REQ_RECORD = 1, REQ_TITLE = 2 };
+    enum Request : DWORD { REQ_RECORD = 1, REQ_TITLE = 2, REQ_INPUT_EVENTS = 3 };
     enum SysEvent : DWORD {
         EVT_FLIGHT_LOADED = 1,
         EVT_SIM,
@@ -58,6 +62,9 @@ private:
     void sendFreeze(bool on);
     void verifyFreeze();
     void checkRestoreGear();
+    void checkGearResponse();
+    void onInputEvents(const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS* list, DWORD size);
+    double liveGearExtension() const;
 
     // Remembers what each SimConnect call was so exceptions can be logged meaningfully.
     void track(HRESULT hr, const char* what);
@@ -89,6 +96,15 @@ private:
     static constexpr int kRestoreGearMaxFrames = 1200;  // ~20 s at 60 fps
     int restoreWaitFrames_ = 0;
     double restoreGear_[3] = {};
+    // After a gear command during playback: did the aircraft's gear actually start moving?
+    static constexpr int kGearResponseFrames = 180;  // ~3 s at 60 fps
+    int gearCheckFrames_ = 0;
+    double gearCheckFrom_ = NAN;
+    double gearCheckTarget_ = NAN;
+    // Aircraft input events (B: vars) are listed once per flight, to find gear controls that
+    // ignore the legacy key events.
+    uint64_t enumerateAtFrame_ = 120;
+    int gearInputEventsLogged_ = 0;
     bool wantFreeze_ = false;
     bool freezeState_[kFreezeCount] = {};
     bool freezeToggled_[kFreezeCount] = {};

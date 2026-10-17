@@ -143,7 +143,8 @@ Work through these in order. Each step says what to do, what you should see, and
 - [ ] The panel shows **Replaying** (blue) and the player bar, with the amber touchdown mark at 2:00.
 - [ ] The PFD airspeed and vertical speed follow the clip (body velocities are written every frame), not the speed you had before pressing Play.
 - [ ] Check visually, and note what doesn't follow the clip:
-  - gear: only the handle is replayed (`DEBUG playback: GEAR_SET 0/1`), and the sim animates the gear at its normal speed, so it can lag the recording a little, especially after a seek. There should be no flicker.
+  - gear: playback commands the gear when the *recorded gear* starts moving and lets the sim animate it, so expect no flicker. It can lag the recording by the aircraft's own door/sequence time, and more after a seek. Look for `playback: GEAR_SET 0 + GEAR_UP` (or `GEAR_SET 1 + GEAR_DOWN`).
+    - If you then see `the aircraft's gear did not move 3 s after GEAR_SET/GEAR_UP`, this aircraft ignores the legacy gear events. Copy the `aircraft input event: …` lines logged about 2 s after the flight loaded. They name the aircraft's own gear control, which the next version can drive instead.
   - flaps
   - spoilers
   - ailerons, elevator and rudder

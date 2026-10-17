@@ -140,7 +140,7 @@ When playing, channels are matched by **key**. Unknown keys are ignored, and cha
 
 ## Status (2026-10-17)
 
-Milestones 1–7 are implemented and committed. The core has 76 passing unit tests, the module builds with the SDK clang, and the panel has been exercised in a browser harness against a fake module. Still pending: in-sim verification ([MANUAL_TEST.md](MANUAL_TEST.md)) and compiling the panel `.spb` (`build.ps1 -Package`, which needs the sim's package builder).
+Milestones 1–7 are implemented and committed. The core has 80 passing unit tests, the module builds with the SDK clang, and the panel has been exercised in a browser harness against a fake module. Still pending: in-sim verification ([MANUAL_TEST.md](MANUAL_TEST.md)) and compiling the panel `.spb` (`build.ps1 -Package`, which needs the sim's package builder).
 
 ## 8. Decisions (answered: defaults approved)
 

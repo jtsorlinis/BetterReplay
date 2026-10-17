@@ -6,7 +6,7 @@ An in-sim auto replay recorder for Microsoft Flight Simulator 2024. It records y
 - **Auto clips:** takeoffs and landings, including touchdown vertical speed, peak G and bounce count. They're written to disk as soon as each event finishes.
 - **Toolbar panel:** shows recorder status and the clip list, and has play/pause, seek, speed (0.25x–4x), stop, keep, delete and "save last 5 min".
 
-> **Status: MVP, early in-sim testing.** The platform-independent core has 76 unit tests and the module builds and links against the MSFS 2024 SDK. It has had one in-sim test run so far, which led to the playback fixes for airspeed and gear. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
+> **Status: MVP, early in-sim testing.** The platform-independent core has 80 unit tests and the module builds and links against the MSFS 2024 SDK. It has had one in-sim test run so far, which led to the playback fixes for airspeed and gear. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
 
 ## Requirements
 
@@ -145,7 +145,8 @@ None of these could be verified without running the sim. Each is covered by a st
 - **SimConnect dispatch in WASM.** `SimConnect_CallDispatch` is called once at init. If no messages arrive within 2 s, the module falls back to calling it every frame and logs that.
 - **Freeze event parameter is undocumented.** `FREEZE_*_SET` is sent with 1/0 and verified through `IS … FREEZE ON`. If it didn't take, the module sends `FREEZE_*_TOGGLE` and logs it.
 - **Flaps, spoilers and surfaces** are written every frame via simvars. Aircraft systems, especially complex add-ons that animate from their own LVars, may override them during playback. That's what the future LVar recording is for.
-- **Gear** is replayed through the handle only (`GEAR_SET` on change), because writing gear positions every frame made the gear flicker. The sim animates it at its own speed, so it can lag the recording, especially after a seek. When stopping on the ground, the aircraft stays frozen until the gear is back down.
+- **Gear** is replayed as commands, not positions, because writing gear positions every frame made the gear flicker. The command comes from when the *recorded gear positions* start moving, since some aircraft (e.g. the A320neo V2) only update `GEAR HANDLE POSITION` once the gear has finished moving. Playback sends `GEAR_SET` plus `GEAR_UP`/`GEAR_DOWN` and lets the sim animate the gear, so it can lag the recording, especially after a seek. When stopping on the ground, the aircraft stays frozen until the gear is back down.
+  - Aircraft that ignore all of these events need their own gear input event. The module logs a warning if the gear doesn't respond, and lists the aircraft's gear-related input events after each flight load.
 - **Light key events** are sent with circuit index 0, assumed to mean "all circuits".
 
 ## Future work (designed for, not built)

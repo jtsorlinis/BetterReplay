@@ -74,6 +74,62 @@ TEST(Playback_AdvanceSeekSpeedAndEnd) {
     CHECK(p.playing());
 }
 
+namespace {
+
+// Gear that starts retracting at `moveStart` and is up 8 s later; the recorded handle simvar
+// only flips at `handleFlip` (the A320neo V2 pattern seen in a real clip).
+Clip retractingGearClip(double moveStart, double handleFlip) {
+    Clip c = makeClip(30.0);
+    for (Frame& f : c.frames) {
+        const double ext = f.t < moveStart ? 1.0 : (f.t > moveStart + 8.0 ? 0.0 : 1.0 - (f.t - moveStart) / 8.0);
+        f.v[kGearCenter] = ext;
+        f.v[kGearLeft] = ext;
+        f.v[kGearRight] = ext;
+        f.v[kGearHandle] = f.t < handleFlip ? 1.0 : 0.0;
+    }
+    return c;
+}
+
+double firstTimeHandleIs(const Clip& c, double state) {
+    for (const Frame& f : c.frames) {
+        if (f.v[kGearHandle] == state) return f.t;
+    }
+    return -1.0;
+}
+
+}  // namespace
+
+TEST(Playback_GearCommandFollowsPositionsNotLaggingHandle) {
+    Clip c = retractingGearClip(10.0, 22.0);
+    REQUIRE(deriveGearCommand(c));
+    CHECK_NEAR(firstTimeHandleIs(c, 0.0), 10.0 + 0.03 * 8.0, 2.0 / 30.0);  // as soon as it moves
+    CHECK_NEAR(c.frames.front().v[kGearHandle], 1.0, 0);
+    CHECK_NEAR(c.frames.back().v[kGearHandle], 0.0, 0);
+}
+
+TEST(Playback_GearCommandForExtension) {
+    Clip c = makeClip(20.0);
+    for (Frame& f : c.frames) {
+        const double ext = f.t < 5.0 ? 0.0 : (f.t > 13.0 ? 1.0 : (f.t - 5.0) / 8.0);
+        f.v[kGearCenter] = f.v[kGearLeft] = f.v[kGearRight] = ext;
+        f.v[kGearHandle] = 0.0;  // handle simvar never updated
+    }
+    REQUIRE(deriveGearCommand(c));
+    CHECK_NEAR(firstTimeHandleIs(c, 1.0), 5.0 + 0.03 * 8.0, 2.0 / 30.0);
+}
+
+TEST(Playback_FixedGearKeepsRecordedHandle) {
+    Clip c = makeClip(10.0);
+    for (Frame& f : c.frames) {
+        f.v[kGearCenter] = f.v[kGearLeft] = f.v[kGearRight] = 1.0;
+        f.v[kGearHandle] = 1.0;
+    }
+    CHECK(!deriveGearCommand(c));
+    Clip none = makeClip(10.0);
+    none.present.reset(kGearCenter).reset(kGearLeft).reset(kGearRight);
+    CHECK(!deriveGearCommand(none));
+}
+
 TEST(Playback_InterpolatesHeadingThroughNorth) {
     PlaybackController p;
     p.load(makeClip(5.0), "a.rpl");
@@ -322,6 +378,23 @@ TEST(EnginePlayback_EventChannelsSendStateChangesOnly) {
     REQUIRE(h.sim.events.size() == 2);
     CHECK_EQ(h.sim.events[1].first, static_cast<int>(kGearHandle));
     CHECK_NEAR(h.sim.events[1].second, 0.0, 0);
+}
+
+TEST(EnginePlayback_GearRetractsWhenRecordedGearStartedMoving) {
+    PlaybackHarness h;
+    const Clip clip = retractingGearClip(10.0, 22.0);
+    std::vector<uint8_t> bytes;
+    writeClip(clip.meta, VectorFrameSource(clip.frames), bytes);
+    h.storage.files[h.clipFile] = bytes;
+    std::string err;
+    h.frames(1, -33.0);
+    REQUIRE(h.engine.play(h.clipFile, err));
+    h.frames(60 * 9, -33.0);  // 9 s: gear still down in the recording
+    for (const auto& e : h.sim.events) CHECK(e.first != static_cast<int>(kGearHandle) || e.second == 1.0);
+    h.frames(60 * 3, -33.0);  // 12 s: retraction began at 10 s
+    bool sentUp = false;
+    for (const auto& e : h.sim.events) sentUp |= e.first == static_cast<int>(kGearHandle) && e.second == 0.0;
+    CHECK(sentUp);
 }
 
 TEST(EnginePlayback_RecordingWaitsWhileSimIsRestoring) {
