@@ -36,6 +36,16 @@ const char* flowName(DWORD f) {
     return f < sizeof(kNames) / sizeof(kNames[0]) ? kNames[f] : "?";
 }
 
+// Throttle events a hardware lever or keyboard sends (2024 Key Events docs, Throttle section).
+const char* const kMaskedInputEvents[] = {
+    "THROTTLE_SET",           "THROTTLE1_SET",          "THROTTLE2_SET",          "THROTTLE3_SET",
+    "THROTTLE4_SET",          "AXIS_THROTTLE_SET",      "AXIS_THROTTLE1_SET",     "AXIS_THROTTLE2_SET",
+    "AXIS_THROTTLE3_SET",     "AXIS_THROTTLE4_SET",     "THROTTLE_AXIS_SET_EX1",  "THROTTLE1_AXIS_SET_EX1",
+    "THROTTLE2_AXIS_SET_EX1", "THROTTLE3_AXIS_SET_EX1", "THROTTLE4_AXIS_SET_EX1", "AXIS_THROTTLE_PLUS",
+    "AXIS_THROTTLE_MINUS",
+};
+constexpr size_t kMaskedInputEventCount = sizeof(kMaskedInputEvents) / sizeof(kMaskedInputEvents[0]);
+
 // Byte offset of the variable-length payload inside SIMCONNECT_RECV_SIMOBJECT_DATA.
 size_t payloadOffset(const SIMCONNECT_RECV_SIMOBJECT_DATA* d) {
     return static_cast<size_t>(reinterpret_cast<const uint8_t*>(&d->dwData) - reinterpret_cast<const uint8_t*>(d));
@@ -84,21 +94,17 @@ bool SimBridge::open() {
         {"IS LATITUDE LONGITUDE FREEZE ON", "bool"},
         {"IS ALTITUDE FREEZE ON", "bool"},
         {"IS ATTITUDE FREEZE ON", "bool"},
+        {"NUMBER OF ENGINES", "number"},
     };
     for (const auto& e : kExtras) {
         track(SimConnect_AddToDataDefinition(h_, DEF_RECORD, e.simvar, e.units, SIMCONNECT_DATATYPE_FLOAT64), e.simvar);
     }
     track(SimConnect_AddToDataDefinition(h_, DEF_TITLE, "TITLE", nullptr, SIMCONNECT_DATATYPE_STRING256), "TITLE");
 
-    // Restore definition: everything playback writes, plus body velocities so the aircraft
-    // continues where it was when playback started.
-    for (int c = 0; c < kChannelCount; ++c) {
-        const bool velocity = c >= kVelBodyX && c <= kRotVelBodyZ;
-        if (kChannels[c].play != PlayMode::Set && !velocity) continue;
-        restoreChannels_[restoreChannelCount_++] = c;
-        track(SimConnect_AddToDataDefinition(h_, DEF_RESTORE, kChannels[c].simvar, kChannels[c].units,
-                                             SIMCONNECT_DATATYPE_FLOAT64),
-              kChannels[c].simvar);
+    // Hardware throttle input events, masked while a clip plays (see setInputMasking).
+    for (size_t i = 0; i < kMaskedInputEventCount; ++i) {
+        track(SimConnect_MapClientEventToSimEvent(h_, EVT_MASK_FIRST + static_cast<DWORD>(i), kMaskedInputEvents[i]),
+              kMaskedInputEvents[i]);
     }
 
     // Key events used by playback (names verified against the 2024 Key Events docs).
@@ -267,6 +273,7 @@ void SimBridge::onSystemEvent(DWORD id, DWORD data) {
             engine_.onRelocated("position changed");
             break;
         default:
+            if (id >= EVT_MASK_FIRST && id < EVT_MASK_FIRST + kMaskedInputEventCount) ++maskedInputs_;
             break;
     }
 }
@@ -336,7 +343,10 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     freezeState_[kFreezeLatLon] = v[kChannelCount + kExFreezeLatLon] >= 0.5;
     freezeState_[kFreezeAlt] = v[kChannelCount + kExFreezeAlt] >= 0.5;
     freezeState_[kFreezeAtt] = v[kChannelCount + kExFreezeAtt] >= 0.5;
+    const double engines = v[kChannelCount + kExNumEngines];
+    if (std::isfinite(engines) && engines >= 0.0 && engines <= 16.0) numEngines_ = static_cast<int>(engines);
     if (freezeCheckFrames_ > 0 && --freezeCheckFrames_ == 0) verifyFreeze();
+    if (playChannelCount_ > 0 && haveWritten_) checkOverrides();
     if (restoreWaitFrames_ > 0) checkRestoreGear();
     if (gearCheckFrames_ > 0 && --gearCheckFrames_ == 0) checkGearResponse();
     if (frameCount_ == enumerateAtFrame_) {
@@ -392,24 +402,88 @@ void SimBridge::verifyFreeze() {
     if (retry) freezeCheckFrames_ = 20;
 }
 
+int SimBridge::buildSetDefinition(DWORD def, bool& defined, const ChannelMask* present, int* channels) {
+    // Clearing a definition that was never built raises UNRECOGNIZED_ID, so only clear after the first.
+    if (defined) track(SimConnect_ClearDataDefinition(h_, def), "ClearDataDefinition");
+    defined = true;
+    int count = 0;
+    for (int c = 0; c < kChannelCount; ++c) {
+        const ChannelDef& ch = kChannels[c];
+        if (ch.play != PlayMode::Set) continue;
+        if (present && !present->test(static_cast<size_t>(c))) continue;
+        if (ch.engine > numEngines_) continue;  // e.g. throttle 3/4 on a twin
+        channels[count++] = c;
+        track(SimConnect_AddToDataDefinition(h_, def, ch.simvar, ch.units, SIMCONNECT_DATATYPE_FLOAT64), ch.simvar);
+    }
+    return count;
+}
+
+void SimBridge::setInputMasking(bool on) {
+    if (on == masking_) return;
+    if (on) {
+        // Events in a maskable group at the highest maskable priority are consumed by this client
+        // and never reach the aircraft.
+        for (size_t i = 0; i < kMaskedInputEventCount; ++i) {
+            track(SimConnect_AddClientEventToNotificationGroup(h_, GROUP_INPUT_MASK,
+                                                               EVT_MASK_FIRST + static_cast<DWORD>(i), TRUE),
+                  "AddClientEventToNotificationGroup (throttle mask)");
+        }
+        track(SimConnect_SetNotificationGroupPriority(h_, GROUP_INPUT_MASK, SIMCONNECT_GROUP_PRIORITY_HIGHEST_MASKABLE),
+              "SetNotificationGroupPriority (throttle mask)");
+        maskedInputs_ = 0;
+    } else {
+        track(SimConnect_ClearNotificationGroup(h_, GROUP_INPUT_MASK), "ClearNotificationGroup (throttle mask)");
+        log::info("playback: hardware throttle input released (%d input event(s) were blocked)", maskedInputs_);
+    }
+    masking_ = on;
+}
+
+// Compares what the sim reports this frame with what playback wrote last frame. A channel the
+// aircraft keeps overriding is being driven by its own systems (or by hardware input).
+void SimBridge::checkOverrides() {
+    ++checkedFrames_;
+    for (int i = 0; i < playChannelCount_; ++i) {
+        const int c = playChannels_[i];
+        const double w = written_[c];
+        const double live = input_.raw.v[c];
+        if (!std::isfinite(w) || !std::isfinite(live)) continue;
+        const Interp kind = kChannels[c].interp;
+        double diff = live - w;
+        if (kind == Interp::Angle180 || kind == Interp::Angle360) {
+            diff = std::fmod(diff + 540.0, 360.0) - 180.0;
+        }
+        const double tolerance = 0.02 * (std::fabs(w) > 1.0 ? std::fabs(w) : 1.0);
+        if (std::fabs(diff) > tolerance) ++overrideFrames_[c];
+    }
+}
+
+void SimBridge::logOverrides() {
+    if (checkedFrames_ < 30) return;
+    int reported = 0;
+    for (int i = 0; i < playChannelCount_; ++i) {
+        const int c = playChannels_[i];
+        const int pct = overrideFrames_[c] * 100 / checkedFrames_;
+        if (pct < 20) continue;
+        ++reported;
+        log::warn("playback: %s (%s) was overridden by the aircraft in %d%% of frames", kChannels[c].key,
+                  kChannels[c].simvar, pct);
+    }
+    if (reported == 0) log::info("playback: all %d written channels held their values", playChannelCount_);
+}
+
 void SimBridge::beginPlayback(const ChannelMask& present) {
     if (!h_) return;
     restoreWaitFrames_ = 0;  // a new clip started while still settling a restore: playback wins
-    // The definition is rebuilt per clip (channels the clip has). Clearing one that was never
-    // defined raises UNRECOGNIZED_ID, so only clear after the first build.
-    if (playDefDefined_) track(SimConnect_ClearDataDefinition(h_, DEF_PLAYBACK), "ClearDataDefinition (playback)");
-    playDefDefined_ = true;
-    playChannelCount_ = 0;
-    for (int c = 0; c < kChannelCount; ++c) {
-        if (kChannels[c].play != PlayMode::Set || !present.test(static_cast<size_t>(c))) continue;
-        playChannels_[playChannelCount_++] = c;
-        track(SimConnect_AddToDataDefinition(h_, DEF_PLAYBACK, kChannels[c].simvar, kChannels[c].units,
-                                             SIMCONNECT_DATATYPE_FLOAT64),
-              kChannels[c].simvar);
-    }
+    playChannelCount_ = buildSetDefinition(DEF_PLAYBACK, playDefDefined_, &present, playChannels_);
     firstPlaybackWrite_ = true;
+    haveWritten_ = false;
+    checkedFrames_ = 0;
+    for (int& n : overrideFrames_) n = 0;
     sendFreeze(true);
-    log::info("playback: writing %d channels per frame; freezing position/altitude/attitude", playChannelCount_);
+    setInputMasking(true);
+    log::info("playback: writing %d channels per frame (%d engine(s)); freezing position/altitude/attitude; "
+              "hardware throttle input blocked",
+              playChannelCount_, numEngines_);
 }
 
 void SimBridge::writePlaybackFrame(const Frame& frame) {
@@ -418,7 +492,9 @@ void SimBridge::writePlaybackFrame(const Frame& frame) {
         const int c = playChannels_[i];
         const double v = frame.v[c];
         setBuffer_[i] = std::isnan(v) ? input_.raw.v[c] : v;  // gap in the clip: hold the live value
+        written_[c] = setBuffer_[i];
     }
+    haveWritten_ = true;
     const HRESULT hr = SimConnect_SetDataOnSimObject(h_, DEF_PLAYBACK, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, 0, 0,
                                                      static_cast<DWORD>(playChannelCount_ * sizeof(double)), setBuffer_);
     if (firstPlaybackWrite_) {
@@ -505,11 +581,14 @@ void SimBridge::onInputEvents(const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS* list
 
 void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     if (!h_) return;
+    logOverrides();
     playChannelCount_ = 0;
+    setInputMasking(false);
     if (!restore) {
         sendFreeze(false);
         return;
     }
+    restoreChannelCount_ = buildSetDefinition(DEF_RESTORE, restoreDefDefined_, nullptr, restoreChannels_);
     for (int i = 0; i < restoreChannelCount_; ++i) setBuffer_[i] = snapshot.v[restoreChannels_[i]];
     track(SimConnect_SetDataOnSimObject(h_, DEF_RESTORE, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, 0, 0,
                                         static_cast<DWORD>(restoreChannelCount_ * sizeof(double)), setBuffer_),

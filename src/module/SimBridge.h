@@ -36,7 +36,9 @@ private:
         EVT_CHANNEL_FIRST = 200,       // + channel index, for PlayMode::Event channels
         EVT_CHANNEL_ON_FIRST = 300,    // + channel index, ChannelDef::playEventOn
         EVT_CHANNEL_OFF_FIRST = 400,   // + channel index, ChannelDef::playEventOff
+        EVT_MASK_FIRST = 500,          // + index into kMaskedInputEvents
     };
+    enum Group : DWORD { GROUP_INPUT_MASK = 1 };
     enum Freeze { kFreezeLatLon, kFreezeAlt, kFreezeAtt, kFreezeCount };
     enum Request : DWORD { REQ_RECORD = 1, REQ_TITLE = 2, REQ_INPUT_EVENTS = 3 };
     enum SysEvent : DWORD {
@@ -50,7 +52,16 @@ private:
         EVT_POSITION_CHANGED,
     };
     // Extra values appended after the channels in DEF_RECORD.
-    enum Extra { kExSimTime, kExSlew, kExTouchdownNormalVel, kExFreezeLatLon, kExFreezeAlt, kExFreezeAtt, kExtraCount };
+    enum Extra {
+        kExSimTime,
+        kExSlew,
+        kExTouchdownNormalVel,
+        kExFreezeLatLon,
+        kExFreezeAlt,
+        kExFreezeAtt,
+        kExNumEngines,
+        kExtraCount
+    };
 
     static void CALLBACK dispatchThunk(SIMCONNECT_RECV* data, DWORD size, void* ctx);
     void dispatch(SIMCONNECT_RECV* data, DWORD size);
@@ -63,6 +74,12 @@ private:
     void verifyFreeze();
     void checkRestoreGear();
     void checkGearResponse();
+    // (Re)builds a SetData definition from the PlayMode::Set channels, limited to `present` (if
+    // given) and to engines the current aircraft has. Returns the channel count.
+    int buildSetDefinition(DWORD def, bool& defined, const ChannelMask* present, int* channels);
+    void setInputMasking(bool on);
+    void checkOverrides();
+    void logOverrides();
     void onInputEvents(const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS* list, DWORD size);
     double liveGearExtension() const;
 
@@ -91,6 +108,16 @@ private:
     int restoreChannelCount_ = 0;
     double setBuffer_[kChannelCount] = {};
     bool playDefDefined_ = false;
+    bool restoreDefDefined_ = false;
+    int numEngines_ = 4;
+    // Hardware throttle input is masked during playback so the physical lever can't fight it.
+    bool masking_ = false;
+    int maskedInputs_ = 0;
+    // Diagnostics: how often the aircraft overrode what playback wrote, per channel.
+    double written_[kChannelCount] = {};
+    bool haveWritten_ = false;
+    int overrideFrames_[kChannelCount] = {};
+    int checkedFrames_ = 0;
     bool firstPlaybackWrite_ = false;
     // Restoring onto the ground: stay frozen until the gear is back where the snapshot had it.
     static constexpr int kRestoreGearMaxFrames = 1200;  // ~20 s at 60 fps

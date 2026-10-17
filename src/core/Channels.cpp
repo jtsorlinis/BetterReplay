@@ -65,6 +65,12 @@ const ChannelDef kChannels[kChannelCount] = {
     {"l_strobe", "LIGHT STROBE", "bool", U8, STEP, EVT, "STROBES_SET"},
     {"l_land", "LIGHT LANDING", "bool", U8, STEP, EVT, "LANDING_LIGHTS_SET"},
     {"l_taxi", "LIGHT TAXI", "bool", U8, STEP, EVT, "TAXI_LIGHTS_SET"},
+    // Throttle levers (percent; reverse can be negative). While playing, the hardware throttle
+    // events are masked so the physical lever doesn't fight the replay (see SimBridge).
+    {"thr_1", "GENERAL ENG THROTTLE LEVER POSITION:1", "percent", F32, LIN, SET, nullptr, nullptr, nullptr, 1},
+    {"thr_2", "GENERAL ENG THROTTLE LEVER POSITION:2", "percent", F32, LIN, SET, nullptr, nullptr, nullptr, 2},
+    {"thr_3", "GENERAL ENG THROTTLE LEVER POSITION:3", "percent", F32, LIN, SET, nullptr, nullptr, nullptr, 3},
+    {"thr_4", "GENERAL ENG THROTTLE LEVER POSITION:4", "percent", F32, LIN, SET, nullptr, nullptr, nullptr, 4},
 };
 
 int findChannel(const char* key) {

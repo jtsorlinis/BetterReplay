@@ -23,7 +23,7 @@ Work through these in order. Each step says what to do, what you should see, and
   [BetterReplay] work folder: '\work\'
   [BetterReplay] no index found; starting a new library        (first run only)
   [BetterReplay] library: 0 clip(s)
-  [BetterReplay] SimConnect ready: 37 channels + 6 extras per frame
+  [BetterReplay] SimConnect ready: 41 channels + 7 extras per frame
   [BetterReplay] CommBus: listening on BetterReplay.Cmd
   [BetterReplay] connected to … (SimConnect …)
   ```
@@ -133,8 +133,8 @@ Work through these in order. Each step says what to do, what you should see, and
 
 - [ ] In flight (any phase), click **Play** on a landing clip. **Expect:**
   ```
-  playback of …_landing.rpl (N s, N frames, 37/37 channels); aircraft snapshot taken
-  playback: writing 20 channels per frame; freezing position/altitude/attitude
+  playback of …_landing.rpl (N s, N frames, 41/41 channels); aircraft snapshot taken
+  playback: writing 22 channels per frame (2 engine(s)); freezing position/altitude/attitude; hardware throttle input blocked
   DEBUG lat/lon freeze on confirmed        (Debug build; x3)
   ```
   - If you see `freeze still off after SET; sending TOGGLE`, note it. Note whether it then worked.
@@ -142,6 +142,10 @@ Work through these in order. Each step says what to do, what you should see, and
 - [ ] The aircraft jumps to the clip start and flies the recorded path smoothly. Note any jitter, drift or stutter.
 - [ ] The panel shows **Replaying** (blue) and the player bar, with the amber touchdown mark at 2:00.
 - [ ] The PFD airspeed and vertical speed follow the clip (body velocities are written every frame), not the speed you had before pressing Play.
+- [ ] **Throttle** (clips recorded with this build or later): the thrust levers follow the clip, and moving your hardware throttle has no effect while it plays.
+  - On Stop you'll see `playback: hardware throttle input released (N input event(s) were blocked)`, and the levers go back to your hardware.
+  - If the levers still follow your hardware, note N. If N is 0, this aircraft reads the hardware through its own input path, not the standard throttle events.
+- [ ] At the end of each playback, look for `playback: <channel> (...) was overridden by the aircraft in N% of frames`. That names any channel (throttle, flaps, spoilers…) the aircraft's own systems keep overwriting. `all N written channels held their values` means nothing fought the replay.
 - [ ] Check visually, and note what doesn't follow the clip:
   - gear: playback commands the gear when the *recorded gear* starts moving and lets the sim animate it, so expect no flicker. It can lag the recording by the aircraft's own door/sequence time, and more after a seek. Look for `playback: GEAR_SET 0 + GEAR_UP` (or `GEAR_SET 1 + GEAR_DOWN`).
     - If you then see `the aircraft's gear did not move 3 s after GEAR_SET/GEAR_UP`, this aircraft ignores the legacy gear events. Copy the `aircraft input event: …` lines logged about 2 s after the flight loaded. They name the aircraft's own gear control, which the next version can drive instead.

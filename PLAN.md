@@ -100,6 +100,7 @@ Each row has a stable key, simvar, units, storage (`f64|f32|u8`), interp (`linea
 | spoil_h | SPOILERS HANDLE POSITION (`percent over 100`) | set |
 | ail_l/r, elev, rud | AILERON LEFT/RIGHT DEFLECTION, ELEVATOR DEFLECTION, RUDDER DEFLECTION (`radians`). The settable surface angles. The `*_PCT` variants are read-only. | set |
 | ail_pos, elev_pos, rud_pos | AILERON / ELEVATOR / RUDDER POSITION (`position`): the pilot input, recorded for analysis | none |
+| thr_1..thr_4 | GENERAL ENG THROTTLE LEVER POSITION:1..4 (`percent`), added after the first in-sim test | set, only for engines the aircraft has; hardware throttle events (`THROTTLE_SET`, `AXIS_THROTTLE*_SET`, `THROTTLE*_AXIS_SET_EX1`…) are masked while playing |
 | l_nav/beacon/strobe/land/taxi | LIGHT NAV / BEACON / STROBE / LANDING / TAXI (`bool`) u8 | event: `NAV_LIGHTS_SET`, `BEACON_LIGHTS_SET`, `STROBES_SET`, `LANDING_LIGHTS_SET`, `TAXI_LIGHTS_SET` on change |
 
 Not channels: `TITLE` (string, read on flight load), `PLANE TOUCHDOWN NORMAL VELOCITY` (ft/s, read at touchdown → stored as fpm), `IS SLEW ACTIVE`, `SIMULATION TIME`, `IS LATITUDE LONGITUDE/ALTITUDE/ATTITUDE FREEZE ON`.

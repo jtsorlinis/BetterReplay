@@ -36,6 +36,8 @@ struct ChannelDef {
     const char* playEvent;     // key event for PlayMode::Event (sent with 1/0), otherwise nullptr
     const char* playEventOn = nullptr;   // optional extra event sent when the state turns on (e.g. GEAR_DOWN)
     const char* playEventOff = nullptr;  // optional extra event sent when the state turns off (e.g. GEAR_UP)
+    uint8_t engine = 0;                  // 1-based engine index for per-engine channels; skipped on
+                                         // aircraft with fewer engines (0 = not engine-specific)
 };
 
 enum Channel : uint16_t {
@@ -76,6 +78,10 @@ enum Channel : uint16_t {
     kLightStrobe,
     kLightLanding,
     kLightTaxi,
+    kThrottle1,
+    kThrottle2,
+    kThrottle3,
+    kThrottle4,
     kChannelCount
 };
 
