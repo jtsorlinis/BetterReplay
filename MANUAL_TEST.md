@@ -134,17 +134,24 @@ Work through these in order. Each step says what to do, what you should see, and
 - [ ] In flight (any phase), click **Play** on a landing clip. **Expect:**
   ```
   playback of …_landing.rpl (N s, N frames, 41/41 channels); aircraft snapshot taken
-  playback: writing 22 channels per frame (2 engine(s)); freezing position/altitude/attitude; hardware throttle input blocked
+  playback: writing 22 channels per frame (2 engine(s)); freezing position/altitude/attitude; throttle via simvars, hardware throttle input blocked
   DEBUG lat/lon freeze on confirmed        (Debug build; x3)
+  DEBUG playback: setting gear_c 1.00, gear_l 1.00, gear_r 1.00     (Debug build)
   ```
+  - The last part of the second line says how the throttle is driven:
+    - `throttle via simvars, hardware throttle input blocked`: the default.
+    - `throttle via axis events (this aircraft overrides the lever simvar)`: this aircraft already showed it handles its levers itself (see below).
+    - `no throttle data in this clip …`: the clip is older than throttle support. The levers stay with your hardware; record a new clip.
   - If you see `freeze still off after SET; sending TOGGLE`, note it. Note whether it then worked.
   - If you see `could not turn … freeze on`, playback will fight the sim.
 - [ ] The aircraft jumps to the clip start and flies the recorded path smoothly. Note any jitter, drift or stutter.
 - [ ] The panel shows **Replaying** (blue) and the player bar, with the amber touchdown mark at 2:00.
 - [ ] The PFD airspeed and vertical speed follow the clip (body velocities are written every frame), not the speed you had before pressing Play.
-- [ ] **Throttle** (clips recorded with this build or later): the thrust levers follow the clip, and moving your hardware throttle has no effect while it plays.
-  - On Stop you'll see `playback: hardware throttle input released (N input event(s) were blocked)`, and the levers go back to your hardware.
-  - If the levers still follow your hardware, note N. If N is 0, this aircraft reads the hardware through its own input path, not the standard throttle events.
+- [ ] **Throttle** (clips recorded with throttle support): the thrust levers follow the clip.
+  - Simvar mode: moving your hardware throttle has no effect while it plays. On Stop you'll see `playback: hardware throttle input released (N input event(s) were blocked)`.
+  - If the aircraft overrides the lever simvar, within about half a second of the clip's lever differing from yours you'll see `playback: the aircraft overrode the throttle lever simvar in N% of the last 30 frames; driving the levers with THROTTLEn_AXIS_SET_EX1 events …`. From then on the levers should follow the clip for that aircraft. Your hardware lever isn't blocked in this mode, so don't touch it.
+    - At the end you'll see either `throttle levers followed the clip via axis events` or `… were still more than 3% away from the clip …`. The second means the aircraft needs its own variables (LVars, future work). Copy the `aircraft input event: …THROTTLE…` lines.
+  - Note the aircraft, the mode line, N and the follow/away line.
 - [ ] At the end of each playback, look for `playback: <channel> (...) was overridden by the aircraft in N% of frames`. That names any channel (throttle, flaps, spoilers…) the aircraft's own systems keep overwriting. `all N written channels held their values` means nothing fought the replay.
 - [ ] Check visually, and note what doesn't follow the clip:
   - gear: playback commands the gear when the *recorded gear* starts moving and lets the sim animate it, so expect no flicker. It can lag the recording by the aircraft's own door/sequence time, and more after a seek. Look for `playback: GEAR_SET 0 + GEAR_UP` (or `GEAR_SET 1 + GEAR_DOWN`).
@@ -155,7 +162,9 @@ Work through these in order. Each step says what to do, what you should see, and
   - landing, taxi, nav, beacon and strobe lights (`DEBUG playback: LANDING_LIGHTS_SET 1` …)
 - [ ] **Speed:** 0.25x, 0.5x, 2x and 4x all change the playback rate.
 - [ ] **Seek:** click and drag on the bar. The aircraft jumps to the new point and the time label matches.
-- [ ] **Pause/Play:** the aircraft holds position, then continues. At the end it pauses, and the button says "Replay".
+  - The gear jumps with it: seek from gear-up (after the takeoff) back to the takeoff roll and the gear is down straight away, not lowering.
+  - If you see `playback: gear_c is 0.00 right after being set to 1.00; the aircraft moves it back itself`, this aircraft won't take gear positions. It animates the gear from the command instead.
+- [ ] **Pause/Play:** the aircraft holds position, then continues. At the end it pauses, and the button says "Replay". Replay starts over with the gear and lights as they are at the clip's start.
 - [ ] **Stop. Expect:**
   ```
   playback: restored aircraft to lat … lon … alt … ft
@@ -165,7 +174,9 @@ Work through these in order. Each step says what to do, what you should see, and
   ```
   - The aircraft is back where it was, at the same attitude and speed. Lights and gear handle are back as they were.
   - The aircraft is unfrozen and flies normally.
-- [ ] **Stop on the ground after a clip that ends gear-up** (e.g. a takeoff clip, played while parked). **Expect** `playback: waiting for the gear before unfreezing`, then `playback: gear back in place; unfreezing`. The aircraft stays frozen until the gear is down, so it doesn't drop onto its belly.
+- [ ] **Stop on the ground after a clip that ends gear-up** (e.g. a takeoff clip, played while parked). The gear snaps back down at once.
+  - **Expect** `playback: waiting for the gear before unfreezing`, then `playback: gear back in place; unfreezing` within a fraction of a second.
+  - If the aircraft won't take the snap, the wait lasts until its gear has lowered by itself. It stays frozen meanwhile, so it doesn't drop onto its belly.
 - [ ] Play a clip, then play a **different** clip without stopping, then Stop. You're returned to the position from *before the first* clip.
 - [ ] While a clip plays, pause the sim. Playback holds, then continues when you unpause.
 - [ ] Note whether crash detection ever triggered during playback (e.g. near the ground).

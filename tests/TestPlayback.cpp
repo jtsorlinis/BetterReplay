@@ -176,6 +176,7 @@ struct MemStorage : IStorage {
 struct FakeSim : ISimOutput {
     int begins = 0;
     int ends = 0;
+    int jumps = 0;
     bool busyRestoring = false;
     bool lastRestore = false;
     Frame restored;
@@ -187,7 +188,10 @@ struct FakeSim : ISimOutput {
         ++begins;
         present = p;
     }
-    void writePlaybackFrame(const Frame& f) override { written.push_back(f); }
+    void writePlaybackFrame(const Frame& f, bool jumped) override {
+        written.push_back(f);
+        if (jumped) ++jumps;
+    }
     void sendChannelEvent(int c, double v) override { events.push_back({c, v}); }
     void endPlayback(const Frame& snapshot, bool restore) override {
         ++ends;
@@ -195,7 +199,19 @@ struct FakeSim : ISimOutput {
         restored = snapshot;
     }
     bool restoring() const override { return busyRestoring; }
+
+    // Events sent for one channel, in order.
+    std::vector<double> eventsFor(int channel) const {
+        std::vector<double> out;
+        for (const auto& e : events) {
+            if (e.first == channel) out.push_back(e.second);
+        }
+        return out;
+    }
 };
+
+// Event channels in makeClip(): gear handle and the five lights.
+constexpr size_t kClipEventChannels = 6;
 
 FrameInput liveFrame(double simTime, double lat) {
     FrameInput in;
@@ -260,19 +276,59 @@ TEST(EnginePlayback_PlaysClipAndSuspendsRecording) {
     CHECK_NEAR(h.engine.playback().time(), 1.0, 1e-6);
 }
 
-TEST(EnginePlayback_LightsSentOnlyOnChange) {
+TEST(EnginePlayback_EventChannelsResyncOnPlayThenSendChanges) {
     PlaybackHarness h;
     std::string err;
     REQUIRE(h.engine.play(h.clipFile, err));
-    h.frames(60 * 4, -33.0);  // landing light turns on at t = 2 s in the clip
-    // Nav light is on in both the live aircraft and the clip, so it is never sent.
-    REQUIRE(h.sim.events.size() == 1);
-    CHECK_EQ(h.sim.events[0].first, static_cast<int>(kLightLanding));
-    CHECK_NEAR(h.sim.events[0].second, 1.0, 0);
-    // Stopping restores the live state: the landing light goes back off.
+    h.frames(1, -33.0);
+    // The first frame puts every event channel into the clip's state, whatever the aircraft had.
+    CHECK_EQ(h.sim.jumps, 1);
+    REQUIRE(h.sim.events.size() == kClipEventChannels);
+    CHECK(h.sim.eventsFor(kLightLanding) == std::vector<double>{0.0});
+    CHECK(h.sim.eventsFor(kLightNav) == std::vector<double>{1.0});
+
+    h.frames(60 * 4, -33.0);  // landing light turns on at t = 2 s in the clip; nothing else changes
+    CHECK_EQ(h.sim.jumps, 1);
+    REQUIRE(h.sim.events.size() == kClipEventChannels + 1);
+    CHECK_EQ(h.sim.events.back().first, static_cast<int>(kLightLanding));
+    CHECK_NEAR(h.sim.events.back().second, 1.0, 0);
+
+    // Stopping puts every event channel back to the live state: the landing light goes off.
     REQUIRE(h.engine.stopPlayback(err));
-    REQUIRE(h.sim.events.size() == 2);
-    CHECK_NEAR(h.sim.events[1].second, 0.0, 0);
+    REQUIRE(h.sim.events.size() == 2 * kClipEventChannels + 1);
+    CHECK(h.sim.eventsFor(kLightLanding) == (std::vector<double>{0.0, 1.0, 0.0}));
+    CHECK(h.sim.eventsFor(kLightNav) == (std::vector<double>{1.0, 1.0}));
+}
+
+TEST(EnginePlayback_SeekResyncsEventChannels) {
+    PlaybackHarness h;
+    std::string err;
+    REQUIRE(h.engine.play(h.clipFile, err));
+    h.frames(60 * 3, -33.0);  // past the landing light switching on at 2 s
+    CHECK(h.sim.eventsFor(kLightLanding) == (std::vector<double>{0.0, 1.0}));
+
+    REQUIRE(h.engine.seek(1.0, err));  // back to before it switched on
+    h.frames(1, -33.0);
+    CHECK_EQ(h.sim.jumps, 2);
+    CHECK_EQ(h.sim.events.size(), 2 * kClipEventChannels + 1);
+    CHECK(h.sim.eventsFor(kLightLanding) == (std::vector<double>{0.0, 1.0, 0.0}));
+
+    h.frames(60 * 2, -33.0);  // and it switches on again when the playhead passes 2 s
+    CHECK_EQ(h.sim.jumps, 2);
+    CHECK(h.sim.eventsFor(kLightLanding) == (std::vector<double>{0.0, 1.0, 0.0, 1.0}));
+
+    // Replay from the end restarts the clip: also a jump.
+    h.frames(60 * 9, -33.0);
+    CHECK(!h.engine.playback().playing());
+    REQUIRE(h.engine.resumePlayback(err));
+    h.frames(1, -33.0);
+    CHECK_EQ(h.sim.jumps, 3);
+    CHECK(h.sim.eventsFor(kLightLanding) == (std::vector<double>{0.0, 1.0, 0.0, 1.0, 0.0}));
+    // Resuming from a pause mid-clip is not.
+    REQUIRE(h.engine.pausePlayback(err));
+    REQUIRE(h.engine.resumePlayback(err));
+    h.frames(1, -33.0);
+    CHECK_EQ(h.sim.jumps, 3);
 }
 
 TEST(EnginePlayback_SpeedSeekPause) {
@@ -371,13 +427,10 @@ TEST(EnginePlayback_EventChannelsSendStateChangesOnly) {
     std::string err;
     REQUIRE(h.engine.play(h.clipFile, err));
     h.frames(60 * 4, -33.0);
-    REQUIRE(h.sim.events.size() == 1);
-    CHECK_EQ(h.sim.events[0].first, static_cast<int>(kGearHandle));
-    CHECK_NEAR(h.sim.events[0].second, 1.0, 0);
+    // Initial sync (up), then a single change to down.
+    CHECK(h.sim.eventsFor(kGearHandle) == (std::vector<double>{0.0, 1.0}));
     REQUIRE(h.engine.stopPlayback(err));  // live aircraft had the handle up: send it back up
-    REQUIRE(h.sim.events.size() == 2);
-    CHECK_EQ(h.sim.events[1].first, static_cast<int>(kGearHandle));
-    CHECK_NEAR(h.sim.events[1].second, 0.0, 0);
+    CHECK(h.sim.eventsFor(kGearHandle) == (std::vector<double>{0.0, 1.0, 0.0}));
 }
 
 TEST(EnginePlayback_GearRetractsWhenRecordedGearStartedMoving) {

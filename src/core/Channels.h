@@ -23,7 +23,9 @@ enum class Interp : uint8_t {
 enum class PlayMode : uint8_t {
     None = 0,   // recorded only
     Set = 1,    // written every playback frame via SetDataOnSimObject
-    Event = 2,  // sent as a key event when the value changes
+    Event = 2,  // sent as a key event when the value changes, and again after every play/seek/stop
+    Snap = 3,   // written only right after play/seek/stop (so the aircraft starts in the recorded
+                // state), then left to the sim to animate
 };
 
 struct ChannelDef {

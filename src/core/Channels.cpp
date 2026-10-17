@@ -15,6 +15,7 @@ constexpr Interp STEP = Interp::Step;
 constexpr PlayMode NONE = PlayMode::None;
 constexpr PlayMode SET = PlayMode::Set;
 constexpr PlayMode EVT = PlayMode::Event;
+constexpr PlayMode SNAP = PlayMode::Snap;
 }  // namespace
 
 // Names, units and settable flags verified against the MSFS 2024 SimVar documentation.
@@ -41,13 +42,15 @@ const ChannelDef kChannels[kChannelCount] = {
     {"ongnd", "SIM ON GROUND", "bool", U8, STEP, NONE, nullptr},
     {"g", "G FORCE", "gforce", F32, LIN, NONE, nullptr},
     // Writing gear positions every frame fights the aircraft's gear system (visible flicker), so
-    // playback only commands the gear (on change) and lets the sim animate it. The command is
-    // derived from the recorded gear positions at playback time (see PlaybackController), because
-    // some aircraft (e.g. the 2024 A320neo V2) only update GEAR HANDLE POSITION once the gear has
-    // finished moving. Aircraft differ in which gear events they honour, so all of them are sent.
-    {"gear_c", "GEAR CENTER POSITION", "percent over 100", F32, LIN, NONE, nullptr},
-    {"gear_l", "GEAR LEFT POSITION", "percent over 100", F32, LIN, NONE, nullptr},
-    {"gear_r", "GEAR RIGHT POSITION", "percent over 100", F32, LIN, NONE, nullptr},
+    // playback commands the gear (on change) and lets the sim animate it. The positions are only
+    // snapped after play/seek/stop, together with the command, so a jump doesn't leave the gear
+    // animating from wherever it was. The command is derived from the recorded gear positions at
+    // playback time (see PlaybackController), because some aircraft (e.g. the 2024 A320neo V2)
+    // only update GEAR HANDLE POSITION once the gear has finished moving. Aircraft differ in which
+    // gear events they honour, so all of them are sent.
+    {"gear_c", "GEAR CENTER POSITION", "percent over 100", F32, LIN, SNAP, nullptr},
+    {"gear_l", "GEAR LEFT POSITION", "percent over 100", F32, LIN, SNAP, nullptr},
+    {"gear_r", "GEAR RIGHT POSITION", "percent over 100", F32, LIN, SNAP, nullptr},
     {"gear_h", "GEAR HANDLE POSITION", "percent over 100", F32, STEP, EVT, "GEAR_SET", "GEAR_DOWN", "GEAR_UP"},
     {"flap_l", "TRAILING EDGE FLAPS LEFT PERCENT", "percent over 100", F32, LIN, SET, nullptr},
     {"flap_r", "TRAILING EDGE FLAPS RIGHT PERCENT", "percent over 100", F32, LIN, SET, nullptr},
@@ -66,7 +69,9 @@ const ChannelDef kChannels[kChannelCount] = {
     {"l_land", "LIGHT LANDING", "bool", U8, STEP, EVT, "LANDING_LIGHTS_SET"},
     {"l_taxi", "LIGHT TAXI", "bool", U8, STEP, EVT, "TAXI_LIGHTS_SET"},
     // Throttle levers (percent; reverse can be negative). While playing, the hardware throttle
-    // events are masked so the physical lever doesn't fight the replay (see SimBridge).
+    // events are masked so the physical lever doesn't fight the replay. Aircraft that drive the
+    // lever from their own input handling override this simvar; for those SimBridge switches to
+    // sending throttle axis events instead.
     {"thr_1", "GENERAL ENG THROTTLE LEVER POSITION:1", "percent", F32, LIN, SET, nullptr, nullptr, nullptr, 1},
     {"thr_2", "GENERAL ENG THROTTLE LEVER POSITION:2", "percent", F32, LIN, SET, nullptr, nullptr, nullptr, 2},
     {"thr_3", "GENERAL ENG THROTTLE LEVER POSITION:3", "percent", F32, LIN, SET, nullptr, nullptr, nullptr, 3},

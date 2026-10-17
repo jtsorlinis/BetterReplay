@@ -79,7 +79,7 @@ README.md, MANUAL_TEST.md
 
 ## 4. Channels (data-driven, verified against the 2024 docs)
 
-Each row has a stable key, simvar, units, storage (`f64|f32|u8`), interp (`linear|angle|step`) and a playback mode (`set` = SetDataOnSimObject every frame, `event` = key event on change, `none`). Adding a row extends the recording, file and playback with no format change.
+Each row has a stable key, simvar, units, storage (`f64|f32|u8`), interp (`linear|angle|step`) and a playback mode (`set` = SetDataOnSimObject every frame, `event` = key event on change, `snap` = SetDataOnSimObject only after a jump, `none`). Adding a row extends the recording, file and playback with no format change.
 
 | Key | SimVar (units requested) | Play |
 |---|---|---|
@@ -93,15 +93,17 @@ Each row has a stable key, simvar, units, storage (`f64|f32|u8`), interp (`linea
 | vs | VERTICAL SPEED (`feet/minute`; the docs default is ft/s) | none |
 | ongnd | SIM ON GROUND (`bool`) u8 | none |
 | g | G FORCE (`gforce`) | none |
-| gear_c/l/r | GEAR CENTER/LEFT/RIGHT POSITION (`percent over 100`) | none. Writing them every frame made the gear flicker in the sim. |
-| gear_h | GEAR HANDLE POSITION (`percent over 100`) | event: `GEAR_SET` on change; the sim animates the gear |
+| gear_c/l/r | GEAR CENTER/LEFT/RIGHT POSITION (`percent over 100`) | snap: written for ~20 frames after play, seek and stop only, so a jump starts with the gear where the clip has it. Writing them every frame made the gear flicker in the sim. |
+| gear_h | GEAR HANDLE POSITION (`percent over 100`) | event: `GEAR_SET` + `GEAR_UP`/`GEAR_DOWN` on change, derived from the gear positions; the sim animates the gear |
 | flap_l/r | TRAILING EDGE FLAPS LEFT/RIGHT PERCENT (`percent over 100`) | set |
 | flap_idx | FLAPS HANDLE INDEX (`number`) | set, step |
 | spoil_h | SPOILERS HANDLE POSITION (`percent over 100`) | set |
 | ail_l/r, elev, rud | AILERON LEFT/RIGHT DEFLECTION, ELEVATOR DEFLECTION, RUDDER DEFLECTION (`radians`). The settable surface angles. The `*_PCT` variants are read-only. | set |
 | ail_pos, elev_pos, rud_pos | AILERON / ELEVATOR / RUDDER POSITION (`position`): the pilot input, recorded for analysis | none |
-| thr_1..thr_4 | GENERAL ENG THROTTLE LEVER POSITION:1..4 (`percent`), added after the first in-sim test | set, only for engines the aircraft has; hardware throttle events (`THROTTLE_SET`, `AXIS_THROTTLE*_SET`, `THROTTLE*_AXIS_SET_EX1`…) are masked while playing |
+| thr_1..thr_4 | GENERAL ENG THROTTLE LEVER POSITION:1..4 (`percent`), added after the first in-sim test | set, only for engines the aircraft has; hardware throttle events (`THROTTLE_SET`, `AXIS_THROTTLE*_SET`, `THROTTLE*_AXIS_SET_EX1`…) are masked while playing. If the aircraft overrides the simvar in half of a 30-frame window (its own throttle handling, e.g. 2024 input events), playback switches to sending `THROTTLEn_AXIS_SET_EX1` for that aircraft, with the mask off. |
 | l_nav/beacon/strobe/land/taxi | LIGHT NAV / BEACON / STROBE / LANDING / TAXI (`bool`) u8 | event: `NAV_LIGHTS_SET`, `BEACON_LIGHTS_SET`, `STROBES_SET`, `LANDING_LIGHTS_SET`, `TAXI_LIGHTS_SET` on change |
+
+Event channels are also resent after every play, seek, replay-from-the-end and stop, so the aircraft can't stay out of step with the clip (e.g. gear left up by the end of the previous run).
 
 Not channels: `TITLE` (string, read on flight load), `PLANE TOUCHDOWN NORMAL VELOCITY` (ft/s, read at touchdown → stored as fpm), `IS SLEW ACTIVE`, `SIMULATION TIME`, `IS LATITUDE LONGITUDE/ALTITUDE/ATTITUDE FREEZE ON`.
 
@@ -141,7 +143,7 @@ When playing, channels are matched by **key**. Unknown keys are ignored, and cha
 
 ## Status (2026-10-17)
 
-Milestones 1–7 are implemented and committed. The core has 80 passing unit tests, the module builds with the SDK clang, and the panel has been exercised in a browser harness against a fake module. Still pending: in-sim verification ([MANUAL_TEST.md](MANUAL_TEST.md)) and compiling the panel `.spb` (`build.ps1 -Package`, which needs the sim's package builder).
+Milestones 1–7 are implemented and committed. The core has 81 passing unit tests, the module builds with the SDK clang, and the panel has been exercised in a browser harness against a fake module. Still pending: in-sim verification ([MANUAL_TEST.md](MANUAL_TEST.md)) and compiling the panel `.spb` (`build.ps1 -Package`, which needs the sim's package builder).
 
 ## 8. Decisions (answered: defaults approved)
 

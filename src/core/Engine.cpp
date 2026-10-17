@@ -32,8 +32,8 @@ private:
 
 double frameTime(const Frame& f) { return f.t; }
 
-// PlayMode::Event channels are on/off (lights, gear handle); only a change of state is sent, so a
-// handle recorded mid-travel at 0.3, 0.6, 0.9 produces one event, not three.
+// PlayMode::Event channels are on/off (lights, gear handle); during playback only a change of
+// state is sent, so a handle recorded mid-travel at 0.3, 0.6, 0.9 produces one event, not three.
 double eventState(double v) { return std::isnan(v) ? NAN : (v >= 0.5 ? 1.0 : 0.0); }
 
 DetectorSample toDetectorSample(const Frame& f, double touchdownNormalVelFps) {
@@ -437,6 +437,7 @@ bool Engine::play(const std::string& file, std::string& error) {
     }
     out_->beginPlayback(playback_.present());
     playback_.play();
+    jumpPending_ = true;
     logf(0, "playback %s %s (%.1f s, %zu frames, %zu/%d channels)%s", switching ? "switched to" : "of", file.c_str(),
          playback_.duration(), playback_.clip().frames.size(), playback_.present().count(),
          static_cast<int>(kChannelCount), switching ? "" : "; aircraft snapshot taken");
@@ -457,7 +458,9 @@ bool Engine::resumePlayback(std::string& error) {
         error = "nothing is playing";
         return false;
     }
-    playback_.play();
+    const double before = playback_.time();
+    playback_.play();  // at the end this restarts from the beginning: a jump like seek
+    if (playback_.time() != before) jumpPending_ = true;
     return true;
 }
 
@@ -467,6 +470,7 @@ bool Engine::seek(double t, std::string& error) {
         return false;
     }
     playback_.seek(t);
+    jumpPending_ = true;
     return true;
 }
 
@@ -491,13 +495,17 @@ bool Engine::stopPlayback(std::string& error) {
 void Engine::playbackFrame(double dt) {
     playback_.advance(dt);
     playback_.current(playFrame_);
+    // After play or seek the aircraft can be in any state (gear up from the end of the last run,
+    // lights switched by hand...), so every event channel is resent, not just the changes.
+    const bool jumped = jumpPending_;
+    jumpPending_ = false;
     if (!out_) return;
-    out_->writePlaybackFrame(playFrame_);
+    out_->writePlaybackFrame(playFrame_, jumped);
     const ChannelMask& present = playback_.present();
     for (int c = 0; c < kChannelCount; ++c) {
         if (kChannels[c].play != PlayMode::Event || !present.test(static_cast<size_t>(c))) continue;
         const double state = eventState(playFrame_.v[c]);
-        if (std::isnan(state) || state == lastEventValue_[c]) continue;
+        if (std::isnan(state) || (state == lastEventValue_[c] && !jumped)) continue;
         out_->sendChannelEvent(c, state);
         lastEventValue_[c] = state;
     }
@@ -507,15 +515,16 @@ void Engine::endPlayback(bool restore, const char* why) {
     if (!playbackActive_) return;
     if (out_) {
         if (restore) {
+            const ChannelMask& present = playback_.present();
             for (int c = 0; c < kChannelCount; ++c) {
+                if (kChannels[c].play != PlayMode::Event || !present.test(static_cast<size_t>(c))) continue;
                 const double state = eventState(snapshot_.v[c]);
-                if (kChannels[c].play == PlayMode::Event && !std::isnan(state) && state != lastEventValue_[c]) {
-                    out_->sendChannelEvent(c, state);
-                }
+                if (!std::isnan(state)) out_->sendChannelEvent(c, state);
             }
         }
         out_->endPlayback(snapshot_, restore);
     }
+    jumpPending_ = false;
     playback_.unload();
     playbackActive_ = false;
     settleFrames_ = kSettleFrames;
