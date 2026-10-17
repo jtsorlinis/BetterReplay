@@ -10,6 +10,7 @@
         <Manufacturer>BetterReplay</Manufacturer>
         <Creator>BetterReplay</Creator>
     </ItemSettings>
+    <PackageOrderHint>MISC</PackageOrderHint>
     <Flags>
         <VisibleInStore>false</VisibleInStore>
         <CanBeReferenced>false</CanBeReferenced>
