@@ -50,6 +50,9 @@ struct ChannelDef {
     // While it's replayed they aren't written, since the aircraft derives them from the input.
     int16_t coversFirst = -1;
     uint8_t coversCount = 0;
+    // PlayMode::Input: true if the "<NAME>_SET" preset takes a 0..1 fraction (values recorded in
+    // percent are scaled), false if it takes the value as recorded.
+    bool inputSetFraction = false;
 };
 
 enum Channel : uint16_t {

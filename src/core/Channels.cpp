@@ -96,14 +96,18 @@ const ChannelDef kChannels[kChannelCount] = {
     // overwrite the simvars above from them (the A320neo V2 ignores the throttle, gear, flap and
     // spoiler simvars and gear events). Their values are recorded as-is and set back, so they're
     // exact whatever their units. Names from the aircraft's input event list (logged at load).
-    {"ie_thr_1", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 1, "ENGINE_THROTTLE_1", kThrottle1, 1},
-    {"ie_thr_2", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 2, "ENGINE_THROTTLE_2", kThrottle2, 1},
-    {"ie_thr_3", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 3, "ENGINE_THROTTLE_3", kThrottle3, 1},
-    {"ie_thr_4", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 4, "ENGINE_THROTTLE_4", kThrottle4, 1},
-    {"ie_gear", nullptr, nullptr, F32, STEP, INPUT, nullptr, nullptr, nullptr, 0, "LANDING_GEAR_GEAR"},
-    {"ie_flaps", nullptr, nullptr, F32, STEP, INPUT, nullptr, nullptr, nullptr, 0, "HANDLING_FLAPS", kFlapsLeft, 3},
+    // The _SET argument differs per event. Seen on the A320neo V2: ENGINE_THROTTLE_n reads 0..100
+    // (16.7 = idle) and _SET(0.86) moved the lever to ~81, so it takes a fraction; HANDLING_FLAPS
+    // reads 0/25/50.. and _SET(0.25) gave 0, so it takes the value as read. The SDK's own example
+    // sets HANDLING_SPEED_BRAKES_SET to 0.5.
+    {"ie_thr_1", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 1, "ENGINE_THROTTLE_1", kThrottle1, 1, true},
+    {"ie_thr_2", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 2, "ENGINE_THROTTLE_2", kThrottle2, 1, true},
+    {"ie_thr_3", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 3, "ENGINE_THROTTLE_3", kThrottle3, 1, true},
+    {"ie_thr_4", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 4, "ENGINE_THROTTLE_4", kThrottle4, 1, true},
+    {"ie_gear", nullptr, nullptr, F32, STEP, INPUT, nullptr, nullptr, nullptr, 0, "LANDING_GEAR_GEAR", -1, 0, false},
+    {"ie_flaps", nullptr, nullptr, F32, STEP, INPUT, nullptr, nullptr, nullptr, 0, "HANDLING_FLAPS", kFlapsLeft, 3, false},
     {"ie_spdbrk", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 0,
-     "HANDLING_SPEED_BRAKES|HANDLING_SPOILERS|HANDLING_SPEEDBRAKES", kSpoilersHandle, 1},
+     "HANDLING_SPEED_BRAKES|HANDLING_SPOILERS|HANDLING_SPEEDBRAKES", kSpoilersHandle, 1, true},
 };
 
 int findChannel(const char* key) {

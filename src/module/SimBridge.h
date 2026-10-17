@@ -99,6 +99,8 @@ private:
     void checkEventChannels();
     // Input event channels: resolve them against the aircraft's list, replay and check them.
     void resetInputEvents(bool unsubscribe);
+    void logLVars();       // lists the aircraft's L:vars for gear/throttle/flaps/spoilers (research)
+    void tracePlayback();  // debug: once a second, what playback sent vs what the aircraft reports
     void resolveInputEvents();
     void pollInputEvents();
     void sendInputEvents(const Frame& frame, bool force);
@@ -153,6 +155,7 @@ private:
     int ieOff_[kChannelCount] = {};
     bool ieNotified_[kChannelCount] = {};  // a subscription message has arrived (logged once)
     int iePollFrames_ = 0;
+    int traceFrames_ = 0;
     bool firstInputSet_ = false;
     static constexpr int kInputResendFrames = 15;
 

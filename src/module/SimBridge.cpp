@@ -411,6 +411,10 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     if (playing_ && throttleViaEvents_ && clipHasThrottle_) checkThrottleEvents();
     if (playing_) checkEventChannels();
     if (playing_) checkInputEvents();
+    if (playing_ && log::g_debug && ++traceFrames_ >= 60) {
+        traceFrames_ = 0;
+        tracePlayback();
+    }
     pollInputEvents();
     if (snapCheckFrames_ > 0 && --snapCheckFrames_ == 0) checkSnap();
     if (!playing_ && snapFramesLeft_ > 0) writeSnap(restoreSnap_);
@@ -743,9 +747,9 @@ void SimBridge::beginPlayback(const ChannelMask& present, const Frame& peak) {
         ieSettled_[c] = 0;
         ieChecked_[c] = 0;
         ieOff_[c] = 0;
-        // Recorded in percent (e.g. throttle: idle 16.7, TOGA 86) or already a 0..1 fraction
-        // (e.g. gear lever 0/1)? The _SET preset takes the fraction.
-        ieScale_[c] = peak.v[c] > 1.0001 || std::fabs(ieValue_[c]) > 1.0001 ? 0.01 : 1.0;
+        // Presets that take a fraction get values recorded in percent (e.g. throttle: idle 16.7,
+        // TOGA 86) scaled by 0.01; the others get the value as recorded.
+        ieScale_[c] = ch.inputSetFraction && (peak.v[c] > 1.0001 || std::fabs(ieValue_[c]) > 1.0001) ? 0.01 : 1.0;
         if (!ieActive_[c]) continue;
         ++inputs;
         for (int k = 0; k < ch.coversCount; ++k) playSkip_.set(static_cast<size_t>(ch.coversFirst + k));
@@ -1027,6 +1031,48 @@ void SimBridge::resolveInputEvents() {
     }
     log::info("input event channels: recording %s%s%s", found[0] ? found : "none", missing[0] ? "; not on this aircraft: " : "",
               missing);
+    logLVars();
+}
+
+// Research aid for aircraft that keep their controls in their own L:vars (the A320neo V2): list
+// the ones whose names look like gear, throttle, flap or spoiler controls, with their values.
+void SimBridge::logLVars() {
+    static const char* const kWords[] = {"THROTTLE", "TLA", "THRUST", "LEVER", "FLAP", "SLAT", "GEAR",
+                                         "SPOILER", "SPEEDBRAKE", "SPEED_BRAKE", "SPD_BRK", "REVERS", "DETENT"};
+    const FsUnitId number = fsVarsGetUnitId("number");
+    int total = 0;
+    int listed = 0;
+    char name[128];
+    for (FsLVarId id = 0; id < 50000; ++id) {
+        if (fsVarsGetLVarName(id, name, sizeof(name)) != FS_VAR_ERROR_NONE) break;
+        ++total;
+        char upper[sizeof(name)] = {};
+        for (size_t k = 0; name[k] && k < sizeof(name) - 1; ++k) {
+            upper[k] = static_cast<char>(name[k] >= 'a' && name[k] <= 'z' ? name[k] - 32 : name[k]);
+        }
+        bool match = false;
+        for (const char* w : kWords) match |= std::strstr(upper, w) != nullptr;
+        if (!match) continue;
+        double value = NAN;
+        fsVarsLVarGet(id, number, &value);
+        if (listed++ < 300) log::info("aircraft L:var %s = %.4f", name, value);
+    }
+    log::info("aircraft L:vars: %d in total, %d look like gear/throttle/flap/spoiler controls%s", total, listed,
+              listed > 300 ? " (first 300 listed)" : "");
+}
+
+void SimBridge::tracePlayback() {
+    char line[512];
+    int n = std::snprintf(line, sizeof(line), "trace t=%.1f:", engine_.playback().time());
+    for (int c = 0; c < kChannelCount && n < static_cast<int>(sizeof(line)) - 64; ++c) {
+        if (!ieActive_[c]) continue;
+        n += std::snprintf(line + n, sizeof(line) - n, " %s clip %.2f arg %.4f live %.2f;", kChannels[c].key, ieSent_[c],
+                           ieSent_[c] * ieScale_[c], ieValue_[c]);
+    }
+    const double* r = input_.raw.v;
+    std::snprintf(line + n, sizeof(line) - n, " thr_1 %.1f flap_idx %.0f gear_c %.2f spoil_h %.2f rnoz_1 %.0f", r[kThrottle1],
+                  r[kFlapsHandleIndex], r[kGearCenter], r[kSpoilersHandle], r[kReverserNozzle1]);
+    log::debug("%s", line);
 }
 
 void SimBridge::sendInputEvents(const Frame& frame, bool force) {
@@ -1041,7 +1087,7 @@ void SimBridge::sendInputEvents(const Frame& frame, bool force) {
         ieSent_[c] = v;
         ieSinceSend_[c] = 0;
         if (ieSetId_[c] != FS_VAR_INVALID_ID) {
-            if (ieScale_[c] == 1.0 && std::fabs(v) > 1.0001) {
+            if (kChannels[c].inputSetFraction && ieScale_[c] == 1.0 && std::fabs(v) > 1.0001) {
                 ieScale_[c] = 0.01;  // the clip turned out to be in percent after all
                 log::debug("playback: %s is in percent; scaling by 0.01 for %s_SET", kChannels[c].key, ieName_[c]);
             }
