@@ -1,5 +1,7 @@
 #include "AircraftProfile.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include "Json.h"
@@ -7,6 +9,35 @@
 namespace br {
 
 namespace {
+
+// Lever readings this close together (as a fraction of the table's range) are the same position.
+constexpr double kLeverFlatFraction = 0.002;
+
+double leverRange(const std::vector<LeverPoint>& t, double& lo, double& hi) {
+    lo = INFINITY;
+    hi = -INFINITY;
+    for (const LeverPoint& p : t) {
+        lo = p.lever < lo ? p.lever : lo;
+        hi = p.lever > hi ? p.lever : hi;
+    }
+    return std::max(kLeverFlatFraction * (hi - lo), 1e-9);  // the tolerance for "the same"
+}
+
+void writeLeverTable(JsonWriter& w, const char* key, const std::vector<LeverPoint>& t) {
+    w.key(key).beginArray();
+    for (const LeverPoint& p : t) w.beginArray().value(p.axis).value(p.lever).endArray();
+    w.endArray();
+}
+
+std::vector<LeverPoint> readLeverTable(const JsonValue* v) {
+    std::vector<LeverPoint> t;
+    if (!v || !v->isArray()) return t;
+    for (const JsonValue& p : v->array) {
+        if (!p.isArray() || p.array.size() < 2) continue;
+        t.push_back({p.array[0].number, p.array[1].number});
+    }
+    return leverTable(std::move(t));
+}
 
 const ControlSpec kSpecs[kControlCount] = {
     {"spoilers", "spoilers", kInputSpeedBrakes, kLVarSpeedBrakes, kSpoilersHandle, kSpoilersHandle, 1, false},
@@ -99,6 +130,83 @@ std::string describeMethod(Control c, const ControlMethod& m) {
     return "nothing";
 }
 
+std::string describeControl(Control c, const ControlProfile& cp) {
+    std::string s = describeMethod(c, cp.method);
+    if (c == Control::Throttle && cp.lever.valid()) s += ", lever from L:var " + cp.lever.var;
+    return s;
+}
+
+// ---------------------------------------------------------------------------- lever
+
+std::vector<LeverPoint> leverTable(std::vector<LeverPoint> samples) {
+    samples.erase(std::remove_if(samples.begin(), samples.end(),
+                                 [](const LeverPoint& p) { return !std::isfinite(p.axis) || !std::isfinite(p.lever); }),
+                  samples.end());
+    std::stable_sort(samples.begin(), samples.end(), [](const LeverPoint& a, const LeverPoint& b) { return a.axis < b.axis; });
+    return samples;
+}
+
+double invertLever(const std::vector<LeverPoint>& t, double x) {
+    if (t.empty()) return 0.0;
+    double lo = 0.0, hi = 0.0;
+    const double tol = leverRange(t, lo, hi);
+    x = x < lo ? lo : (x > hi ? hi : x);
+    // The widest run of readings at this value: a detent holds the lever over a stretch of the
+    // axis, and its middle is the safest place to put it.
+    size_t from = 0, to = 0;
+    double widest = -1.0;
+    for (size_t i = 0; i < t.size();) {
+        if (std::fabs(t[i].lever - x) > tol) {
+            ++i;
+            continue;
+        }
+        size_t j = i;
+        while (j + 1 < t.size() && std::fabs(t[j + 1].lever - x) <= tol) ++j;
+        if (t[j].axis - t[i].axis > widest) {
+            widest = t[j].axis - t[i].axis;
+            from = i;
+            to = j;
+        }
+        i = j + 1;
+    }
+    if (widest >= 0.0) return 0.5 * (t[from].axis + t[to].axis);
+    for (size_t i = 0; i + 1 < t.size(); ++i) {
+        const double a = t[i].lever, b = t[i + 1].lever;
+        if ((x - a) * (x - b) > 0.0) continue;
+        const double f = b != a ? (x - a) / (b - a) : 0.5;
+        return t[i].axis + f * (t[i + 1].axis - t[i].axis);
+    }
+    return t.back().axis;
+}
+
+bool leverAxis(const LeverCalibration& cal, double lever, double clipReverser, bool liveReverse, double& axis) {
+    if (!std::isfinite(lever) || cal.forward.size() < 2) return false;
+    double flo = 0.0, fhi = 0.0;
+    const double tol = leverRange(cal.forward, flo, fhi);
+    const bool separate = cal.reverse.size() >= 2;
+    const bool clipReverse = std::isfinite(clipReverser) ? clipReverser >= 0.5 : separate && lever < flo - tol;
+    if (separate) {
+        if (clipReverse != liveReverse) {
+            // The clip's reverser events switch the aircraft's over; until then, idle in whichever
+            // mode it's in (the reverse table's end nearest the forward idle).
+            if (!liveReverse) {
+                axis = invertLever(cal.forward, flo);
+                return true;
+            }
+            double rlo = 0.0, rhi = 0.0;
+            leverRange(cal.reverse, rlo, rhi);
+            axis = invertLever(cal.reverse, std::fabs(rlo - flo) < std::fabs(rhi - flo) ? rlo : rhi);
+            return true;
+        }
+        axis = invertLever(clipReverse ? cal.reverse : cal.forward, lever);
+        return true;
+    }
+    // Without a separate table only an axis with its own reverse zone reaches below idle.
+    if (clipReverse && lever < flo - tol) return false;
+    axis = invertLever(cal.forward, lever);
+    return true;
+}
+
 int methodSourceChannel(Control c, MethodKind k, int engine) {
     const ControlSpec& s = controlSpec(c);
     const int e = s.perEngine ? engine : 0;
@@ -173,6 +281,14 @@ void ProfileStore::toJson(std::string& out) const {
             w.kv("var", c.method.var);
             w.kv("scale", c.method.scale);
             w.kv("confirmed", c.confirmed);
+            if (!c.lever.var.empty()) {
+                // [axis, lever] pairs
+                w.key("lever").beginObject();
+                w.kv("var", c.lever.var);
+                writeLeverTable(w, "forward", c.lever.forward);
+                writeLeverTable(w, "reverse", c.lever.reverse);
+                w.endObject();
+            }
             w.endObject();
         }
         w.endObject();
@@ -209,6 +325,12 @@ bool ProfileStore::fromJson(const char* text, size_t length, std::string* error)
             cp.method.var = c->getString("var", "");
             cp.method.scale = c->getNumber("scale", 1.0);
             cp.confirmed = c->getBool("confirmed", false);
+            if (const JsonValue* lv = c->get("lever")) {
+                cp.lever.var = lv->getString("var", "");
+                cp.lever.forward = readLeverTable(lv->get("forward"));
+                cp.lever.reverse = readLeverTable(lv->get("reverse"));
+                if (!cp.lever.valid()) cp.lever = LeverCalibration();
+            }
             // A profile that says "use this method" without one can't be followed.
             if (cp.state == ControlState::Ok && cp.method.kind == MethodKind::None) cp.state = ControlState::Pending;
         }

@@ -38,6 +38,10 @@ public:
     // Resolves what the method needs on this aircraft (its preset, L:var, simvars...). False,
     // with the reason, if it can't be used.
     bool begin(Control c, const ControlMethod& m, std::string& why);
+    // The key-event throttle on an aircraft whose lever simvar isn't the lever: the clip's lever
+    // variable (lv_thr_N) is turned back into the axis value through the setup's calibration.
+    // After begin(); the clip must have recorded that variable (clipHasLever).
+    void setLever(const LeverCalibration& cal);
     // Drives the control from the frame's channels (methodSourceChannel). Values are sent when
     // they change, and every few frames anyway; `force` sends them now.
     void apply(Control c, const Frame& f, bool force);
@@ -68,6 +72,9 @@ private:
         int since[4] = {};
         int errors = 0;
         int sends = 0;  // values sent, logged at the end (key events should be rare)
+        LeverCalibration lever;  // throttle key events: replayed from the lever variable
+        bool useLever = false;
+        int leverFrames = 0;  // per engine, driven from the lever variable
     };
     // Whether value v for output i is due (changed, forced or time to resend); records it.
     static bool due(Slot& s, int i, double v, bool force);

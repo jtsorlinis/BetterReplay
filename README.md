@@ -7,7 +7,7 @@ An in-sim auto replay recorder for Microsoft Flight Simulator 2024. It records y
 - **Toolbar panel:** shows recorder status and the clip list, and has play/pause, seek, speed (0.25x–4x), stop, delete and "save last 5 min".
 - **Control setup:** a guided setup per aircraft that finds out how replays can move its spoilers, flaps, throttle and gear, by watching you move each one and testing ways to replay it. See [Control setup](#control-setup).
 
-> **Status: MVP, early in-sim testing.** The platform-independent core has 104 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. The control setup hasn't run in the sim yet. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
+> **Status: MVP, early in-sim testing.** The platform-independent core has 112 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. The control setup hasn't run in the sim yet. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
 
 ## Requirements
 
@@ -68,9 +68,13 @@ Aircraft differ in how their controls can be driven. Many 2024 aircraft keep the
    - **You move it,** one instruction at a time: "Deploy the spoilers", then "Retract the spoilers"; "Advance the throttle to full", "Bring the throttle back to idle", "Wait for the engines to spool down". Each gets a green tick once it's done. Meanwhile every input event and L:var the aircraft has is watched, to find the ones that moved with the control, whatever they're called.
    - **It replays your movement**, with each candidate method in turn: the aircraft's own input event preset (the cockpit's path), the legacy key events, the simvars, the L:vars it found. Hands off the controls meanwhile.
    - **It checks the result automatically:** did the spoilers, flap surfaces, gear or N1 (RPM on pistons) move at least 60% as far as when you did it, and come back? Methods that fail move straight on to the next one.
-   - **It asks you:** "Did the engines spool up and back down?" **Yes** keeps that method, **No** tries the next, **Watch again** replays it once more, **Skip** leaves the control as it is without a profile.
+   - **It asks you:** "Did the engines spool up and back down?" **Yes** keeps that method, **No** tries the next, **Watch again** replays it once more, **Skip** leaves the control as it is without a profile (on a later run, a control that was already set up keeps its earlier setup).
    - If nothing works, the control is marked *not replayable*, and replays leave it to the aircraft instead of fighting it.
    - If the aircraft starts to roll during the throttle replay, it stops and goes back to idle.
+   - **The throttle lever,** only where it's needed. On some aircraft the lever simvar isn't the lever: on the A320neo V2 it's the autothrust's thrust demand, about 85 at TOGA and creeping with speed while the lever sits in its detent. The setup notices from your movement: if the simvar kept moving while a lever-like variable held still (your hand was still), and the throttle replays with the key events, the step goes on. If your movement didn't tell (and it was the key events), it asks "Do the levers stay put under autothrust?". Ordinary aircraft and Boeings (whose autothrottle moves the levers) skip all of this.
+     - **"Hold the throttle at a few positions":** full reverse if it has reversers, and each detent you use (CL, FLX/MCT, TOGA), a few seconds each, then back to idle. The setup picks the L:var that moved with the throttle and held still at each position for the longest (the thrust demand keeps creeping; flags and detent indexes take too few values).
+     - **"Hands off the throttle":** after **Start** the setup steps the throttle axis (`THROTTLEn_AXIS_SET_EX1`) from the bottom to full in 2.5% steps and notes where the lever went, then, with reversers that aren't on the axis, engages them and steps the reverse amount too, and puts the throttle back to idle. The engines spool up against the parking brake for about 15 seconds; if the aircraft starts to roll it stops.
+     - The lever's L:var and that table go into the profile. Clips then record the lever (`lv_thr_N`), and replays turn it back into the axis value that put it there: the middle of a detent when it was in one, so it lands in the detent. Clips recorded before this replay from the simvar as before.
 3. **Replays** then drive each set-up control with its method, through the same code the setup tested. Clips recorded before the setup (or from different variables) fall back to the defaults for that control, and the log says so.
 
 If you skip the gear step or quit before it, the panel offers just the gear once you're airborne again. Profiles are kept per aircraft (by its `aircraft.cfg` path) in `aircraft.json` in the work folder.
@@ -135,7 +139,7 @@ Two detector rules go slightly beyond the original spec:
   - `clips{offset}` (20 per page)
   - `play{file}`, `pause`, `resume`, `seek{t}`, `speed{x}`, `stop`
   - `delete{file}`, `saveLast`
-  - `setupStart`, `setupAnswer{a}` (`yes`, `no`, `again`, `skip`, `retry`, `ready`, `later`, `cancel`, `close`), `setupLater`, `setupNever`, `setupReset`
+  - `setupStart`, `setupAnswer{a}` (`yes`, `no`, `again`, `skip`, `retry`, `ready`, `done`, `begin`, `later`, `cancel`, `close`), `setupLater`, `setupNever`, `setupReset`
   - `setDebug{on}`
 - The status message's `setup` object has the offer, the aircraft's profile summary and, while the setup runs, its step, prompt and the answers that fit.
 - Replies come back on `BetterReplay.Status`, `BetterReplay.Clips` and `BetterReplay.Reply`.
@@ -185,9 +189,9 @@ None of these could be verified without running the sim. Each is covered by a st
   - **Watching input events** reads them with `fsVarsBVarGet`. If that can't read them, only L:vars are found by their movement. Look for `setup scan: N input event(s), M of them readable`.
   - **Key events** are sent from WASM with `fsEventsTriggerKeyEvent` (not SimConnect, where the throttle axis events failed on the A320neo V2). They act like moving the hardware, so they're only sent when the value really changes (no periodic resend).
   - **Throttle with key events** replays the pilot's hardware axis (`thr_axis_N`), recorded from the throttle key events the module sees (`fsEventsRegisterKeyEventHandler`), so the lever lands where it was, detents included. The lever simvar isn't the lever on every aircraft: on the A320neo V2 under autothrust it's the thrust demand, so CLB replayed as TOGA. Clips without the axis (older ones, or before the hardware first moved) fall back to the simvar. Look for `throttle hardware: key event …` after you first move the throttle; if it never appears, the aircraft takes the hardware another way.
-    - On the A320neo V2 it never appears: its hardware throttle doesn't come through as key events the module can see, so its clips have no `thr_axis_N` and replay from the simvar. Since each key event makes the aircraft re-evaluate its lever (and the engine sound follows), a change in the simvar of 2% or more goes at once, and a smaller one only once it has lasted 30 frames; the creep of the thrust demand no longer nudges the lever constantly.
+    - On the A320neo V2 it never appears: its hardware throttle doesn't come through as key events the module can see, so its clips have no `thr_axis_N`. With the throttle lever set up (see [Control setup](#control-setup)) they replay the lever's own L:var through its calibration; look for `control setup: throttle lever calibrated: … detents …` and, on playback, `controls: throttle levers from L:var …`. Without it they replay from the simvar: since each key event makes the aircraft re-evaluate its lever (and the engine sound follows), a change in the simvar of 2% or more goes at once, and a smaller one only once it has lasted 30 frames.
   - **Simvars** are written with `fsVarsAVarSet`, with the index (`:1`) passed as a parameter.
-  - **L:var channels** (`lv_*`) are only recorded on aircraft whose profile chose an L:var.
+  - **L:var channels** (`lv_*`) are only recorded on aircraft whose profile chose an L:var, or (`lv_thr_N`) found the throttle lever's own.
   - **Readings the checks use:** `TURB ENG N1`, `GENERAL ENG RPM`, `SPOILERS LEFT POSITION`, `ENGINE TYPE`, `BRAKE PARKING POSITION`, `ON ANY RUNWAY`, `GENERAL ENG COMBUSTION`, `IS GEAR RETRACTABLE`, `SPOILER AVAILABLE` and `FLAPS NUM HANDLE POSITIONS`. N1, RPM and spoiler position are also recorded in clips (about 0.6 MB more per 5 minutes).
   - **Parking brake:** if the aircraft's doesn't set the simvar, the throttle step waits on "Set the parking brake". **Continue anyway** carries on.
 

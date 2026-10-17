@@ -8,6 +8,13 @@
 // (IControlSim), and checked: did the spoilers / flaps / gear / engines do what they did when the
 // pilot moved them? A method that passes is put to the pilot ("did the engines spool up and back
 // down?"); a "no" tries the next. The result is the aircraft's ControlProfile.
+//
+// The throttle's lever simvar isn't the lever on every aircraft (on the A320neo V2 it's the
+// autothrust's thrust demand). If it kept moving while the pilot held the lever still and the
+// key events drive the throttle, the step goes on: the pilot holds the lever at a few positions
+// so the setup can find the variable that holds still with it, then the setup steps the throttle
+// axis through its range and records where the lever went (LeverCalibration). Aircraft whose
+// simvar held still skip all that.
 #pragma once
 
 #include <cstddef>
@@ -32,6 +39,7 @@ struct SetupFacts {
     bool gearRetractable = true;
     bool hasSpoilers = true;
     int flapPositions = 0;  // FLAPS NUM HANDLE POSITIONS (including up)
+    bool hasReverse = false;  // THROTTLE LOWER LIMIT below zero: thrust reversers
 };
 
 // A variable the setup watches while the pilot moves a control.
@@ -54,6 +62,10 @@ public:
     virtual bool beginControl(Control c, const ControlMethod& m, std::string& why) = 0;
     virtual void applyControl(Control c, const Frame& f, bool force) = 0;
     virtual void endControl(Control c) = 0;
+    // For the throttle lever's calibration: one variable's value now (NaN if unreadable), and the
+    // thrust reversers (the reverse thrust on/off key events).
+    virtual double readVar(const ScanVar& v) = 0;
+    virtual void setReverser(bool on) = 0;
 };
 
 // Watches every scanned variable while the pilot moves a control and finds the ones that moved
@@ -89,6 +101,29 @@ public:
     bool changed(size_t index) const;
     double firstChange(size_t index) const;  // time of its first change, NaN if none
 
+    // How the handle (the control's simvar) behaved while the pilot's hand was still, between
+    // from and to. A lever-like variable (one of `candidates` that took many values) holding
+    // still for `holdSec` is the hand being still; `creep` is the most the handle moved during
+    // such a hold (its first `settleSec` left out), and `steady` whether the handle itself held
+    // within `tol` for `holdSec` at least `away` from `rest`.
+    struct HoldCheck {
+        double creep = 0.0;
+        size_t by = 0;  // the variable that held still while the handle crept
+        bool steady = false;
+    };
+    HoldCheck holdCheck(double from, double to, const std::vector<size_t>& candidates, double rest, double away,
+                        double tol, double holdSec, double settleSec) const;
+    // The variable's holds between from and to: stretches of at least `holdSec` within
+    // `stillFraction` of its range. `levels` counts the distinct values held, `stillSec` their
+    // total length.
+    struct Holds {
+        int levels = 0;
+        double stillSec = 0.0;
+        double range = 0.0;  // how far it moved
+        int values = 0;      // distinct values it took (a lever passes through many; an index jumps)
+    };
+    Holds holds(size_t index, double from, double to, double holdSec, double stillFraction) const;
+
     const ScanVar& var(size_t index) const { return vars_[index]; }
     size_t size() const { return vars_.size(); }
     size_t stored() const { return stored_; }
@@ -115,6 +150,8 @@ private:
 // Whether a clip carries what a profile's method needs: the channel it reads, recorded from
 // the same aircraft variable. Clips recorded before a setup, or on another aircraft, may not.
 bool clipSupports(Control c, const ControlMethod& m, const Clip& clip, int engines, std::string* why);
+// Whether a clip recorded the throttle lever's variable (lv_thr_N) that the calibration is for.
+bool clipHasLever(const LeverCalibration& cal, const Clip& clip, int engines, std::string* why);
 
 class SetupFlow {
 public:
@@ -128,7 +165,7 @@ public:
     bool start(const AircraftProfile& profile, const Frame& live, const SetupFacts& facts, std::string& error);
     void cancel(const char* why);
     // The pilot's answer: yes, no, again, skip, retry, ready (continue despite a precondition),
-    // later, cancel, close.
+    // done (the throttle positions), begin (the throttle sweep), later, cancel, close.
     bool answer(const std::string& a, std::string& error);
     bool active() const { return phase_ != Phase::Idle; }
 
@@ -139,10 +176,11 @@ public:
     bool takeChanged();  // true once after a step changed the profile (time to save it)
 
     // Writes the active setup's fields into the current JSON object: active, step, stepNo,
-    // steps, phase, title, prompt (one short instruction or question), task / tasks / taskDone
-    // (the pilot's instructions in this step), note, method, methods, attempts (how each method
-    // before the current one ended), plan (each step's control and its result, "current" or
-    // "next"), buttons.
+    // steps, phase, title, prompt (one short instruction or question), detail (what it's for,
+    // in the throttle lever's phases), task / tasks / taskDone (the pilot's instructions in this
+    // step), note, method, methods, attempts (how each method before the current one ended),
+    // progress (the throttle sweep, 0..1), plan (each step's control and its result, "current"
+    // or "next"), buttons.
     void statusJson(JsonWriter& w) const;
 
     // Tuning, per control (exposed for tests).
@@ -157,13 +195,31 @@ public:
     Tuning tuning(Control c) const;
 
 private:
-    enum class Phase { Idle, Prepare, Takeoff, User, Retry, Replay, Hold, Ask, Done };
+    // After Done: the throttle lever's phases, for aircraft whose lever simvar isn't the lever.
+    // Query asks whether it is when the pilot's movement didn't tell; in Positions the pilot holds
+    // the lever at a few positions; Notice warns before the Sweep steps the axis through its range.
+    enum class Phase { Idle, Prepare, Takeoff, User, Retry, Replay, Hold, Ask, Done, Query, Positions, Notice, Sweep };
+    enum class LeverVerdict { Steady, Creeps, Unclear };  // the lever simvar while the hand was still
 
     Control control() const { return plan_[step_]; }
     void enterStep();
     void beginUser();
     void userFrame(double dt, const Frame& live);
+    void scanFrame(double h, double o);  // a capture-clock scan, every kScanInterval
     void analyze();
+    LeverVerdict checkLever();
+    void confirmMethod();  // the pilot said yes to the method being tried
+    void beginPositions();
+    void positionsFrame(double dt, const Frame& live);
+    void pickLever();
+    void enterNotice();
+    void beginSweep();
+    void sweepFrame(double dt, const Frame& live);
+    void sweepTo(double axis, bool force);
+    void finishSweep();
+    void stopSweep(const std::string& why);
+    void parkThrottle();  // the sweep's throttle back to idle, reverser stowed
+    std::string leverPattern(const std::string& name) const;
     double buildMethods();  // returns when the variables they use first changed
     std::string enginePattern(const std::string& name, bool lvar) const;
     void startMethod(size_t i);
@@ -239,6 +295,31 @@ private:
     double replayAnchor_ = NAN;
     double replayStable_ = 0.0;
     bool stoppedEarly_ = false;
+
+    // the throttle lever (aircraft whose lever simvar isn't the lever)
+    AircraftProfile before_;  // the profile when the run started: a skipped step keeps its result
+    LeverVerdict leverVerdict_ = LeverVerdict::Steady;
+    bool leverStage_ = false;  // the throttle's method is confirmed; now its lever
+    ControlMethod chosen_;     // that method
+    LeverCalibration lever_;   // what the lever stage found, stored with the step
+    double leverIdle_ = NAN;   // the lever variable at idle (the end of the positions)
+    double leverSpan_ = 0.0;   // and how far it moved there
+    std::vector<double> holds_;  // the handle at each position held (Positions)
+    bool holdCounted_ = false;
+    struct SweepMove {
+        double axis;  // 0..1
+        int record;   // 0: just get there, 1: a forward reading, 2: a reverse one
+        int reverser; // -1 as it is, 0 stow, 1 engage (then a longer wait)
+    };
+    std::vector<SweepMove> sweep_;
+    size_t sweepAt_ = 0;
+    bool sweepExtended_ = false;  // the reverse pass and the way back are planned
+    double sweepHeld_ = 0.0;      // time at this move
+    double sweepLast_ = NAN;      // the lever's last reading, and how long it's been unchanged
+    double sweepSteady_ = 0.0;
+    Frame sweepFrame_;
+    bool reverserOn_ = false;
+    std::vector<LeverPoint> sweepForward_, sweepReverse_;
 };
 
 }  // namespace br

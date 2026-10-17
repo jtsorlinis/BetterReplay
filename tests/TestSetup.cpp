@@ -53,6 +53,19 @@ struct FakeAircraft : IControlSim {
     ControlMethod throttleWorks{MethodKind::InputSet, "ENGINE_THROTTLE_#", 0.01};
     ControlMethod gearWorks{MethodKind::InputSet, "LANDING_GEAR_GEAR", 1.0};
 
+    // An Airbus-like throttle instead (the A320neo V2): the pilot moves an axis (0..1), the lever
+    // has detents (idle, CL, FLX/MCT, TOGA) and reads in INI_ENGn_THROTTLE_POS, and the lever
+    // simvar is the thrust demand, which follows the lever with a lag. Replayed, only the throttle
+    // key events move the lever (as THROTTLEn_AXIS_SET_EX1 would).
+    bool airbus = false;
+    double axis[2] = {0.0, 0.0};
+    bool reversers = true;       // the reverse thrust events engage them; the axis then sets the amount
+    bool reverseZone = false;    // the axis's bottom fifth is reverse instead
+    bool reverser = false;
+    int reverserCalls = 0;
+    bool axisRecorded = false;      // the key-event handler sees the pilot's axis (thr_axis_N)
+    bool hideThrottleVars = false;  // nothing but the simvar moves with the throttle
+
     // what the setup did
     std::vector<ControlMethod> tried;
     int scans = 0, scanReads = 0, scanEnds = 0, ends = 0;
@@ -67,10 +80,37 @@ struct FakeAircraft : IControlSim {
     }
     double ieThrottle(int e) const { return 16.7 + 0.833 * thr[e]; }
 
+    // The lever (TLA, degrees) where the axis puts it: detents at idle (0), CL (25), FLX/MCT (35)
+    // and TOGA (45); reverse down to -20.
+    double tla(int e) const {
+        double a = axis[e];
+        if (reverser) return -20.0 * a;
+        if (reverseZone) {
+            if (a < 0.2) return -20.0 + 100.0 * a;
+            a = (a - 0.2) / 0.8;
+        }
+        if (a < 0.05) return 0.0;
+        if (a < 0.45) return (a - 0.05) / 0.4 * 22.5;
+        if (a < 0.55) return 25.0;
+        if (a < 0.7) return 27.0 + (a - 0.55) / 0.15 * 6.0;
+        if (a < 0.8) return 35.0;
+        if (a < 0.9) return 37.0 + (a - 0.8) / 0.1 * 6.0;
+        return 45.0;
+    }
+    static constexpr double kLeverUnits = 51.9 / 45.0;  // INI_ENGn_THROTTLE_POS per degree
+    double leverVar(int e) const { return tla(e) * kLeverUnits; }
+
     void step(double dt) {
         t += dt;
         spoilerSurface = approach(spoilerSurface, spoilerHandle, 2.0, dt);
-        for (int e = 0; e < 2; ++e) n1[e] = approach(n1[e], 20.0 + 0.75 * thr[e], 10.0, dt);
+        if (airbus) {
+            for (int e = 0; e < 2; ++e) {
+                const double l = tla(e);
+                const double demand = l >= 0.0 ? l / 45.0 * 85.0 : l;
+                thr[e] += (demand - thr[e]) * (dt / 1.2 < 1.0 ? dt / 1.2 : 1.0);
+            }
+        }
+        for (int e = 0; e < 2; ++e) n1[e] = approach(n1[e], 20.0 + 0.75 * std::fabs(thr[e]), 10.0, dt);
         if (t - gearLeverChangedAt >= 2.0) gearPos = approach(gearPos, gearLever, 0.25, dt);
         if (gearPos >= 0.999) gearHandleSimvar = 1.0;  // the handle simvar lags, as on the A320
         if (gearPos <= 0.001) gearHandleSimvar = 0.0;
@@ -92,6 +132,8 @@ struct FakeAircraft : IControlSim {
             f.v[kThrottle1 + e] = thr[e];
             f.v[kEngineN1_1 + e] = n1[e];
             f.v[kInputThrottle1 + e] = ieThrottle(e);
+            f.v[kReverser1 + e] = reverser ? 1.0 : 0.0;
+            f.v[kThrottleAxis1 + e] = airbus && axisRecorded ? axis[e] : NAN;
         }
         f.v[kGearCenter] = f.v[kGearLeft] = f.v[kGearRight] = gearPos;
         f.v[kGearHandle] = gearHandleSimvar;
@@ -99,25 +141,47 @@ struct FakeAircraft : IControlSim {
         return f;
     }
 
+    std::vector<ScanVar> scanVars() const {
+        std::vector<ScanVar> vars = {{"AIRLINER_SPOILER_LEVER", false}, {"ENGINE_THROTTLE_1", false},
+                                     {"ENGINE_THROTTLE_2", false},      {"LANDING_GEAR_GEAR", false},
+                                     {"UNRELATED_SWITCH", false},       {"SIM_TIMER", true},
+                                     {"CONSTANT", true},                {"SPOILER_ANIMATION", true}};
+        if (airbus) {
+            // the lever per engine; a flag; a thrust output that follows the demand
+            vars.insert(vars.end(), {{"INI_ENG1_THROTTLE_POS", true}, {"INI_ENG2_THROTTLE_POS", true},
+                                     {"INI_LEVER_IN_TOGA", true},     {"INI_THROTTLE_OUTPUT_ENGINE1", true},
+                                     {"INI_THROTTLE_OUTPUT_ENGINE2", true}});
+        }
+        return vars;
+    }
+    std::vector<double> scanValues() const {
+        std::vector<double> v = {spoilerHandle * 100.0, ieThrottle(0), ieThrottle(1), gearLever, 1.0, t * 1000.0, 42.0,
+                                 spoilerSurface};
+        if (hideThrottleVars) v[1] = v[2] = 16.7;
+        if (airbus) v.insert(v.end(), {leverVar(0), leverVar(1), tla(0) >= 44.9 ? 1.0 : 0.0, thr[0], thr[1]});
+        return v;
+    }
     void scanBegin(std::vector<ScanVar>& vars) override {
         ++scans;
-        vars = {{"AIRLINER_SPOILER_LEVER", false}, {"ENGINE_THROTTLE_1", false}, {"ENGINE_THROTTLE_2", false},
-                {"LANDING_GEAR_GEAR", false},      {"UNRELATED_SWITCH", false},  {"SIM_TIMER", true},
-                {"CONSTANT", true},                {"SPOILER_ANIMATION", true}};
+        vars = scanVars();
     }
     void scanRead(std::vector<double>& v) override {
         ++scanReads;
-        v.assign(8, 0.0);
-        v[0] = spoilerHandle * 100.0;
-        v[1] = ieThrottle(0);
-        v[2] = ieThrottle(1);
-        v[3] = gearLever;
-        v[4] = 1.0;
-        v[5] = t * 1000.0;
-        v[6] = 42.0;
-        v[7] = spoilerSurface;
+        v = scanValues();
     }
     void scanEnd() override { ++scanEnds; }
+    double readVar(const ScanVar& var) override {
+        const std::vector<ScanVar> vars = scanVars();
+        const std::vector<double> values = scanValues();
+        for (size_t i = 0; i < vars.size(); ++i) {
+            if (vars[i].name == var.name && vars[i].lvar == var.lvar) return values[i];
+        }
+        return NAN;
+    }
+    void setReverser(bool on) override {
+        ++reverserCalls;
+        if (airbus && reversers) reverser = on;
+    }
 
     bool beginControl(Control c, const ControlMethod& m, std::string& why) override {
         tried.push_back(m);
@@ -137,6 +201,19 @@ struct FakeAircraft : IControlSim {
             if (driven.kind == MethodKind::InputSet || driven.kind == MethodKind::InputValue) v = f.v[kInputSpeedBrakes] * driven.scale;
             if (driven.kind == MethodKind::KeyEvent || driven.kind == MethodKind::SimVar) v = f.v[kSpoilersHandle];
             if (std::isfinite(v) && v >= 0.0 && v <= 1.0) spoilerHandle = v;  // out of range: ignored
+        } else if (c == Control::Throttle && driven == throttleWorks && driven.kind == MethodKind::KeyEvent) {
+            // Like ControlDriver: the recorded hardware axis, else the lever simvar as a fraction.
+            for (int e = 0; e < engines; ++e) {
+                double a = f.v[kThrottleAxis1 + e];
+                if (!std::isfinite(a)) a = f.v[kThrottle1 + e] / 100.0;
+                if (!std::isfinite(a)) continue;
+                a = a < 0.0 ? 0.0 : (a > 1.0 ? 1.0 : a);
+                if (airbus) {
+                    axis[e] = a;
+                } else {
+                    thr[e] = 100.0 * a;
+                }
+            }
         } else if (c == Control::Throttle && driven == throttleWorks) {
             for (int e = 0; e < engines; ++e) {
                 const double arg = f.v[kInputThrottle1 + e] * driven.scale;
@@ -211,7 +288,7 @@ struct SetupHarness {
     bool run(double seconds, const std::function<void(double)>& pilot = nullptr, const char* until = nullptr) {
         for (double s = 0.0; s < seconds; s += kDt) {
             const std::string before = phase();
-            if (pilot && (before == "prepare" || before == "user" || before == "takeoff")) pilot(s);
+            if (pilot && (before == "prepare" || before == "user" || before == "takeoff" || before == "positions")) pilot(s);
             aircraft.step(kDt);
             flow.onFrame(kDt, aircraft.live(), facts);
             t += kDt;
@@ -394,6 +471,289 @@ TEST(Setup_ThrottleUsesOnePatternForBothEnginesAndWaitsForTheSpool) {
     CHECK(h.flow.profile()[Control::Throttle].method.var == "ENGINE_THROTTLE_#");
 }
 
+// ---------------------------------------------------------------------------- throttle lever
+
+namespace {
+
+// A throttle-only setup on an aircraft whose throttle replays with the key events.
+void throttleOnly(SetupHarness& h) {
+    h.facts.hasSpoilers = false;
+    h.facts.gearRetractable = false;
+    h.aircraft.throttleWorks = ControlMethod{MethodKind::KeyEvent, "", 1.0};
+}
+
+// Full at 2 s (over `rampSec`), held `holdSec`, back to idle over 1 s.
+std::function<void(double)> fullAndBack(SetupHarness& h, double holdSec, double rampSec = 1.0) {
+    return [&h, holdSec, rampSec](double s) {
+        const double x = s - 2.0;
+        double v = 0.0;
+        if (x >= 0.0 && x < rampSec) v = x / rampSec;
+        else if (x >= rampSec && x < rampSec + holdSec) v = 1.0;
+        else if (x >= rampSec + holdSec && x < rampSec + holdSec + 1.0) v = 1.0 - (x - rampSec - holdSec);
+        if (h.aircraft.airbus) {
+            h.aircraft.axis[0] = h.aircraft.axis[1] = 0.95 * v;  // into the TOGA detent
+        } else {
+            h.aircraft.thr[0] = h.aircraft.thr[1] = 100.0 * v;
+        }
+    };
+}
+
+// The pilot moves to CL, FLX/MCT and TOGA (half a second each way) and holds each for 4 s, then
+// back to idle.
+std::function<void(double)> airbusDetents(SetupHarness& h) {
+    return [&h](double s) {
+        static const double kAt[] = {0.0, 0.5, 0.75, 0.95, 0.0};
+        const double x = s - 1.0;
+        double a = 0.0;
+        if (x >= 0.0) {
+            const int i = static_cast<int>(x / 4.5);
+            const double into = x - 4.5 * i;
+            if (i < 4) {
+                const double from = kAt[i], to = kAt[i + 1];
+                a = into < 0.5 ? from + (to - from) * into / 0.5 : to;
+            }
+        }
+        h.aircraft.axis[0] = h.aircraft.axis[1] = a;
+    };
+}
+
+// Through the throttle's movement and its replays to the method's question, then "yes".
+void confirmKeyEvents(SetupHarness& h, double holdSec) {
+    REQUIRE(h.run(240.0, fullAndBack(h, holdSec), "ask"));
+    REQUIRE(!h.aircraft.tried.empty());
+    CHECK(h.aircraft.tried.back().kind == MethodKind::KeyEvent);
+    REQUIRE(h.answer("yes"));
+}
+
+}  // namespace
+
+TEST(Setup_ThrottleLeverStepSkippedWhenTheSimvarHoldsStill) {
+    SetupHarness h;
+    throttleOnly(h);
+    REQUIRE(h.start());
+    confirmKeyEvents(h, 4.0);
+    // The simvar is the lever here: no further questions.
+    CHECK_EQ(h.phase(), std::string("done"));
+    const ControlProfile& tp = h.flow.profile()[Control::Throttle];
+    CHECK(tp.state == ControlState::Ok);
+    CHECK(tp.method.kind == MethodKind::KeyEvent);
+    CHECK(tp.lever.var.empty());
+    for (const std::string& p : h.prompts) CHECK(p.find("positions") == std::string::npos);
+}
+
+TEST(Setup_ThrottleLeverAskedWhenTheMovementDoesntTell) {
+    SetupHarness h;
+    throttleOnly(h);
+    h.aircraft.hideThrottleVars = true;  // nothing lever-like to compare with
+    REQUIRE(h.start());
+    confirmKeyEvents(h, 0.5);            // and no hold at full
+    CHECK_EQ(h.phase(), std::string("query"));
+    CHECK_EQ(h.status().getString("prompt", ""), std::string("Do the levers stay put under autothrust?"));
+    CHECK(!h.status().getString("detail", "").empty());
+    REQUIRE(h.answer("no"));
+    CHECK_EQ(h.phase(), std::string("done"));
+    CHECK(h.flow.profile()[Control::Throttle].state == ControlState::Ok);
+    CHECK(h.flow.profile()[Control::Throttle].lever.var.empty());
+}
+
+TEST(Setup_ThrottleLeverFoundAndCalibratedWhenTheSimvarCreeps) {
+    SetupHarness h;
+    throttleOnly(h);
+    h.aircraft.airbus = true;
+    h.facts.hasReverse = true;
+    REQUIRE(h.start());
+    confirmKeyEvents(h, 4.0);
+    // The thrust demand kept moving while the lever sat in TOGA: find the lever.
+    CHECK_EQ(h.phase(), std::string("positions"));
+    CHECK_EQ(h.status().getString("prompt", ""), std::string("Hold the throttle at a few positions"));
+    CHECK(h.status().getString("detail", "").find("CL, FLX/MCT and TOGA") != std::string::npos);
+
+    REQUIRE(h.run(60.0, airbusDetents(h), "notice"));
+    CHECK(inOrder(h.prompts, {"Hold the throttle at a few positions", "Bring the throttle back to idle",
+                              "Hands off the throttle"}));
+    const JsonValue notice = h.status();
+    CHECK(notice.getString("detail", "").find("15 seconds") != std::string::npos);
+    const JsonValue* buttons = notice.get("buttons");
+    REQUIRE(buttons && buttons->isArray() && !buttons->array.empty());
+    CHECK_EQ(buttons->array[0].string, std::string("begin"));
+
+    REQUIRE(h.answer("begin"));
+    CHECK_EQ(h.phase(), std::string("sweep"));
+    REQUIRE(h.run(120.0, nullptr, "done"));
+    CHECK(!h.aircraft.driving);
+    CHECK(!h.aircraft.reverser);  // stowed again
+    CHECK_EQ(h.aircraft.reverserCalls, 2);
+    CHECK_NEAR(h.aircraft.axis[0], 0.025, 0.02);  // left at idle
+
+    const ControlProfile& tp = h.flow.profile()[Control::Throttle];
+    CHECK(tp.state == ControlState::Ok);
+    CHECK(tp.method.kind == MethodKind::KeyEvent);
+    // The lever itself, as one pattern for both engines: not the creeping thrust output or the flag.
+    CHECK_EQ(tp.lever.var, std::string("INI_ENG#_THROTTLE_POS"));
+    REQUIRE(tp.lever.valid());
+    CHECK(tp.lever.forward.size() >= 30);
+    CHECK(tp.lever.reverse.size() >= 8);
+    const double u = FakeAircraft::kLeverUnits;
+    double a = NAN;
+    // Detents come back as the middle of their stretch of the axis, the rest interpolated.
+    CHECK(leverAxis(tp.lever, 25.0 * u, 0.0, false, a));
+    CHECK_NEAR(a, 0.5, 0.03);
+    CHECK(leverAxis(tp.lever, 35.0 * u, 0.0, false, a));
+    CHECK_NEAR(a, 0.75, 0.03);
+    CHECK(leverAxis(tp.lever, 45.0 * u, 0.0, false, a));
+    CHECK_NEAR(a, 0.95, 0.03);
+    CHECK(leverAxis(tp.lever, 30.0 * u, 0.0, false, a));
+    CHECK_NEAR(a, 0.625, 0.02);
+    CHECK(leverAxis(tp.lever, 0.0, 0.0, false, a));
+    CHECK(a < 0.05);
+    // Reverse: the amount, once the aircraft's reverser is engaged too.
+    CHECK(leverAxis(tp.lever, -20.0 * u, 1.0, true, a));
+    CHECK_NEAR(a, 1.0, 0.03);
+    CHECK(leverAxis(tp.lever, -10.0 * u, 1.0, true, a));
+    CHECK_NEAR(a, 0.5, 0.03);
+    CHECK(leverAxis(tp.lever, -10.0 * u, NAN, true, a));  // by value when the clip has no rev_N
+    CHECK_NEAR(a, 0.5, 0.03);
+    CHECK(leverAxis(tp.lever, -10.0 * u, 1.0, false, a));  // the reverser not engaged yet: idle
+    CHECK(a < 0.05);
+}
+
+TEST(Setup_ThrottleLeverAxisWithItsOwnReverseZone) {
+    SetupHarness h;
+    throttleOnly(h);
+    h.aircraft.airbus = true;
+    h.aircraft.reverseZone = true;
+    // Replayed from the simvar the bottom of the axis would be full reverse, so this aircraft's
+    // key events only pass the check with the pilot's own axis recorded.
+    h.aircraft.axisRecorded = true;
+    h.facts.hasReverse = true;
+    REQUIRE(h.start());
+    // Idle is at axis 0.2 here.
+    auto pilot = [&](double s) {
+        fullAndBack(h, 4.0)(s);
+        h.aircraft.axis[0] = h.aircraft.axis[1] = 0.2 + 0.8 * h.aircraft.axis[0];
+    };
+    REQUIRE(h.run(240.0, pilot, "ask"));
+    REQUIRE(h.answer("yes"));
+    REQUIRE(h.phase() == "positions");
+    auto detents = [&](double s) {
+        airbusDetents(h)(s);
+        h.aircraft.axis[0] = h.aircraft.axis[1] = 0.2 + 0.8 * h.aircraft.axis[0];
+    };
+    REQUIRE(h.run(60.0, detents, "notice"));
+    REQUIRE(h.answer("begin"));
+    REQUIRE(h.run(120.0, nullptr, "done"));
+    const ControlProfile& tp = h.flow.profile()[Control::Throttle];
+    REQUIRE(tp.lever.valid());
+    CHECK(tp.lever.reverse.empty());  // the axis covers reverse itself
+    CHECK_EQ(h.aircraft.reverserCalls, 0);
+    CHECK_NEAR(h.aircraft.axis[0], 0.22, 0.03);  // idle, not the bottom of the axis
+    double a = NAN;
+    CHECK(leverAxis(tp.lever, -20.0 * FakeAircraft::kLeverUnits, 1.0, true, a));
+    CHECK_NEAR(a, 0.0, 0.03);
+    CHECK(leverAxis(tp.lever, -10.0 * FakeAircraft::kLeverUnits, 1.0, true, a));
+    CHECK_NEAR(a, 0.1, 0.03);
+    CHECK(leverAxis(tp.lever, 25.0 * FakeAircraft::kLeverUnits, 0.0, false, a));
+    CHECK_NEAR(a, 0.6, 0.03);
+}
+
+TEST(Setup_ThrottleLeverSweepStopsWhenTheAircraftRolls) {
+    SetupHarness h;
+    throttleOnly(h);
+    h.aircraft.airbus = true;
+    REQUIRE(h.start());
+    confirmKeyEvents(h, 4.0);
+    REQUIRE(h.run(60.0, airbusDetents(h), "notice"));
+    REQUIRE(h.answer("begin"));
+    h.run(3.0);
+    h.aircraft.gs = 5.0;  // the parking brake isn't holding
+    REQUIRE(h.run(1.0, nullptr, "retry"));
+    CHECK(h.status().getString("note", "").find("roll") != std::string::npos);
+    CHECK(!h.aircraft.driving);
+    CHECK(h.aircraft.axis[0] < 0.05);  // put back to idle
+    h.aircraft.gs = 0.0;
+    // Skipping keeps the confirmed method, without a lever.
+    REQUIRE(h.answer("skip"));
+    CHECK_EQ(h.phase(), std::string("done"));
+    CHECK(h.flow.profile()[Control::Throttle].state == ControlState::Ok);
+    CHECK(h.flow.profile()[Control::Throttle].method.kind == MethodKind::KeyEvent);
+    CHECK(!h.flow.profile()[Control::Throttle].lever.valid());
+}
+
+TEST(Setup_SkippingAStepOnALaterRunKeepsItsEarlierSetup) {
+    SetupHarness h;
+    throttleOnly(h);
+    AircraftProfile before;
+    before[Control::Throttle].state = ControlState::Ok;
+    before[Control::Throttle].method = ControlMethod{MethodKind::KeyEvent, "", 1.0};
+    before[Control::Throttle].lever.var = "MY_LEVER";
+    before[Control::Throttle].lever.forward = {{0.0, 0.0}, {1.0, 45.0}};
+    std::string err;
+    REQUIRE(h.flow.start(before, h.aircraft.live(), h.facts, err));
+    REQUIRE(h.answer("skip"));
+    CHECK_EQ(h.phase(), std::string("done"));
+    const ControlProfile& tp = h.flow.profile()[Control::Throttle];
+    CHECK(tp.state == ControlState::Ok);
+    CHECK_EQ(tp.lever.var, std::string("MY_LEVER"));
+}
+
+TEST(Setup_TrackerHoldCheckSeesASimvarCreepWhileTheLeverHolds) {
+    // The lever goes to 45 over 1 s and stays; the simvar follows with a lag (still creeping
+    // seconds later), or exactly.
+    for (const bool lag : {true, false}) {
+        CandidateTracker t;
+        t.begin({{"LEVER", true}, {"FLAG", true}});
+        std::vector<double> v(2);
+        double simvar = 0.0;
+        for (int s = 0; s <= 120; ++s) {
+            const double time = s * 0.1;
+            const double lever = time < 2.0 ? 0.0 : (time < 3.0 ? 45.0 * (time - 2.0) : (time < 8.0 ? 45.0 : 0.0));
+            simvar = lag ? simvar + (lever / 45.0 * 85.0 - simvar) * 0.08 : lever / 45.0 * 85.0;
+            v[0] = lever;
+            v[1] = lever > 40.0 ? 1.0 : 0.0;
+            t.sample(time, v, simvar, simvar);
+        }
+        const CandidateTracker::HoldCheck hc = t.holdCheck(0.0, 12.0, {0, 1}, 0.0, 20.0, 0.5, 2.0, 0.75);
+        if (lag) {
+            CHECK(hc.creep > 0.5);
+            CHECK_EQ(hc.by, size_t(0));  // the flag takes two values: not a lever
+        } else {
+            CHECK(hc.creep < 0.5);
+            CHECK(hc.steady);
+        }
+    }
+}
+
+TEST(Profile_LeverCalibrationTables) {
+    // A forward sweep with a flat stretch (a detent) and readings out of order.
+    LeverCalibration cal;
+    cal.var = "LEVER_#";
+    cal.forward = leverTable({{0.5, 25.0}, {0.0, 0.0}, {0.25, 12.5}, {0.4, 25.0}, {0.6, 25.0}, {1.0, 45.0}, {0.8, NAN}});
+    REQUIRE(cal.forward.size() == 6);
+    CHECK_NEAR(cal.forward[1].axis, 0.25, 1e-12);
+    CHECK_NEAR(invertLever(cal.forward, 25.0), 0.5, 1e-9);     // the detent's middle (0.4..0.6)
+    CHECK_NEAR(invertLever(cal.forward, 6.25), 0.125, 1e-9);   // interpolated
+    CHECK_NEAR(invertLever(cal.forward, 35.0), 0.8, 1e-9);     // between the detent and full
+    CHECK_NEAR(invertLever(cal.forward, 60.0), 1.0, 1e-9);     // clamped
+    CHECK_NEAR(invertLever(cal.forward, -5.0), 0.0, 1e-9);
+    double a = NAN;
+    CHECK(leverAxis(cal, 25.0, NAN, false, a));
+    CHECK_NEAR(a, 0.5, 1e-9);
+    CHECK(!leverAxis(cal, NAN, NAN, false, a));
+    // Without a reverse table a reverse value can't be placed (playback falls back to the simvar).
+    CHECK(!leverAxis(cal, -10.0, 1.0, true, a));
+    // A reverse table: the amount 0..1 takes the lever from 0 to -20.
+    cal.reverse = leverTable({{0.0, 0.0}, {0.5, -10.0}, {1.0, -20.0}});
+    CHECK(leverAxis(cal, -15.0, 1.0, true, a));
+    CHECK_NEAR(a, 0.75, 1e-9);
+    CHECK(leverAxis(cal, -15.0, NAN, true, a));  // below idle: reverse, by value
+    CHECK_NEAR(a, 0.75, 1e-9);
+    CHECK(leverAxis(cal, -15.0, 1.0, false, a));  // not engaged yet: forward idle
+    CHECK_NEAR(a, 0.0, 1e-9);
+    CHECK(leverAxis(cal, 25.0, 0.0, true, a));  // still engaged: reverse idle
+    CHECK_NEAR(a, 0.0, 1e-9);
+    CHECK(!LeverCalibration().valid());
+}
+
 TEST(Setup_ThrottleReplayStopsWhenTheAircraftRolls) {
     SetupHarness h;
     h.facts.hasSpoilers = false;
@@ -509,6 +869,13 @@ TEST(Setup_TrackerIgnoresTimersAndChangesBeforeTheMovement) {
 TEST(Profile_JsonRoundTrip) {
     ProfileStore store;
     store.upsert("c172").declined = true;
+    {
+        AircraftProfile& v2 = store.upsert("simobjects/airplanes/a320neo-v2");
+        v2[Control::Throttle] = {ControlState::Ok, ControlMethod{MethodKind::KeyEvent, "", 1.0}, true};
+        v2[Control::Throttle].lever.var = "INI_ENG#_THROTTLE_POS";
+        v2[Control::Throttle].lever.forward = {{0.0, 0.0}, {0.5, 28.83}, {0.525, 28.83}, {1.0, 51.9}};
+        v2[Control::Throttle].lever.reverse = {{0.0, 0.0}, {1.0, -23.07}};
+    }
     AircraftProfile& a = store.upsert("simobjects/airplanes/a320neo");
     a.title = "Airbus A320neo \"V2\"";
     a.updatedUtcMs = 1792247525000;
@@ -522,9 +889,20 @@ TEST(Profile_JsonRoundTrip) {
     ProfileStore back;
     std::string err;
     REQUIRE(back.fromJson(json.data(), json.size(), &err));
-    REQUIRE(back.size() == 2);
+    REQUIRE(back.size() == 3);
+    const AircraftProfile* b2 = back.find("simobjects/airplanes/a320neo-v2");
+    REQUIRE(b2);
+    const LeverCalibration& lv = (*b2)[Control::Throttle].lever;
+    CHECK_EQ(lv.var, std::string("INI_ENG#_THROTTLE_POS"));
+    REQUIRE(lv.forward.size() == 4 && lv.reverse.size() == 2);
+    CHECK_NEAR(lv.forward[2].axis, 0.525, 1e-9);
+    CHECK_NEAR(lv.forward[3].lever, 51.9, 1e-9);
+    CHECK_NEAR(lv.reverse[1].lever, -23.07, 1e-9);
+    CHECK(describeControl(Control::Throttle, (*b2)[Control::Throttle]).find("INI_ENG#_THROTTLE_POS") != std::string::npos);
+    CHECK(json.find("\"lever\"") == json.rfind("\"lever\""));  // only the profile that has one
     const AircraftProfile* b = back.find("simobjects/airplanes/a320neo");
     REQUIRE(b);
+    CHECK(!(*b)[Control::Throttle].lever.valid());
     CHECK_EQ(b->title, a.title);
     CHECK_EQ(b->updatedUtcMs, a.updatedUtcMs);
     CHECK((*b)[Control::Spoilers].state == ControlState::Failed);
@@ -587,6 +965,22 @@ TEST(Profile_ClipSupportsTheMethodOnlyWhenRecordedFromTheSameVariable) {
     clip.meta.vars.push_back({"ie_thr_1", "OTHER_THROTTLE_1"});
     CHECK(!clipSupports(Control::Throttle, thr, clip, 2, &why));
     CHECK(why.find("OTHER_THROTTLE_1") != std::string::npos);
+
+    // The throttle lever's own variable: per engine, from the same L:var.
+    LeverCalibration lever;
+    lever.var = "INI_ENG#_THROTTLE_POS";
+    lever.forward = {{0.0, 0.0}, {1.0, 51.9}};
+    CHECK(!clipHasLever(lever, clip, 2, &why));  // recorded before the lever setup
+    clip.present.set(kLVarThrottle1);
+    clip.present.set(kLVarThrottle2);
+    clip.meta.vars.push_back({"lv_thr_1", "INI_ENG1_THROTTLE_POS"});
+    CHECK(!clipHasLever(lever, clip, 2, &why));
+    CHECK(why.find("lv_thr_2") != std::string::npos);
+    clip.meta.vars.push_back({"lv_thr_2", "ini_eng2_throttle_pos"});
+    CHECK(clipHasLever(lever, clip, 2, &why));
+    lever.var = "INI_THROTTLE_ALL";  // one variable for all engines
+    CHECK(!clipHasLever(lever, clip, 2, &why));
+    CHECK(!clipHasLever(LeverCalibration(), clip, 2, &why));
 }
 
 TEST(ClipFormat_VarsChunkRoundTrip) {

@@ -50,10 +50,32 @@ enum class ControlState : uint8_t {
     Absent,       // the aircraft doesn't have it (fixed gear, no spoilers or flaps)
 };
 
+// The throttle lever's own variable, for aircraft whose lever simvar isn't the lever: on the
+// A320neo V2 GENERAL ENG THROTTLE LEVER POSITION is the autothrust's thrust demand, which creeps
+// with speed while the lever sits in its detent. The setup finds the L:var that holds still when
+// the pilot holds the lever, then steps the throttle axis through its range and notes where the
+// lever went, so playback can turn the recorded lever back into the axis value that puts it
+// there (detents included).
+struct LeverPoint {
+    double axis;   // THROTTLEn_AXIS_SET_EX1 as a fraction: 0 = -16384 (idle, or full reverse), 1 = full
+    double lever;  // the lever variable there
+};
+
+struct LeverCalibration {
+    std::string var;  // the L:var; '#' stands for the engine number. Empty: none
+    std::vector<LeverPoint> forward;  // reverser stowed, by ascending axis
+    // With the reverser engaged (the axis then sets the reverse amount). Empty when the axis has
+    // its own reverse zone (the forward table reaches below idle) or the aircraft has none.
+    std::vector<LeverPoint> reverse;
+
+    bool valid() const { return !var.empty() && forward.size() >= 2; }
+};
+
 struct ControlProfile {
     ControlState state = ControlState::Pending;
     ControlMethod method;
     bool confirmed = false;  // the pilot said the replay looked right (not only the automatic check)
+    LeverCalibration lever;  // throttle only, with the key-event method
 };
 
 struct AircraftProfile {
@@ -93,6 +115,19 @@ bool parseStateKey(const std::string& key, ControlState& out);
 std::string engineVar(const std::string& pattern, int engine);
 // "input event HANDLING_FLAPS (preset)", "L:var A32NX_SPOILERS_HANDLE_POSITION", "key events", ...
 std::string describeMethod(Control c, const ControlMethod& m);
+// The method, and the throttle lever's variable if the profile has one.
+std::string describeControl(Control c, const ControlProfile& cp);
+
+// A sweep's (axis, lever) readings as a calibration table: sorted by axis, unreadable ones dropped.
+std::vector<LeverPoint> leverTable(std::vector<LeverPoint> samples);
+// The axis fraction that puts the lever at `lever`: the middle of a flat stretch at that value
+// (a detent), else interpolated between the readings either side, clamped to the table's ends.
+double invertLever(const std::vector<LeverPoint>& table, double lever);
+// The axis fraction for a recorded lever value. clipReverser: the clip's reverser (rev_N) there,
+// NaN if it wasn't recorded; liveReverse: the aircraft's reverser now. With a separate reverse
+// table the clip's reverser events switch the aircraft's, and until it matches the lever is held
+// at idle. False if the calibration can't place the value (reverse without a reverse table).
+bool leverAxis(const LeverCalibration& cal, double lever, double clipReverser, bool liveReverse, double& axis);
 // The channel a method takes its values from (engine is 0-based, throttle only), or -1.
 int methodSourceChannel(Control c, MethodKind k, int engine);
 // Every channel playback drives for this control when the profile drives it (any method):

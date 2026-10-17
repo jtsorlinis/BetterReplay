@@ -29,6 +29,29 @@ constexpr double kPassReturn = 0.15; // and bring it back to within 15% of that
 constexpr double kMaxRollKt = 3.0;   // the throttle replay stops if the aircraft starts to roll
 constexpr double kTaskStillSec = 0.75;  // a control held this long has finished that instruction
 
+// The throttle lever. A lever-like variable (one that took this many values while the pilot
+// moved the throttle) holding within 0.5% of its range for 2 s is the pilot's hand being still;
+// what it drives gets the first 0.75 s to catch up. If the lever simvar still moves 0.5% after
+// that, it isn't the lever.
+constexpr int kLeverMinValues = 8;
+constexpr double kLeverStillFraction = 0.005;
+constexpr double kLeverHoldSec = 2.0;
+constexpr double kLeverSettleSec = 0.75;
+constexpr double kLeverCreepPct = 0.5;
+constexpr double kLeverFullPct = 95.0;  // the simvar at full; a thrust demand reads less (TOGA ~85)
+constexpr size_t kLeverPositions = 3;     // positions held (besides idle) before "back to idle"
+constexpr double kLeverPositionSec = 1.5; // the lever variable holding this long is a position
+constexpr double kSimvarPositionSec = 1.0;  // and the simvar (which lags it) this long
+// The sweep: the axis in 40 steps (2.5% each), the reverse amount in 10; each held until the
+// lever has stopped (at least 0.2 s, at most 1 s; 1.5 s after the reverser is switched).
+constexpr int kSweepSteps = 40;
+constexpr int kSweepReverseSteps = 10;
+constexpr double kSweepMinHoldSec = 0.2;
+constexpr double kSweepSteadySec = 0.1;
+constexpr double kSweepMaxHoldSec = 1.0;
+constexpr double kSweepReverserSec = 1.5;
+constexpr double kSweepMaxSec = 150.0;
+
 double meanOf(const Frame& f, int first, int count) {
     double sum = 0.0;
     int n = 0;
@@ -89,6 +112,7 @@ const char* const kFlapTasks[] = {"Lower the flaps one notch", "Wait for the fla
 const char* const kThrottleTasks[] = {"Advance the throttle to full", "Bring the throttle back to idle",
                                       "Wait for the engines to spool down"};
 const char* const kGearTasks[] = {"Raise the gear", "Lower the gear"};
+const char* const kPositionTasks[] = {"Hold the throttle at a few positions", "Bring the throttle back to idle"};
 
 struct TaskList {
     const char* const* items;
@@ -104,6 +128,20 @@ TaskList tasksFor(Control c) {
     }
     return {kSpoilerTasks, 0};
 }
+
+// The throttle lever's phases (SetupFlow::Phase::Query and on).
+const char* const kQueryPrompt = "Do the levers stay put under autothrust?";
+const char* const kQueryDetail =
+    "On an Airbus the thrust levers sit in a detent (CL, FLX/MCT, TOGA) while the autothrust sets the thrust, "
+    "so the thrust this aircraft reports isn't where its levers are. Your movement didn't show which kind this is.";
+const char* const kPositionsDetail =
+    "The thrust this aircraft reports isn't where its levers are, so BetterReplay looks for the lever's own "
+    "position. Move the throttle to each position you use and hold it there for a few seconds: full reverse if it "
+    "has reversers, and the detents (on an Airbus CL, FLX/MCT and TOGA).";
+const char* const kNoticeDetail =
+    "BetterReplay now moves the throttle itself, from idle to full and back, to learn where the lever's positions "
+    "are. The engines spool up against the parking brake for about 15 seconds.";
+const char* const kSweepDetail = "Keep your hands off the throttle while BetterReplay learns where the lever's positions are.";
 
 const char* question(Control c) {
     switch (c) {
@@ -240,6 +278,124 @@ double CandidateTracker::firstChange(size_t index) const {
     return times_[static_cast<size_t>(tracks_[index].first)];
 }
 
+CandidateTracker::HoldCheck CandidateTracker::holdCheck(double from, double to, const std::vector<size_t>& candidates,
+                                                        double rest, double away, double tol, double holdSec,
+                                                        double settleSec) const {
+    HoldCheck out;
+    const long k0 = static_cast<long>(std::lower_bound(times_.begin(), times_.end(), from) - times_.begin());
+    const long k1 = static_cast<long>(std::upper_bound(times_.begin(), times_.end(), to) - times_.begin()) - 1;
+    if (k1 < k0 + 2) return out;
+    // The handle holding still by itself, away from where it rests (an idle hold doesn't tell:
+    // a thrust demand sits still at idle too).
+    for (long s = k0; s <= k1 && !out.steady; ++s) {
+        const double h0 = refHandle_[static_cast<size_t>(s)];
+        if (!std::isfinite(h0) || !(std::fabs(h0 - rest) > away)) continue;
+        double lo = h0, hi = h0;
+        for (long e = s + 1; e <= k1; ++e) {
+            const double h = refHandle_[static_cast<size_t>(e)];
+            if (!std::isfinite(h) || !(std::fabs(h - rest) > away)) break;
+            lo = h < lo ? h : lo;
+            hi = h > hi ? h : hi;
+            if (hi - lo > tol) break;
+            if (times_[static_cast<size_t>(e)] - times_[static_cast<size_t>(s)] >= holdSec) {
+                out.steady = true;
+                break;
+            }
+        }
+    }
+    // The handle while a lever-like variable held still.
+    std::vector<float> values;
+    for (const size_t idx : candidates) {
+        if (!changed(idx)) continue;
+        const Track& tr = tracks_[idx];
+        values.clear();
+        for (long s = k0; s <= k1; ++s) values.push_back(static_cast<float>(sampleValue(tr, static_cast<size_t>(s))));
+        std::vector<float> sorted = values;
+        std::sort(sorted.begin(), sorted.end());
+        const size_t distinct = static_cast<size_t>(std::unique(sorted.begin(), sorted.end()) - sorted.begin());
+        if (distinct < static_cast<size_t>(kLeverMinValues) || !std::isfinite(sorted.front()) ||
+            !std::isfinite(sorted[distinct - 1])) {
+            continue;  // a flag or a counter, not a lever
+        }
+        const double still = std::max(kLeverStillFraction * (sorted[distinct - 1] - sorted.front()), 1e-9);
+        for (size_t s = 0; s < values.size();) {
+            double lo = values[s], hi = values[s];
+            size_t e = s;
+            while (e + 1 < values.size()) {
+                const double x = values[e + 1];
+                if ((x > hi ? x : hi) - (x < lo ? x : lo) > still) break;
+                lo = x < lo ? x : lo;
+                hi = x > hi ? x : hi;
+                ++e;
+            }
+            const double t0 = times_[static_cast<size_t>(k0) + s];
+            const double t1 = times_[static_cast<size_t>(k0) + e];
+            if (t1 - t0 >= holdSec) {
+                double hlo = INFINITY, hhi = -INFINITY;
+                for (size_t k = s; k <= e; ++k) {
+                    const size_t i = static_cast<size_t>(k0) + k;
+                    const double h = refHandle_[i];
+                    if (times_[i] < t0 + settleSec || !std::isfinite(h)) continue;
+                    hlo = h < hlo ? h : hlo;
+                    hhi = h > hhi ? h : hhi;
+                }
+                if (hhi - hlo > out.creep) {
+                    out.creep = hhi - hlo;
+                    out.by = idx;
+                }
+            }
+            s = e + 1;
+        }
+    }
+    return out;
+}
+
+CandidateTracker::Holds CandidateTracker::holds(size_t index, double from, double to, double holdSec,
+                                                double stillFraction) const {
+    Holds out;
+    if (!changed(index)) return out;
+    const Track& tr = tracks_[index];
+    const long k0 = static_cast<long>(std::lower_bound(times_.begin(), times_.end(), from) - times_.begin());
+    const long k1 = static_cast<long>(std::upper_bound(times_.begin(), times_.end(), to) - times_.begin()) - 1;
+    if (k1 < k0 + 2) return out;
+    double lo = INFINITY, hi = -INFINITY;
+    std::vector<float> sorted;
+    for (long s = k0; s <= k1; ++s) {
+        const double x = sampleValue(tr, static_cast<size_t>(s));
+        lo = x < lo ? x : lo;
+        hi = x > hi ? x : hi;
+        sorted.push_back(static_cast<float>(x));
+    }
+    if (!(hi > lo)) return out;
+    out.range = hi - lo;
+    std::sort(sorted.begin(), sorted.end());
+    out.values = static_cast<int>(std::unique(sorted.begin(), sorted.end()) - sorted.begin());
+    const double still = stillFraction * (hi - lo);
+    std::vector<double> levels;
+    for (long s = k0; s <= k1;) {
+        double rlo = sampleValue(tr, static_cast<size_t>(s)), rhi = rlo;
+        long e = s;
+        while (e + 1 <= k1) {
+            const double x = sampleValue(tr, static_cast<size_t>(e + 1));
+            if ((x > rhi ? x : rhi) - (x < rlo ? x : rlo) > still) break;
+            rlo = x < rlo ? x : rlo;
+            rhi = x > rhi ? x : rhi;
+            ++e;
+        }
+        const double span = times_[static_cast<size_t>(e)] - times_[static_cast<size_t>(s)];
+        if (span >= holdSec) {
+            out.stillSec += span;
+            const double level = 0.5 * (rlo + rhi);
+            bool known = false;
+            for (const double l : levels) known |= std::fabs(l - level) <= 4.0 * still;
+            if (!known) levels.push_back(level);
+        }
+        s = e + 1;
+    }
+    out.levels = static_cast<int>(levels.size());
+    return out;
+}
+
 std::vector<CandidateTracker::Found> CandidateTracker::find(double from, double to, bool lvars, bool byOutcome,
                                                             const char* const* words, size_t max) const {
     std::vector<Found> out;
@@ -345,6 +501,31 @@ bool clipSupports(Control c, const ControlMethod& m, const Clip& clip, int engin
     return true;
 }
 
+bool clipHasLever(const LeverCalibration& cal, const Clip& clip, int engines, std::string* why) {
+    if (!cal.valid()) {
+        if (why) *why = "the profile has no throttle lever";
+        return false;
+    }
+    const int n = cal.var.find('#') != std::string::npos ? (engines < 1 ? 1 : (engines > 4 ? 4 : engines)) : 1;
+    for (int e = 0; e < n; ++e) {
+        const ChannelDef& def = kChannels[kLVarThrottle1 + e];
+        if (!clip.present.test(static_cast<size_t>(kLVarThrottle1 + e))) {
+            if (why) *why = std::string("the clip has no ") + def.key;
+            return false;
+        }
+        const std::string want = upper(engineVar(cal.var, e + 1));
+        bool same = false;
+        for (const auto& kv : clip.meta.vars) {
+            if (kv.first == def.key) same = upper(kv.second) == want;
+        }
+        if (!same) {
+            if (why) *why = std::string(def.key) + " wasn't recorded from " + engineVar(cal.var, e + 1);
+            return false;
+        }
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------- flow
 
 void SetupFlow::setLogger(LogFn fn, void* ctx) {
@@ -435,6 +616,7 @@ bool SetupFlow::start(const AircraftProfile& profile, const Frame& live, const S
         return false;
     }
     profile_ = p;
+    before_ = profile;
     changed_ = true;
     facts_ = facts;
     onGround_ = onGround;
@@ -452,6 +634,15 @@ bool SetupFlow::start(const AircraftProfile& profile, const Frame& live, const S
 void SetupFlow::enterStep() {
     need_.clear();
     phaseT_ = 0.0;
+    leverVerdict_ = LeverVerdict::Steady;
+    leverStage_ = false;
+    chosen_ = ControlMethod();
+    lever_ = LeverCalibration();
+    leverIdle_ = NAN;
+    leverSpan_ = 0.0;
+    std::vector<SweepMove>().swap(sweep_);
+    std::vector<LeverPoint>().swap(sweepForward_);
+    std::vector<LeverPoint>().swap(sweepReverse_);
     if (step_ >= plan_.size()) {
         phase_ = Phase::Done;
         std::string summary;
@@ -503,6 +694,9 @@ void SetupFlow::onFrame(double dt, const Frame& live, const SetupFacts& facts) {
         case Phase::User: userFrame(dt, live); break;
         case Phase::Replay: replayFrame(dt, live); break;
         case Phase::Hold: holdFrame(live); break;
+        case Phase::Positions: positionsFrame(dt, live); break;
+        case Phase::Notice: need_ = facts_.parkingBrake ? "" : "Set the parking brake"; break;
+        case Phase::Sweep: sweepFrame(dt, live); break;
         default: break;
     }
 }
@@ -558,13 +752,7 @@ void SetupFlow::userFrame(double dt, const Frame& live) {
             capture_.erase(capture_.begin(), capture_.begin() + static_cast<std::ptrdiff_t>(drop));
         }
     }
-    if (scanning_ && t_ + 1e-9 >= nextScan_) {
-        sim_->scanRead(scanValues_);
-        tracker_.sample(t_, scanValues_, h, o);
-        nextScan_ += kScanInterval;
-        if (nextScan_ < t_) nextScan_ = t_ + kScanInterval;
-        if (!moved_) tracker_.dropChangedBefore(t_ - kSearchLeadSec - 1.0);
-    }
+    scanFrame(h, o);
 
     if (!moved_ && (dh > tu.handleStart || dout > tu.outcomeStart)) {
         moved_ = true;
@@ -625,6 +813,15 @@ void SetupFlow::userFrame(double dt, const Frame& live) {
     }
 }
 
+void SetupFlow::scanFrame(double h, double o) {
+    if (!scanning_ || t_ + 1e-9 < nextScan_) return;
+    sim_->scanRead(scanValues_);
+    tracker_.sample(t_, scanValues_, h, o);
+    nextScan_ += kScanInterval;
+    if (nextScan_ < t_) nextScan_ = t_ + kScanInterval;
+    if (!moved_) tracker_.dropChangedBefore(t_ - kSearchLeadSec - 1.0);
+}
+
 void SetupFlow::analyze() {
     endScan();
     const Control c = control();
@@ -635,6 +832,7 @@ void SetupFlow::analyze() {
     // variables the methods use.
     windowFrom_ = std::max(0.0, movedAt_ - kSearchLeadSec);
     const double firstChange = buildMethods();
+    if (c == Control::Throttle) leverVerdict_ = checkLever();
     windowFrom_ = std::max(0.0, std::min(movedAt_, firstChange) - kLeadInSec);
     mini_ = Clip();
     mini_.present.set();
@@ -870,17 +1068,383 @@ void SetupFlow::nextMethod() {
     finishStep(ControlState::Failed, ControlMethod(), false);
 }
 
+// ---------------------------------------------------------------------------- throttle lever
+
+// Whether the throttle's lever simvar is the lever, from the pilot's movement: while a lever-like
+// variable held still (the hand still), did the simvar keep moving?
+SetupFlow::LeverVerdict SetupFlow::checkLever() {
+    const Tuning tu = tuning(Control::Throttle);
+    std::vector<size_t> candidates;
+    for (const bool lvars : {false, true}) {
+        for (const auto& f : tracker_.find(windowFrom_, t_, lvars, false, kThrottleWords, lvars ? 40 : 8)) {
+            candidates.push_back(f.index);
+        }
+    }
+    // Held still by itself: within twice the creep, for a hardware lever that jitters a little.
+    const CandidateTracker::HoldCheck hc = tracker_.holdCheck(windowFrom_, t_, candidates, handleRest_, 0.5 * tu.handleNeed,
+                                                              2.0 * kLeverCreepPct, kLeverHoldSec, kLeverSettleSec);
+    if (hc.creep > kLeverCreepPct) {
+        const ScanVar& v = tracker_.var(hc.by);
+        logf(0, "control setup: the throttle lever simvar moved %.2g%% while %s %s held still: it isn't the lever here",
+             hc.creep, v.lvar ? "L:var" : "input event", v.name.c_str());
+        return LeverVerdict::Creeps;
+    }
+    // Held still, and at full where a lever at full reads 100%. A thrust demand that settles
+    // quickly (no wind, no speed) holds still too, but short of 100%: that's worth asking about.
+    const double full = handleRest_ + handlePeak_;
+    if (hc.steady && full >= kLeverFullPct) {
+        logf(0, "control setup: the throttle lever simvar held still while you held the throttle (it moved %.2g%% at "
+             "most while the lever-like variables held): it's the lever",
+             hc.creep);
+        return LeverVerdict::Steady;
+    }
+    if (hc.steady) {
+        logf(0, "control setup: the throttle lever simvar held still, but read %.3g%% at most with the throttle at full",
+             full);
+        return LeverVerdict::Unclear;
+    }
+    logf(0, "control setup: couldn't tell whether the throttle lever simvar is the lever (no %.0f s hold away from idle)",
+         kLeverHoldSec);
+    return LeverVerdict::Unclear;
+}
+
+void SetupFlow::confirmMethod() {
+    const ControlMethod m = methods_[method_];
+    const bool keyEvents = control() == Control::Throttle && m.kind == MethodKind::KeyEvent;
+    if (!keyEvents || leverVerdict_ == LeverVerdict::Steady) {
+        if (control() == Control::Throttle && leverVerdict_ != LeverVerdict::Steady) {
+            logf(0, "control setup: %s replays the aircraft's own variable, so the throttle needs no lever calibration",
+                 describeMethod(control(), m).c_str());
+        }
+        finishStep(ControlState::Ok, m, true);
+        return;
+    }
+    // The key events move the lever, but replayed from a simvar that isn't it: find the lever.
+    leverStage_ = true;
+    chosen_ = m;
+    mini_ = Clip();
+    methods_.clear();
+    attempts_.clear();
+    method_ = 0;
+    tracker_.clear();
+    if (leverVerdict_ == LeverVerdict::Creeps) {
+        beginPositions();
+    } else {
+        phase_ = Phase::Query;
+        phaseT_ = 0.0;
+    }
+}
+
+void SetupFlow::beginPositions() {
+    phase_ = Phase::Positions;
+    phaseT_ = 0.0;
+    t_ = 0.0;
+    nextScan_ = 0.0;
+    moved_ = false;
+    movedAt_ = 0.0;
+    handleRest_ = outcomeRest_ = NAN;
+    handleStill_ = NAN;
+    handleStillSince_ = 0.0;
+    holds_.clear();
+    holdCounted_ = false;
+    task_ = 0;
+    taskDone_ = false;
+    need_.clear();
+    std::vector<ScanVar> vars;
+    sim_->scanBegin(vars);
+    scanning_ = true;
+    tracker_.begin(std::move(vars));
+    scanValues_.assign(tracker_.size(), NAN);
+    logf(0, "control setup: hold the throttle at a few positions (looking for the lever's own variable)");
+}
+
+void SetupFlow::positionsFrame(double dt, const Frame& live) {
+    t_ += dt;
+    const Tuning tu = tuning(Control::Throttle);
+    const double h = handleSignal(live);
+    if (std::isnan(handleRest_)) handleRest_ = h;
+    scanFrame(h, outcomeSignal(live));
+    const double dh = absDiff(h, handleRest_);
+    if (!moved_ && dh > tu.handleStart) {
+        moved_ = true;
+        movedAt_ = t_;
+        tracker_.dropChangedBefore(t_ - kSearchLeadSec);
+    }
+    // Positions by the simvar: it isn't the lever here, lags it and creeps, so loosely.
+    if (movedFrom(h, handleStill_, tu.handleStart)) {
+        handleStill_ = h;
+        handleStillSince_ = t_;
+        holdCounted_ = false;
+    }
+    if (moved_ && !holdCounted_ && t_ - handleStillSince_ >= kSimvarPositionSec && dh > tu.handleStart) {
+        holdCounted_ = true;
+        bool known = false;
+        for (const double p : holds_) known |= std::fabs(p - h) < tu.handleStart;
+        if (!known) {
+            holds_.push_back(h);
+            logf(0, "control setup: throttle held at %.3g%% (position %zu)", h, holds_.size());
+        }
+    }
+    if (task_ == 0 && holds_.size() >= kLeverPositions) task_ = 1;
+    const bool back = moved_ && dh <= tu.handleStart;
+    taskDone_ = task_ == 1 && back;
+    if (task_ == 1 && back && t_ - handleStillSince_ >= kStableSec) {
+        pickLever();
+        return;
+    }
+    if (phaseT_ > tu.waitMaxSec + 60.0) {
+        endScan();
+        tracker_.clear();
+        phase_ = Phase::Retry;
+        phaseT_ = 0.0;
+        note_ = "Didn't see the throttle held at a few positions and brought back to idle.";
+        logf(1, "control setup: %s", note_.c_str());
+    }
+}
+
+// The per-engine pattern ('#' for the engine number) when every engine's variable changed, from
+// any engine's name ("INI_ENG2_THROTTLE_POS" -> "INI_ENG#_THROTTLE_POS"); else the name.
+std::string SetupFlow::leverPattern(const std::string& name) const {
+    const int engines = engineCount(facts_);
+    for (size_t p = name.size(); p-- > 0;) {
+        if (name[p] < '1' || name[p] > '0' + engines) continue;
+        if ((p > 0 && isDigit(name[p - 1])) || (p + 1 < name.size() && isDigit(name[p + 1]))) continue;
+        std::string pattern = name;
+        pattern[p] = '#';
+        bool all = true;
+        for (int e = 1; e <= engines && all; ++e) {
+            size_t idx = 0;
+            all = tracker_.lookup(engineVar(pattern, e), true, idx) && tracker_.changed(idx);
+        }
+        if (all) return pattern;
+    }
+    return name;
+}
+
+// The lever's own variable: an L:var that moved with the throttle, held a value at each
+// position, and was still for the longest (the thrust demand keeps creeping after each move).
+void SetupFlow::pickLever() {
+    endScan();
+    const double from = std::max(0.0, movedAt_ - kSearchLeadSec);
+    // An airliner has dozens of throttle L:vars (thrust demands, requests, animations, flags).
+    const auto found = tracker_.find(from, t_, true, false, kThrottleWords, 40);
+    bool have = false;
+    size_t best = 0;
+    CandidateTracker::Holds bestHolds;
+    double bestScore = 0.0;
+    for (const auto& f : found) {
+        const CandidateTracker::Holds hd = tracker_.holds(f.index, from, t_, kLeverPositionSec, kLeverStillFraction);
+        logf(0, "control setup:   L:var %s held %d position(s), still %.1f s of %.1f, %d values (score %.2f)",
+             tracker_.var(f.index).name.c_str(), hd.levels, hd.stillSec, t_ - from, hd.values, f.score);
+        // Flags and detent indexes hold still too, but don't say where between detents the lever is.
+        if (hd.levels < static_cast<int>(kLeverPositions) || hd.values < kLeverMinValues) continue;
+        const bool better = !have || hd.stillSec > bestHolds.stillSec + 0.5 ||
+                            (hd.stillSec > bestHolds.stillSec - 0.5 && f.score > bestScore);
+        if (!better) continue;
+        have = true;
+        best = f.index;
+        bestHolds = hd;
+        bestScore = f.score;
+    }
+    if (!have) {
+        tracker_.clear();
+        phase_ = Phase::Retry;
+        phaseT_ = 0.0;
+        note_ = "Couldn't find the throttle lever's own position. Hold each position still for a few seconds.";
+        logf(1, "control setup: no L:var held still at the throttle positions (%zu moved with it)", found.size());
+        return;
+    }
+    lever_ = LeverCalibration();
+    lever_.var = leverPattern(tracker_.var(best).name);
+    size_t idx = best;
+    tracker_.lookup(engineVar(lever_.var, 1), true, idx);
+    leverIdle_ = tracker_.valueAt(idx, t_);
+    leverSpan_ = bestHolds.range;
+    logf(0, "control setup: the throttle lever is L:var %s (%d positions, idle %.4g, range %.4g)", lever_.var.c_str(),
+         bestHolds.levels, leverIdle_, leverSpan_);
+    tracker_.clear();
+    enterNotice();
+}
+
+void SetupFlow::enterNotice() {
+    phase_ = Phase::Notice;
+    phaseT_ = 0.0;
+    note_.clear();
+    need_ = facts_.parkingBrake ? "" : "Set the parking brake";
+}
+
+void SetupFlow::beginSweep() {
+    std::string why;
+    if (!sim_->beginControl(Control::Throttle, chosen_, why)) {
+        logf(1, "control setup: can't move the throttle to calibrate its lever: %s", why.c_str());
+        note_ = "Couldn't move the throttle (" + why + ").";
+        phase_ = Phase::Retry;
+        phaseT_ = 0.0;
+        return;
+    }
+    driving_ = true;
+    sweep_.clear();
+    for (int i = 0; i <= kSweepSteps; ++i) sweep_.push_back({static_cast<double>(i) / kSweepSteps, 1, -1});
+    sweepAt_ = 0;
+    sweepExtended_ = false;
+    sweepForward_.clear();
+    sweepReverse_.clear();
+    reverserOn_ = false;
+    for (double& v : sweepFrame_.v) v = NAN;
+    phase_ = Phase::Sweep;
+    phaseT_ = 0.0;
+    logf(0, "control setup: stepping the throttle axis from bottom to full to calibrate L:var %s", lever_.var.c_str());
+    sweepTo(sweep_[0].axis, true);
+}
+
+void SetupFlow::sweepTo(double axis, bool force) {
+    for (int e = 0; e < 4; ++e) sweepFrame_.v[kThrottleAxis1 + e] = axis;
+    sim_->applyControl(Control::Throttle, sweepFrame_, force);
+    sweepHeld_ = 0.0;
+    sweepSteady_ = 0.0;
+    sweepLast_ = NAN;
+}
+
+void SetupFlow::sweepFrame(double dt, const Frame& live) {
+    if (rolling(live)) {
+        logf(1, "control setup: the aircraft started to roll (%.1f kt); stopping the throttle calibration", live.v[kGroundSpeed]);
+        stopSweep("Stopped: the aircraft started to roll. Is the parking brake set?");
+        return;
+    }
+    if (phaseT_ > kSweepMaxSec) {
+        stopSweep("The throttle calibration took too long.");
+        return;
+    }
+    sweepHeld_ += dt;
+    const double v = sim_->readVar({engineVar(lever_.var, 1), true});
+    const bool same = std::isfinite(v) && std::isfinite(sweepLast_) && std::fabs(v - sweepLast_) <= 1e-6 * std::max(1.0, std::fabs(v));
+    sweepSteady_ = same ? sweepSteady_ + dt : 0.0;
+    sweepLast_ = v;
+    const SweepMove& m = sweep_[sweepAt_];
+    const double minHold = m.reverser >= 0 ? kSweepReverserSec : kSweepMinHoldSec;
+    const double maxHold = m.reverser >= 0 ? kSweepReverserSec + 1.5 : kSweepMaxHoldSec;
+    if (!(sweepHeld_ >= minHold && sweepSteady_ >= kSweepSteadySec) && sweepHeld_ < maxHold) return;
+    if (m.record == 1) sweepForward_.push_back({m.axis, v});
+    if (m.record == 2) sweepReverse_.push_back({m.axis, v});
+    if (++sweepAt_ >= sweep_.size() && !sweepExtended_) {
+        // The forward pass is done. Unless the axis has its own reverse zone (the lever went below
+        // idle), the reversers get a pass of their own; then back to idle.
+        sweepExtended_ = true;
+        const std::vector<LeverPoint> fwd = leverTable(sweepForward_);
+        double lo = INFINITY, hi = -INFINITY;
+        for (const LeverPoint& p : fwd) {
+            lo = p.lever < lo ? p.lever : lo;
+            hi = p.lever > hi ? p.lever : hi;
+        }
+        const bool reverseZone = std::isfinite(leverIdle_) && lo < leverIdle_ - std::max(0.01 * (hi - lo), 1e-9);
+        if (facts_.hasReverse && !reverseZone) {
+            sweep_.push_back({0.0, 0, -1});
+            sweep_.push_back({0.0, 2, 1});
+            for (int i = 1; i <= kSweepReverseSteps; ++i) sweep_.push_back({static_cast<double>(i) / kSweepReverseSteps, 2, -1});
+            sweep_.push_back({0.0, 0, -1});
+            sweep_.push_back({0.0, 0, 0});
+        }
+        sweep_.push_back({fwd.size() >= 2 ? invertLever(fwd, std::isfinite(leverIdle_) ? leverIdle_ : lo) : 0.0, 0, -1});
+        logf(0, "control setup: forward pass done (L:var %s %.4g..%.4g)%s", lever_.var.c_str(), lo, hi,
+             facts_.hasReverse ? (reverseZone ? "; the axis has its own reverse zone" : "; now the reversers") : "");
+    }
+    if (sweepAt_ >= sweep_.size()) {
+        finishSweep();
+        return;
+    }
+    const SweepMove& next = sweep_[sweepAt_];
+    if (next.reverser >= 0) {
+        reverserOn_ = next.reverser == 1;
+        sim_->setReverser(reverserOn_);
+    }
+    sweepTo(next.axis, true);
+}
+
+void SetupFlow::finishSweep() {
+    endDrive();
+    lever_.forward = leverTable(sweepForward_);
+    std::vector<LeverPoint> rev = leverTable(sweepReverse_);
+    double lo = 0.0, hi = 0.0;
+    for (size_t i = 0; i < lever_.forward.size(); ++i) {
+        const double l = lever_.forward[i].lever;
+        lo = i == 0 || l < lo ? l : lo;
+        hi = i == 0 || l > hi ? l : hi;
+    }
+    if (lever_.forward.size() < 2 || !(hi - lo > 0.25 * leverSpan_)) {
+        logf(1, "control setup: L:var %s moved %.4g over the axis sweep (%.4g when you held the positions)",
+             lever_.var.c_str(), hi - lo, leverSpan_);
+        lever_ = LeverCalibration();  // a retry looks for another variable
+        stopSweep("The variable found for the throttle lever didn't follow the throttle.");
+        return;
+    }
+    double rlo = 0.0, rhi = 0.0;
+    for (size_t i = 0; i < rev.size(); ++i) {
+        rlo = i == 0 || rev[i].lever < rlo ? rev[i].lever : rlo;
+        rhi = i == 0 || rev[i].lever > rhi ? rev[i].lever : rhi;
+    }
+    if (!rev.empty() && !(rhi - rlo > 0.02 * (hi - lo))) {
+        logf(0, "control setup: the reverse thrust events didn't move L:var %s; no reverse calibration", lever_.var.c_str());
+        rev.clear();
+    }
+    lever_.reverse = rev;
+    // The detents: where the lever held one value over several steps.
+    std::string detents;
+    const double tol = 0.002 * (hi - lo);
+    for (size_t i = 0; i < lever_.forward.size();) {
+        size_t j = i;
+        while (j + 1 < lever_.forward.size() && std::fabs(lever_.forward[j + 1].lever - lever_.forward[i].lever) <= tol) ++j;
+        if (j > i) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%s%.4g (axis %.2f-%.2f)", detents.empty() ? "" : ", ", lever_.forward[i].lever,
+                          lever_.forward[i].axis, lever_.forward[j].axis);
+            detents += buf;
+        }
+        i = j + 1;
+    }
+    logf(0, "control setup: throttle lever calibrated: %zu forward point(s), %.4g..%.4g, detents %s; %zu reverse point(s)",
+         lever_.forward.size(), lo, hi, detents.empty() ? "none" : detents.c_str(), lever_.reverse.size());
+    std::vector<SweepMove>().swap(sweep_);
+    finishStep(ControlState::Ok, chosen_, true);
+}
+
+void SetupFlow::stopSweep(const std::string& why) {
+    parkThrottle();
+    endDrive();
+    std::vector<SweepMove>().swap(sweep_);
+    note_ = why;
+    phase_ = Phase::Retry;
+    phaseT_ = 0.0;
+}
+
+void SetupFlow::parkThrottle() {
+    if (!driving_) return;
+    if (reverserOn_) {
+        reverserOn_ = false;
+        sim_->setReverser(false);
+    }
+    const std::vector<LeverPoint> fwd = leverTable(sweepForward_);
+    sweepTo(fwd.size() >= 2 && std::isfinite(leverIdle_) ? invertLever(fwd, leverIdle_) : 0.0, true);
+}
+
 void SetupFlow::finishStep(ControlState state, const ControlMethod& method, bool confirmed) {
     endDrive();
     endScan();
     const Control c = control();
     ControlProfile& cp = profile_[c];
-    cp.state = state;
-    cp.method = state == ControlState::Ok ? method : ControlMethod();
-    cp.confirmed = confirmed;
+    if (state == ControlState::Skipped && before_[c].state == ControlState::Ok) {
+        cp = before_[c];  // skipped on a later run: it keeps what it had
+        logf(0, "control setup: %s skipped; keeping its earlier setup (%s)", controlSpec(c).key, describeControl(c, cp).c_str());
+    } else {
+        cp.state = state;
+        cp.method = state == ControlState::Ok ? method : ControlMethod();
+        cp.confirmed = confirmed;
+        cp.lever = state == ControlState::Ok && c == Control::Throttle && method.kind == MethodKind::KeyEvent
+                       ? lever_
+                       : LeverCalibration();
+        logf(0, "control setup: %s %s%s%s", controlSpec(c).key, stateKey(state), state == ControlState::Ok ? " via " : "",
+             state == ControlState::Ok ? describeControl(c, cp).c_str() : "");
+    }
     changed_ = true;
-    logf(0, "control setup: %s %s%s%s", controlSpec(c).key, stateKey(state), state == ControlState::Ok ? " via " : "",
-         state == ControlState::Ok ? describeMethod(c, method).c_str() : "");
     tracker_.clear();
     mini_ = Clip();
     methods_.clear();
@@ -904,6 +1468,7 @@ void SetupFlow::endDrive() {
 
 void SetupFlow::cancel(const char* why) {
     if (!active()) return;
+    if (phase_ == Phase::Sweep) parkThrottle();
     endDrive();
     endScan();
     tracker_.clear();
@@ -927,7 +1492,7 @@ bool SetupFlow::answer(const std::string& a, std::string& error) {
         case Phase::Ask:
             if (a == "yes") {
                 note_.clear();  // the step tracker shows it
-                finishStep(ControlState::Ok, methods_[method_], true);
+                confirmMethod();
                 return true;
             }
             if (a == "no") {
@@ -944,7 +1509,41 @@ bool SetupFlow::answer(const std::string& a, std::string& error) {
         case Phase::Retry:
             if (a == "retry") {
                 note_.clear();
-                beginUser();
+                if (!leverStage_) {
+                    beginUser();
+                } else if (lever_.var.empty()) {
+                    beginPositions();
+                } else {
+                    enterNotice();
+                }
+                return true;
+            }
+            break;
+        case Phase::Query:
+            if (a == "yes" || a == "no") {
+                logf(0, "control setup: you said the throttle levers %s under autothrust",
+                     a == "yes" ? "stay put" : "move with the thrust");
+                if (a == "yes") {
+                    beginPositions();
+                } else {
+                    finishStep(ControlState::Ok, chosen_, true);
+                }
+                return true;
+            }
+            break;
+        case Phase::Positions:
+            if (a == "done") {
+                if (!moved_) {
+                    error = "the throttle hasn't moved yet";
+                    return false;
+                }
+                pickLever();
+                return true;
+            }
+            break;
+        case Phase::Notice:
+            if (a == "begin") {
+                beginSweep();
                 return true;
             }
             break;
@@ -965,9 +1564,17 @@ bool SetupFlow::answer(const std::string& a, std::string& error) {
             break;
         default: break;
     }
-    if (a == "skip" && phase_ != Phase::Done && phase_ != Phase::Replay && phase_ != Phase::Hold) {
+    if (a == "skip" && phase_ != Phase::Done && phase_ != Phase::Replay && phase_ != Phase::Hold && phase_ != Phase::Sweep) {
         note_.clear();
-        finishStep(ControlState::Skipped, ControlMethod(), false);
+        if (leverStage_) {
+            // The method stays; the lever keeps an earlier calibration made for the same method.
+            const ControlProfile& was = before_[Control::Throttle];
+            lever_ = was.state == ControlState::Ok && was.method == chosen_ ? was.lever : LeverCalibration();
+            logf(0, "control setup: lever calibration skipped%s", lever_.valid() ? "; keeping the earlier one" : "");
+            finishStep(ControlState::Ok, chosen_, true);
+        } else {
+            finishStep(ControlState::Skipped, ControlMethod(), false);
+        }
         return true;
     }
     error = "'" + a + "' doesn't fit this step";
@@ -994,6 +1601,10 @@ std::string SetupFlow::prompt() const {
         case Phase::Hold:
             return watchWhat(c);
         case Phase::Ask: return question(c);
+        case Phase::Query: return kQueryPrompt;
+        case Phase::Positions: return kPositionTasks[task_ < 2 ? task_ : 1];
+        case Phase::Notice: return need_.empty() ? "Hands off the throttle" : need_;
+        case Phase::Sweep: return "Moving the throttle";
         default: return "";
     }
 }
@@ -1001,7 +1612,8 @@ std::string SetupFlow::prompt() const {
 void SetupFlow::statusJson(JsonWriter& w) const {
     w.kv("active", active());
     if (!active()) return;
-    static const char* const kPhases[] = {"idle", "prepare", "takeoff", "user", "retry", "replay", "hold", "ask", "done"};
+    static const char* const kPhases[] = {"idle", "prepare", "takeoff", "user",      "retry",  "replay", "hold",
+                                          "ask",  "done",    "query",   "positions", "notice", "sweep"};
     w.kv("phase", kPhases[static_cast<int>(phase_)]);
     const bool done = phase_ == Phase::Done;
     w.kv("step", done ? "" : controlSpec(control()).key);
@@ -1009,14 +1621,29 @@ void SetupFlow::statusJson(JsonWriter& w) const {
     w.kv("stepNo", static_cast<int>(done ? plan_.size() : step_ + 1));
     w.kv("steps", static_cast<int>(plan_.size()));
     w.kv("prompt", prompt());
+    const char* detail = "";
+    switch (phase_) {
+        case Phase::Query: detail = kQueryDetail; break;
+        case Phase::Positions: detail = kPositionsDetail; break;
+        case Phase::Notice: detail = kNoticeDetail; break;
+        case Phase::Sweep: detail = kSweepDetail; break;
+        default: break;
+    }
+    w.kv("detail", detail);
     // The pilot's instructions in this step: which one is showing, and whether it's done (the
     // last one, while things settle).
-    w.kv("task", static_cast<int>(phase_ == Phase::User ? task_ : 0));
-    w.kv("tasks", static_cast<int>(done ? 0 : tasksFor(control()).count));
-    w.kv("taskDone", phase_ == Phase::User && taskDone_);
+    const bool pilot = phase_ == Phase::User || phase_ == Phase::Positions;
+    w.kv("task", static_cast<int>(pilot ? task_ : 0));
+    w.kv("tasks", static_cast<int>(done ? 0 : phase_ == Phase::Positions ? 2 : tasksFor(control()).count));
+    w.kv("taskDone", pilot && taskDone_);
     w.kv("note", note_);
     w.kv("method", static_cast<int>(method_ + 1));
     w.kv("methods", static_cast<int>(methods_.size()));
+    // The sweep's planned moves aren't all known until the forward pass is done: estimate.
+    const size_t rest = sweepExtended_ ? 0 : (facts_.hasReverse ? kSweepReverseSteps + 5 : 1);
+    w.kv("progress", phase_ == Phase::Sweep && !sweep_.empty()
+                         ? static_cast<double>(sweepAt_) / static_cast<double>(sweep_.size() + rest)
+                         : 0.0);
     // How each method before the current one ended: "failed" (the automatic check), "rejected"
     // (the pilot said no) or "unavailable" (the aircraft hasn't got what it needs).
     w.key("attempts").beginArray();
@@ -1044,6 +1671,10 @@ void SetupFlow::statusJson(JsonWriter& w) const {
         case Phase::Replay:
         case Phase::Hold: w.value("cancel"); break;
         case Phase::Ask: w.value("yes").value("no").value("again").value("skip"); break;
+        case Phase::Query: w.value("yes").value("no"); break;
+        case Phase::Positions: w.value("done").value("skip").value("cancel"); break;
+        case Phase::Notice: w.value("begin").value("skip").value("cancel"); break;
+        case Phase::Sweep: w.value("cancel"); break;
         case Phase::Done: w.value("close"); break;
         default: break;
     }

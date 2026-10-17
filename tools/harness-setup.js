@@ -28,6 +28,20 @@ window.harnessSetup = (function () {
       ["input event ENGINE_THROTTLE_# (ENGINE_THROTTLE_#_SET)", false], ["key events THROTTLEn_AXIS_SET_EX1", true], ["simvars", false]],
     gear: [["input event LANDING_GEAR_GEAR (LANDING_GEAR_GEAR_SET)", true], ["key events GEAR_SET/GEAR_UP/GEAR_DOWN", false]],
   };
+  // The throttle lever's phases (aircraft whose lever simvar isn't the lever, like the A320neo V2).
+  const POSITION_TASKS = ["Hold the throttle at a few positions", "Bring the throttle back to idle"];
+  const LEVER_TEXT = {
+    query: ["Do the levers stay put under autothrust?",
+      "On an Airbus the thrust levers sit in a detent (CL, FLX/MCT, TOGA) while the autothrust sets the thrust, so the " +
+      "thrust this aircraft reports isn't where its levers are. Your movement didn't show which kind this is."],
+    positions: ["", "The thrust this aircraft reports isn't where its levers are, so BetterReplay looks for the lever's own " +
+      "position. Move the throttle to each position you use and hold it there for a few seconds: full reverse if it has " +
+      "reversers, and the detents (on an Airbus CL, FLX/MCT and TOGA)."],
+    notice: ["Hands off the throttle", "BetterReplay now moves the throttle itself, from idle to full and back, to learn " +
+      "where the lever's positions are. The engines spool up against the parking brake for about 15 seconds."],
+    sweep: ["Moving the throttle", "Keep your hands off the throttle while BetterReplay learns where the lever's positions are."],
+  };
+  const SWEEP_SEC = 8;
   const TASK_SEC = 1.6;   // the pilot does each instruction in this long, once started
   const SETTLE_SEC = 1.2; // then everything settles (the last instruction shows as done)
   const REPLAY_SEC = 3;
@@ -35,9 +49,10 @@ window.harnessSetup = (function () {
 
   // Starts at the gate with the engines off, so the "get ready" page shows first.
   const sim = { onGround: true, onRunway: false, taxiing: false, parkingBrake: false, engines: false, autoPilot: true,
-    nothingWorks: false };
+    nothingWorks: false, airbus: true, unclear: false };
   const s = { declined: false, snoozed: false, results: null, methods: {}, active: false, plan: [], step: 0, phase: "",
-    t: 0, moving: -1, task: 0, taskDone: false, method: 0, attempts: [], note: "", need: "", stoppedEarly: false };
+    t: 0, moving: -1, task: 0, taskDone: false, method: 0, attempts: [], note: "", need: "", stoppedEarly: false,
+    lever: false };
 
   const control = () => s.plan[s.step];
   const groundPending = () => !s.results || ["spoilers", "flaps", "throttle"].some((c) => !s.results[c] || s.results[c] === "pending");
@@ -48,13 +63,14 @@ window.harnessSetup = (function () {
     s.method = 0;
     s.attempts = [];
     s.need = "";
+    s.lever = false;
     if (s.step >= s.plan.length) { s.phase = "done"; return; }
     s.phase = control() === "gear" && sim.onGround ? "takeoff" : "prepare";
   }
   function finish(state) {
     const c = control();
     s.results[c] = state;
-    s.methods[c] = state === "ok" ? METHODS[c][s.method][0] : "";
+    s.methods[c] = state === "ok" ? METHODS[c][s.method][0] + (s.lever && c === "throttle" ? ", lever from L:var INI_ENG#_THROTTLE_POS" : "") : "";
     s.step++;
     enterStep();
   }
@@ -79,7 +95,9 @@ window.harnessSetup = (function () {
   }
   function evaluate() {
     const c = control();
-    if (s.stoppedEarly || (!sim.nothingWorks && METHODS[c][s.method][1])) {
+    // On the A320neo V2 only the key events move the throttle.
+    const passes = sim.airbus && c === "throttle" ? METHODS[c][s.method][0].indexOf("key events") === 0 : METHODS[c][s.method][1];
+    if (s.stoppedEarly || (!sim.nothingWorks && passes)) {
       s.note = s.stoppedEarly ? "Stopped early: the aircraft started to roll. Is the parking brake set?" : "";
       s.phase = "ask";
       return;
@@ -107,6 +125,16 @@ window.harnessSetup = (function () {
       else if (s.moving < 0 && s.t > TIMEOUT_SEC) timeout();
     } else if (s.phase === "replay" && s.t > REPLAY_SEC) {
       evaluate();
+    } else if (s.phase === "positions") {
+      if (s.moving < 0 && sim.autoPilot && s.t > 1.5) s.moving = s.t;
+      const m = s.moving < 0 ? -1 : s.t - s.moving;
+      s.task = m >= 3 * TASK_SEC ? 1 : 0;
+      s.taskDone = m >= 4 * TASK_SEC;
+      if (m >= 4 * TASK_SEC + SETTLE_SEC) s.phase = "notice";
+    } else if (s.phase === "notice") {
+      s.need = sim.parkingBrake ? "" : "Set the parking brake";
+    } else if (s.phase === "sweep" && s.t > SWEEP_SEC) {
+      finish("ok");
     }
   }
   function timeout() {
@@ -128,13 +156,29 @@ window.harnessSetup = (function () {
   function answer(a) {
     if (a === "cancel" || a === "later") { s.active = false; if (a === "later") s.snoozed = true; return true; }
     const p = s.phase;
-    if (p === "ask" && a === "yes") { s.note = ""; finish("ok"); return true; }
+    if (p === "ask" && a === "yes") {
+      s.note = "";
+      const keyEvents = control() === "throttle" && METHODS.throttle[s.method][0].indexOf("key events") === 0;
+      if (!keyEvents || !sim.airbus) { finish("ok"); return true; }
+      s.lever = true;
+      s.attempts = [];
+      if (sim.unclear) { s.phase = "query"; } else { s.phase = "positions"; s.t = 0; s.moving = -1; s.task = 0; s.taskDone = false; }
+      return true;
+    }
+    if (p === "query" && (a === "yes" || a === "no")) {
+      if (a === "no") { s.lever = false; finish("ok"); return true; }
+      s.phase = "positions"; s.t = 0; s.moving = -1; s.task = 0; s.taskDone = false;
+      return true;
+    }
+    if (p === "positions" && a === "done") { s.phase = "notice"; return true; }
+    if (p === "notice" && a === "begin") { s.phase = "sweep"; s.t = 0; return true; }
     if (p === "ask" && a === "no") { s.attempts.push("rejected"); s.note = ""; nextMethod(); return true; }
     if (p === "ask" && a === "again") { startMethod(s.method); return true; }
     if (p === "retry" && a === "retry") { s.note = ""; beginUser(); return true; }
     if (p === "prepare" && a === "ready" && (control() === "gear" ? !sim.onGround : sim.onGround)) { beginUser(); return true; }
     if (p === "done" && a === "close") { s.active = false; return true; }
-    if (a === "skip" && p !== "replay" && p !== "done") { s.note = ""; finish("skipped"); return true; }
+    if (a === "skip" && s.lever && p !== "sweep") { s.note = ""; s.lever = false; finish("ok"); return true; }
+    if (a === "skip" && p !== "replay" && p !== "done" && p !== "sweep") { s.note = ""; finish("skipped"); return true; }
     return false;
   }
 
@@ -158,15 +202,21 @@ window.harnessSetup = (function () {
     const prompts = {
       prepare: s.need || (TASKS[c] || [""])[0], user: (TASKS[c] || [])[s.task], takeoff: "Take off",
       retry: "That didn't register", replay: WATCH[c], ask: QUESTIONS[c], done: "Setup finished",
+      query: LEVER_TEXT.query[0], positions: POSITION_TASKS[s.task] || "", notice: s.need || LEVER_TEXT.notice[0],
+      sweep: LEVER_TEXT.sweep[0],
     };
     const buttons = {
       prepare: (s.need ? ["ready"] : []).concat(["skip", "cancel"]), user: ["skip", "cancel"], takeoff: ["skip", "later"],
       retry: ["retry", "skip", "cancel"], replay: ["cancel"], ask: ["yes", "no", "again", "skip"], done: ["close"],
+      query: ["yes", "no"], positions: ["done", "skip", "cancel"], notice: ["begin", "skip", "cancel"], sweep: ["cancel"],
     }[s.phase] || [];
+    const pilot = s.phase === "user" || s.phase === "positions";
     return Object.assign(out, {
       phase: s.phase, step: done ? "" : c, title: done ? "Done" : TITLE[c], stepNo: done ? s.plan.length : s.step + 1,
       steps: s.plan.length, prompt: prompts[s.phase] || "", note: s.note,
-      task: s.phase === "user" ? s.task : 0, tasks: done ? 0 : TASKS[c].length, taskDone: s.phase === "user" && s.taskDone,
+      detail: LEVER_TEXT[s.phase] ? LEVER_TEXT[s.phase][1] : "",
+      progress: s.phase === "sweep" ? Math.min(1, s.t / SWEEP_SEC) : 0,
+      task: pilot ? s.task : 0, tasks: done ? 0 : s.phase === "positions" ? 2 : TASKS[c].length, taskDone: pilot && s.taskDone,
       method: s.method + 1, methods: c ? METHODS[c].length : 0, attempts: s.attempts.slice(),
       plan: s.plan.map((x, i) => ({ control: x, state: i < s.step ? s.results[x] : i === s.step ? "current" : "next" })),
       buttons: buttons,
@@ -201,7 +251,8 @@ window.harnessSetup = (function () {
     box.appendChild(title);
     const toggles = [["onGround", "On the ground (untick to take off)"], ["onRunway", "On a runway"], ["taxiing", "Taxiing"],
       ["parkingBrake", "Parking brake set"], ["engines", "Engines running"],
-      ["autoPilot", "Do each movement automatically"], ["nothingWorks", "Nothing works on this aircraft"]];
+      ["autoPilot", "Do each movement automatically"], ["nothingWorks", "Nothing works on this aircraft"],
+      ["airbus", "Throttle simvar isn't the lever (A320)"], ["unclear", "...and the movement doesn't tell"]];
     toggles.forEach((t) => {
       const label = document.createElement("label");
       label.style.cssText = "display:block;margin:4px 0;cursor:pointer;";
@@ -215,7 +266,7 @@ window.harnessSetup = (function () {
       box.appendChild(label);
     });
     const actions = [
-      ["Do the movement now", () => { if (s.phase === "user" && s.moving < 0) s.moving = s.t; }],
+      ["Do the movement now", () => { if ((s.phase === "user" || s.phase === "positions") && s.moving < 0) s.moving = s.t; }],
       ["Time out", timeout],
       ["Aircraft rolls", () => { if (s.phase === "replay" && control() === "throttle") { s.stoppedEarly = true; evaluate(); } }],
       ["New flight", () => { s.active = false; s.snoozed = false; }],
