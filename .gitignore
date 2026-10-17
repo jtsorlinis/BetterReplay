@@ -1,0 +1,17 @@
+# Build outputs
+/build/
+/dist/
+/package/_PackageInt/
+/package/Packages/
+/package/PackagesMetadata/
+
+# Visual Studio
+.vs/
+*.user
+*.VC.db
+*.VC.opendb
+x64/
+MSFS/
+
+# Node
+node_modules/
