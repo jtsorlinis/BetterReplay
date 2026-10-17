@@ -144,6 +144,15 @@ bool ControlDriver::begin(Control c, const ControlMethod& m, std::string& why) {
     return true;
 }
 
+void ControlDriver::setLever(const LeverCalibration& cal) {
+    Slot& s = slots_[static_cast<int>(Control::Throttle)];
+    if (!s.active || s.method.kind != MethodKind::KeyEvent || !cal.valid()) return;
+    s.lever = cal;
+    s.useLever = true;
+    log::info("controls: throttle levers from L:var %s (%zu calibration point(s)%s)", cal.var.c_str(), cal.forward.size(),
+              cal.reverse.empty() ? "" : ", reverse too");
+}
+
 void ControlDriver::apply(Control c, const Frame& f, bool force) {
     Slot& s = slots_[static_cast<int>(c)];
     if (!s.active) return;
@@ -232,8 +241,23 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                     fraction = hw;
                 } else if (ctx_.clipChannels && ctx_.clipChannels->test(static_cast<size_t>(kThrottleAxis1 + e))) {
                     continue;  // the clip has the axis, but not yet here (before the hardware moved): hold
-                } else {
-                    // Older clips: from the lever simvar. Idle..full out of reverse; with the
+                } else if (s.useLever) {
+                    // The lever's own variable, through the setup's calibration: the axis value
+                    // that put the lever there, the middle of a detent when it was in one. The
+                    // calibration can't place reverse without a reverse table; then the simvar.
+                    const int ch = kLVarThrottle1 + (s.lever.var.find('#') != std::string::npos ? e : 0);
+                    const double lv = f.v[ch];
+                    if (!std::isfinite(lv)) continue;  // a gap in the clip: hold
+                    const bool liveReverse = ctx_.live && ctx_.live->v[kReverser1 + e] >= 0.5;
+                    if (leverAxis(s.lever, lv, f.v[kReverser1 + e], liveReverse, fraction)) {
+                        ++s.leverFrames;
+                    } else {
+                        fraction = NAN;
+                    }
+                }
+                if (!std::isfinite(fraction)) {
+                    // Older clips (and reverse the calibration can't place): from the lever
+                    // simvar. Idle..full out of reverse; with the
                     // reverser engaged (switched by the clip's reverser events), idle..full
                     // reverse. Hold idle until the aircraft's reverser matches the clip.
                     const double pct = f.v[kThrottle1 + e];
@@ -298,6 +322,7 @@ void ControlDriver::end(Control c) {
     log::info(s.method.kind == MethodKind::SimVar ? "controls: %d frame(s) written to the %s with %s"
                                                   : "controls: %d value(s) sent to the %s with %s",
               s.sends, controlSpec(c).label, describeMethod(c, s.method).c_str());
+    if (s.useLever) log::info("controls: %d engine frame(s) placed from L:var %s", s.leverFrames, s.lever.var.c_str());
     if (s.errors > 0) log::warn("controls: %d error(s) driving the %s", s.errors, controlSpec(c).label);
 }
 

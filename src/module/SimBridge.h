@@ -42,6 +42,8 @@ public:
     bool beginControl(Control c, const ControlMethod& m, std::string& why) override;
     void applyControl(Control c, const Frame& f, bool force) override;
     void endControl(Control c) override;
+    double readVar(const ScanVar& v) override;
+    void setReverser(bool on) override;
 
 private:
     enum DataDef : DWORD { DEF_RECORD = 1, DEF_TITLE = 2, DEF_PLAYBACK = 3, DEF_RESTORE = 4, DEF_SNAP = 5 };

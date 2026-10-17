@@ -262,7 +262,7 @@ void Engine::setAircraftKey(const std::string& key) {
         for (int i = 0; i < kControlCount; ++i) {
             const Control c = controlAt(i);
             summary += std::string(i ? ", " : "") + controlSpec(c).key + " " + stateKey((*p)[c].state);
-            if ((*p)[c].state == ControlState::Ok) summary += " (" + describeMethod(c, (*p)[c].method) + ")";
+            if ((*p)[c].state == ControlState::Ok) summary += " (" + describeControl(c, (*p)[c]) + ")";
         }
         logf(0, "aircraft key %s: control profile %s%s", key.c_str(), p->declined ? "declined; " : "", summary.c_str());
     }
@@ -754,7 +754,7 @@ void Engine::statusJson(std::string& out) const {
         w.beginObject();
         w.kv("control", controlSpec(c).key);
         w.kv("state", stateKey(cp.state));
-        w.kv("method", cp.state == ControlState::Ok ? describeMethod(c, cp.method) : std::string());
+        w.kv("method", cp.state == ControlState::Ok ? describeControl(c, cp) : std::string());
         w.endObject();
     }
     w.endArray();

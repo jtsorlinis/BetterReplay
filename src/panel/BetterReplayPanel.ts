@@ -51,6 +51,8 @@ interface SetupStatus {
     stepNo?: number;
     steps?: number;
     prompt?: string;  // one short instruction or question
+    detail?: string;  // what it's for (the throttle lever's phases)
+    progress?: number;  // the throttle sweep, 0..1
     task?: number;    // the pilot's instruction showing, of `tasks` in this step
     tasks?: number;
     taskDone?: boolean;  // the last one is done (things settling)
@@ -138,6 +140,8 @@ const SETUP_BUTTONS: { [answer: string]: string } = {
     skip: "Skip this step",
     retry: "Try again",
     ready: "Continue anyway",
+    done: "Done",
+    begin: "Start",
     later: "Later",
     never: "Never for this aircraft",
     cancel: "Cancel setup",
@@ -150,9 +154,11 @@ const SETUP_KIND: { [answer: string]: string } = {
     yes: "primary",
     retry: "primary",
     close: "primary",
+    begin: "primary",
     no: "secondary",
     again: "secondary",
     ready: "secondary",
+    done: "secondary",
     later: "secondary",
 };
 const SETUP_PHASES: { [phase: string]: string } = {
@@ -164,10 +170,14 @@ const SETUP_PHASES: { [phase: string]: string } = {
     replay: "Watch",
     hold: "Watch",
     ask: "Your call",
+    query: "Your call",
+    positions: "Your turn",
+    notice: "Get ready",
+    sweep: "Hands off",
     done: "All done",
 };
 // Phases where the pilot is doing something: when what they were told changes there, they did it.
-const PILOT_PHASES: { [phase: string]: boolean } = { prepare: true, takeoff: true, user: true };
+const PILOT_PHASES: { [phase: string]: boolean } = { prepare: true, takeoff: true, user: true, positions: true };
 const TICK_HOLD_MS = 1100;  // a done instruction stays up, ticked, this long
 const NOTE_MS = 5000;       // a failed command's message stays this long
 
@@ -318,6 +328,11 @@ function checklistHtml(items: Array<[boolean, string]>): string {
 // the text above doesn't move up as rows appear.
 function attemptsHtml(setup: SetupStatus): string {
     const phase = setup.phase || "";
+    if (phase === "sweep") {
+        const pct = Math.round(100 * Math.min(1, Math.max(0, setup.progress || 0)));
+        return '<div class="br-attempt current"><span class="br-attempt-mark"></span>Learning the lever positions: ' +
+            pct + "%</div>";
+    }
     if (phase !== "replay" && phase !== "hold" && phase !== "ask") return "";
     const done = setup.attempts || [];
     let html = "";
@@ -815,6 +830,7 @@ class BetterReplayPanel extends UIElement {
             kicker = "Control setup";
             phase = setup.phase || "";
             prompt = setup.prompt || "";
+            detail = setup.detail || "";
             note = setup.note || "";
             plan = setup.plan || [];
             buttons = setup.buttons || [];

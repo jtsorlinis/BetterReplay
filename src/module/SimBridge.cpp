@@ -548,6 +548,7 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     facts.gearRetractable = ex[kExGearRetractable] >= 0.5;
     facts.hasSpoilers = ex[kExSpoilerAvailable] >= 0.5;
     facts.flapPositions = flapPositions_;
+    facts.hasReverse = std::isfinite(throttleLowerLimit_) && throttleLowerLimit_ < -1.0;
     if (freezeCheckFrames_ > 0 && --freezeCheckFrames_ == 0) verifyFreeze();
     if (playChannelCount_ > 0 && haveWritten_) checkOverrides();
     if (playing_ && throttleViaEvents_ && clipHasThrottle_) checkThrottleEvents();
@@ -923,6 +924,15 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
         log::info("playback: %s %s (control profile)", controlSpec(c).label,
                   cp.state == ControlState::Ok ? ("via " + describeMethod(c, cp.method)).c_str()
                                                : "left to the aircraft: the setup found no way to replay it");
+        if (c == Control::Throttle && cp.state == ControlState::Ok && cp.lever.valid()) {
+            // The lever simvar isn't the lever on this aircraft: replay the lever's own variable.
+            if (clipHasLever(cp.lever, clip, numEngines_, &why)) {
+                driver_.setLever(cp.lever);
+            } else {
+                log::info("playback: the throttle levers follow %s: %s (recorded before the lever setup?)",
+                          kChannels[kThrottle1].simvar, why.c_str());
+            }
+        }
     }
     for (int c = 0; c < kChannelCount; ++c) {
         if (owned.test(static_cast<size_t>(c)) && kChannels[c].play == PlayMode::Set) playSkip_.set(static_cast<size_t>(c));
@@ -1364,7 +1374,8 @@ void SimBridge::matchInputChannels() {
     }
 }
 
-// L:var channels record the L:vars the profile chose, if any.
+// L:var channels record the L:vars the profile chose, if any: the L:var method's, or the
+// throttle lever's own variable when the key events drive a lever the simvar isn't.
 void SimBridge::resolveLVarChannels() {
     for (int c = 0; c < kChannelCount; ++c) {
         if (kChannels[c].play != PlayMode::LVar) continue;
@@ -1375,10 +1386,14 @@ void SimBridge::resolveLVarChannels() {
             const ControlSpec& spec = controlSpec(control);
             const ControlProfile& cp = profile_[control];
             const int e = c - spec.lvarChannel;
-            if (cp.state != ControlState::Ok || cp.method.kind != MethodKind::LVar) continue;
+            if (cp.state != ControlState::Ok) continue;
+            const bool lever = control == Control::Throttle && cp.method.kind == MethodKind::KeyEvent && cp.lever.valid();
+            if (cp.method.kind != MethodKind::LVar && !lever) continue;
+            const std::string& var = lever ? cp.lever.var : cp.method.var;
             if (e < 0 || e >= (spec.perEngine ? 4 : 1)) continue;
-            if (e > 0 && cp.method.var.find('#') == std::string::npos) continue;
-            name = engineVar(cp.method.var, e + 1);
+            if (e > 0 && var.find('#') == std::string::npos) continue;
+            if (e >= numEngines_ && e > 0) continue;
+            name = engineVar(var, e + 1);
         }
         if (!name.empty()) {
             lvId_[c] = fsVarsGetLVarId(name.c_str());
@@ -1748,6 +1763,22 @@ void SimBridge::endControl(Control c) {
         setupMasking_ = false;
         setInputMasking(false);
     }
+}
+
+double SimBridge::readVar(const ScanVar& v) {
+    double out = NAN;
+    if (v.lvar) {
+        const FsLVarId id = fsVarsGetLVarId(v.name.c_str());
+        if (id == FS_VAR_INVALID_ID || fsVarsLVarGet(id, numberUnit_, &out) != FS_VAR_ERROR_NONE) out = NAN;
+    } else {
+        const FsBVarId id = fsVarsGetBVarId(v.name.c_str(), false);
+        if (id == FS_VAR_INVALID_ID || fsVarsBVarGet(id, numberUnit_, &out) != FS_VAR_ERROR_NONE) out = NAN;
+    }
+    return out;
+}
+
+void SimBridge::setReverser(bool on) {
+    for (int e = 0; e < 4 && e < numEngines_; ++e) sendChannelEvent(kReverser1 + e, on ? 1.0 : 0.0);
 }
 
 void SimBridge::onTitleData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size) {
