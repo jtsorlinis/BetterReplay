@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>BetterReplay</title>
+  <link rel="stylesheet" href="/SCSS/common.css" />
+  <link rel="stylesheet" href="BetterReplayPanel.css" />
+
+  <script type="text/javascript" src="/JS/coherent.js"></script>
+  <script type="text/javascript" src="/JS/common.js"></script>
+  <script type="text/javascript" src="/JS/dataStorage.js"></script>
+  <script type="text/javascript" src="/JS/buttons.js"></script>
+  <script type="text/javascript" src="/JS/Services/ToolBarPanels.js"></script>
+  <script type="text/javascript" src="/JS/Services/CommBus.js"></script>
+
+  <link rel="import" href="/templates/ingameUi/ingameUi.html" />
+  <link rel="import" href="/templates/ingameUiHeader/ingameUiHeader.html" />
+</head>
+<body class="border-box">
+  <ingamepanel-betterreplay>
+    <ingame-ui id="BetterReplayPanel" panel-id="PANEL_BETTERREPLAY" title="BETTERREPLAY" class="ingameUiFrame"
+               content-fit="true" min-width="30" min-height="40">
+      <div class="br-root">
+        <header class="br-status">
+          <span class="br-dot" id="br-dot"></span>
+          <div class="br-status-text">
+            <strong id="br-state">Connecting...</strong>
+            <span id="br-detail"></span>
+          </div>
+          <button type="button" class="br-btn" id="br-save">Save last 5 min</button>
+        </header>
+        <div class="br-error hidden" id="br-error"></div>
+
+        <section class="br-player hidden" id="br-player">
+          <div class="br-now" id="br-now"></div>
+          <div class="br-seek" id="br-seek">
+            <div class="br-seek-fill" id="br-seek-fill"></div>
+            <div class="br-seek-marker" id="br-seek-marker"></div>
+          </div>
+          <div class="br-times"><span id="br-time">0:00</span><span id="br-dur">0:00</span></div>
+          <div class="br-controls">
+            <button type="button" class="br-btn br-primary" id="br-playpause">Pause</button>
+            <div class="br-speeds" id="br-speeds">
+              <button type="button" class="br-btn" data-speed="0.25">0.25x</button>
+              <button type="button" class="br-btn" data-speed="0.5">0.5x</button>
+              <button type="button" class="br-btn" data-speed="1">1x</button>
+              <button type="button" class="br-btn" data-speed="2">2x</button>
+              <button type="button" class="br-btn" data-speed="4">4x</button>
+            </div>
+            <button type="button" class="br-btn br-danger" id="br-stop">Stop</button>
+          </div>
+        </section>
+
+        <div class="br-list-header">
+          <span>Clips</span>
+          <span id="br-count"></span>
+        </div>
+        <div class="br-list" id="br-list">
+          <div class="br-empty">No clips yet. Takeoffs and landings are saved automatically.</div>
+        </div>
+        <div class="br-toast hidden" id="br-toast"></div>
+      </div>
+    </ingame-ui>
+  </ingamepanel-betterreplay>
+  <script type="text/javascript" src="BetterReplayPanel.js"></script>
+</body>
+</html>

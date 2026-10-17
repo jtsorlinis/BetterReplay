@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  fspackagetool / DevMode project. Used to compile the InGamePanels .spb (and optionally the whole
+  package). build.ps1 stages PackageSources under build\package\ and points the tool at a copy of
+  this file there. Format follows the MSFS SDK project files (Version 2 is required by the 2024 tool).
+-->
+<Project Version="2" Name="BetterReplay" FolderName="Packages" MetadataFolderName="PackagesMetadata">
+    <OutputDirectory>.</OutputDirectory>
+    <TemporaryOutputDirectory>_PackageInt</TemporaryOutputDirectory>
+    <Packages>
+        <Package>PackageDefinitions\betterreplay-recorder.xml</Package>
+    </Packages>
+</Project>

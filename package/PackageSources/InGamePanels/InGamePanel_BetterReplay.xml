@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="Windows-1252"?>
+<!--
+  Toolbar panel definition, compiled to InGamePanels\InGamePanel_BetterReplay.spb.
+  The sim requires the id and Name properties ("InGamePanels.InGamePanelDefinition.id/Name:
+  Property not set or invalid" in FlightSimulator2024.exe); the attribute set follows a 2024
+  dev-forum example. id must match panel-id in BetterReplayPanel.html; icon names
+  html_ui\icons\toolbar\ICON_TOOLBAR_BETTERREPLAY.svg. Sizes are percentages of screen height.
+-->
+<SimBase.Document Type="InGamePanels" version="1,0">
+  <Filename>InGamePanel_BetterReplay.spb</Filename>
+  <InGamePanels.InGamePanelDefinition
+      id="PANEL_BETTERREPLAY"
+      Name="BetterReplay"
+      url="html_ui/InGamePanels/BetterReplayPanel/BetterReplayPanel.html"
+      icon="ICON_TOOLBAR_BETTERREPLAY"
+      resizeDirections="both"
+      minWidth="30"
+      minHeight="40"
+      defaultWidth="36"
+      defaultHeight="62"
+      defaultTop="12"
+      defaultRight="2"
+      buttonVisible="true" />
+</SimBase.Document>

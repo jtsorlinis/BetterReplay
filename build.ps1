@@ -1,23 +1,40 @@
 <#
 .SYNOPSIS
-  Builds BetterReplay: native core tests, the WASM module, the toolbar panel,
-  and a Community-ready package folder in dist\Community\betterreplay-recorder.
+  Builds BetterReplay: native core tests, the WASM module, the toolbar panel, and a
+  Community-ready package folder in dist\Community\betterreplay-recorder.
+
+.DESCRIPTION
+  The toolbar panel definition must be compiled to an .spb by the sim's package builder.
+  Run once with -Package (close the sim first: fspackagetool starts FlightSimulator2024.exe in
+  package-builder mode). The result is cached in package\spb\ and reused by later builds until
+  package\PackageSources\InGamePanels\InGamePanel_BetterReplay.xml changes.
 
 .EXAMPLE
-  .\build.ps1                 # tests + module + panel + package folder
-  .\build.ps1 -Install        # ...and copy it into the MSFS 2024 Community folder
+  .\build.ps1 -Package          # first build: also compiles the panel .spb
+  .\build.ps1                   # tests + module + panel + package folder
+  .\build.ps1 -Install          # ...and copy it into the MSFS 2024 Community folder
 #>
 [CmdletBinding()]
 param(
     [ValidateSet('Release', 'Debug')]
     [string]$Configuration = 'Release',
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [switch]$Package,
+    [switch]$Install,
+    [string]$CommunityPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
 $BuildDir = Join-Path $Root 'build'
+$DistDir = Join-Path $Root 'dist\Community'
 $ModuleName = 'BetterReplay.wasm'
+$PackageName = 'betterreplay-recorder'
+$PackageVersion = '0.1.0'
+$PanelDirName = 'BetterReplayPanel'
+$SpbName = 'InGamePanel_BetterReplay.spb'
+$SpbSource = Join-Path $Root 'package\PackageSources\InGamePanels\InGamePanel_BetterReplay.xml'
+$SpbCacheDir = Join-Path $Root 'package\spb'
 
 function Write-Step([string]$Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
@@ -46,12 +63,21 @@ function Invoke-Native([string]$Exe, [string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$([IO.Path]::GetFileName($Exe)) failed with exit code $LASTEXITCODE" }
 }
 
+function Reset-Directory([string]$Path) {
+    if (Test-Path $Path) { Remove-Item -Recurse -Force $Path }
+    New-Item -ItemType Directory -Force $Path | Out-Null
+}
+
+# ------------------------------------------------------------------------------------- tests
+
 function Invoke-Tests([string]$MSBuild) {
     Write-Step "Core tests ($Configuration|x64)"
     Invoke-Native $MSBuild @((Join-Path $Root 'tests\CoreTests.vcxproj'), '/nologo', '/v:minimal', '/m',
         "/p:Configuration=$Configuration", '/p:Platform=x64')
     Invoke-Native (Join-Path $BuildDir "tests\$Configuration\CoreTests.exe") @()
 }
+
+# ------------------------------------------------------------------------------------ module
 
 # The MSFS2024 platform toolset registers an "MSFS" platform with MSBuild's VC targets.
 function Test-MsfsToolset([string]$MSBuild) {
@@ -118,7 +144,164 @@ function Build-Module([string]$MSBuild) {
     return $outFile
 }
 
+# ------------------------------------------------------------------------------------- panel
+
+function Build-Panel {
+    Write-Step 'Toolbar panel (TypeScript -> JavaScript)'
+    $out = Join-Path $BuildDir 'panel\BetterReplayPanel.js'
+    Invoke-Native 'node' @('--no-warnings', (Join-Path $Root 'tools\strip-types.mjs'),
+        (Join-Path $Root 'src\panel\BetterReplayPanel.ts'), $out)
+    return $out
+}
+
+# ----------------------------------------------------------------------------------- package
+
+# build\package mirrors a DevMode project: BetterReplay.xml + PackageDefinitions + PackageSources.
+function New-PackageStage([string]$Wasm, [string]$PanelJs) {
+    $stage = Join-Path $BuildDir 'package'
+    Reset-Directory $stage
+    Copy-Item (Join-Path $Root 'package\BetterReplay.xml') $stage
+    Copy-Item -Recurse (Join-Path $Root 'package\PackageDefinitions') $stage
+    Copy-Item -Recurse (Join-Path $Root 'package\PackageSources') $stage
+    $panelDir = Join-Path $stage "PackageSources\html_ui\InGamePanels\$PanelDirName"
+    New-Item -ItemType Directory -Force $panelDir | Out-Null
+    Copy-Item (Join-Path $Root 'src\panel\BetterReplayPanel.html'), (Join-Path $Root 'src\panel\BetterReplayPanel.css'), $PanelJs $panelDir
+    $modulesDir = Join-Path $stage 'PackageSources\modules'
+    New-Item -ItemType Directory -Force $modulesDir | Out-Null
+    Copy-Item $Wasm $modulesDir
+    return $stage
+}
+
+function Get-SpbSourceHash {
+    return (Get-FileHash -Algorithm SHA256 $SpbSource).Hash
+}
+
+function Invoke-PackageTool([string]$Stage) {
+    Write-Step 'Compiling the panel .spb with fspackagetool (starts FlightSimulator2024.exe in package-builder mode)'
+    $sdk = Get-Sdk
+    $tool = Join-Path $sdk 'Tools\bin\fspackagetool.exe'
+    $project = Join-Path $Stage 'BetterReplay.xml'
+    Invoke-Native $tool @($project, '-nopause', '-rebuild')
+    $built = Join-Path $Stage "Packages\$PackageName"
+    $spb = Join-Path $built "InGamePanels\$SpbName"
+    if (-not (Test-Path $spb)) {
+        throw "fspackagetool did not produce $spb. See %APPDATA%\Microsoft Flight Simulator 2024\BuilderLogError.txt"
+    }
+    New-Item -ItemType Directory -Force $SpbCacheDir | Out-Null
+    Copy-Item $spb $SpbCacheDir -Force
+    Set-Content -Encoding ascii (Join-Path $SpbCacheDir 'source.sha256') (Get-SpbSourceHash)
+    # Keep the tool's manifest: it carries the compatibility version the sim expects.
+    Copy-Item (Join-Path $built 'manifest.json') (Join-Path $SpbCacheDir 'manifest.tool.json') -Force
+    Write-Host "  cached $SpbName in package\spb\"
+}
+
+function Get-CachedSpb {
+    $spb = Join-Path $SpbCacheDir $SpbName
+    $hashFile = Join-Path $SpbCacheDir 'source.sha256'
+    if (-not (Test-Path $spb) -or -not (Test-Path $hashFile)) { return $null }
+    if ((Get-Content $hashFile -Raw).Trim() -ne (Get-SpbSourceHash)) {
+        Write-Warning 'InGamePanel_BetterReplay.xml changed since the cached .spb was built; run .\build.ps1 -Package'
+        return $null
+    }
+    return $spb
+}
+
+function Write-Manifest([string]$Dir, [long]$TotalSize) {
+    $compat = $null
+    $toolManifest = Join-Path $SpbCacheDir 'manifest.tool.json'
+    if (Test-Path $toolManifest) { $compat = (Get-Content $toolManifest -Raw | ConvertFrom-Json) }
+    $manifest = [ordered]@{
+        dependencies = @()
+        content_type = 'MISC'
+        title = 'BetterReplay'
+        manufacturer = ''
+        creator = 'BetterReplay'
+        package_version = $PackageVersion
+        minimum_game_version = '1.0.0'
+        release_notes = [ordered]@{ neutral = [ordered]@{ LastUpdate = ''; OlderHistory = '' } }
+        total_package_size = "$TotalSize"
+        package_order_hint = 'MISC'
+        export_type = 'Community'
+        builder = 'Microsoft Flight Simulator 2024'
+    }
+    if ($compat -and $compat.minimum_game_version) { $manifest.minimum_game_version = $compat.minimum_game_version }
+    if ($compat -and $compat.minimum_compatibility_version) {
+        $manifest.minimum_compatibility_version = $compat.minimum_compatibility_version
+    }
+    $json = $manifest | ConvertTo-Json -Depth 5
+    [IO.File]::WriteAllText((Join-Path $Dir 'manifest.json'), $json, (New-Object Text.UTF8Encoding $false))
+}
+
+# layout.json lists every file with its size and FILETIME, lowercased and sorted, like the
+# package builder writes it.
+function Write-Layout([string]$Dir) {
+    $prefix = (Resolve-Path $Dir).Path.TrimEnd('\') + '\'
+    $entries = Get-ChildItem -Recurse -File $Dir |
+        Where-Object { $_.Name -ne 'layout.json' -and $_.Name -ne 'manifest.json' } |
+        ForEach-Object {
+            [ordered]@{
+                path = $_.FullName.Substring($prefix.Length).Replace('\', '/').ToLowerInvariant()
+                size = $_.Length
+                date = $_.LastWriteTimeUtc.ToFileTimeUtc()
+            }
+        } | Sort-Object { $_.path }
+    $total = 0
+    foreach ($e in $entries) { $total += $e.size }
+    $json = [ordered]@{ content = @($entries) } | ConvertTo-Json -Depth 5
+    [IO.File]::WriteAllText((Join-Path $Dir 'layout.json'), $json, (New-Object Text.UTF8Encoding $false))
+    return $total
+}
+
+function New-CommunityPackage([string]$Stage) {
+    Write-Step "Package folder dist\Community\$PackageName"
+    $dir = Join-Path $DistDir $PackageName
+    Reset-Directory $dir
+    Copy-Item -Recurse (Join-Path $Stage 'PackageSources\html_ui') $dir
+    Copy-Item -Recurse (Join-Path $Stage 'PackageSources\modules') $dir
+    $spb = Get-CachedSpb
+    if ($spb) {
+        $panels = Join-Path $dir 'InGamePanels'
+        New-Item -ItemType Directory -Force $panels | Out-Null
+        Copy-Item $spb $panels
+    } else {
+        Write-Warning "No compiled panel ($SpbName): the recorder will run but the toolbar panel won't appear. Run .\build.ps1 -Package once (sim closed)."
+    }
+    $total = Write-Layout $dir
+    Write-Manifest $dir $total
+    Write-Host "  $dir ($([math]::Round($total / 1KB)) KB)"
+    return $dir
+}
+
+function Find-CommunityFolder {
+    if ($CommunityPath) { return $CommunityPath }
+    $candidates = @(
+        (Join-Path $env:APPDATA 'Microsoft Flight Simulator 2024\UserCfg.opt'),
+        (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\UserCfg.opt')
+    )
+    foreach ($cfg in $candidates) {
+        if (-not (Test-Path $cfg)) { continue }
+        $line = Select-String -Path $cfg -Pattern '^\s*InstalledPackagesPath\s+"(.+)"' | Select-Object -First 1
+        if ($line) { return (Join-Path $line.Matches[0].Groups[1].Value 'Community') }
+    }
+    throw 'Could not find the MSFS 2024 Community folder; pass -CommunityPath.'
+}
+
+function Install-Package([string]$PackageDir) {
+    $community = Find-CommunityFolder
+    $target = Join-Path $community $PackageName
+    Write-Step "Installing to $target"
+    if (Test-Path $target) { Remove-Item -Recurse -Force $target }
+    Copy-Item -Recurse $PackageDir $target
+}
+
+# -------------------------------------------------------------------------------------- main
+
 $msbuild = Find-MSBuild
 if (-not $SkipTests) { Invoke-Tests $msbuild }
 $wasm = Build-Module $msbuild
+$panelJs = Build-Panel
+$stage = New-PackageStage $wasm $panelJs
+if ($Package) { Invoke-PackageTool $stage }
+$packageDir = New-CommunityPackage $stage
+if ($Install) { Install-Package $packageDir }
 Write-Step 'Done'
