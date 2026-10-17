@@ -151,11 +151,6 @@ button {
   color: var(--br-red);
 }
 
-.br-btn.kept {
-  border-color: var(--br-amber);
-  color: var(--br-amber);
-}
-
 /* ---- player */
 
 .br-player {

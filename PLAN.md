@@ -73,7 +73,7 @@ README.md, MANUAL_TEST.md
 - **Pause mid-event.** A candidate already in progress survives a pause if the aircraft didn't move: less than 200 m and 100 ft between the last pre-pause and first post-pause sample. If it moved, the candidate is dropped and detection re-arms after 10 s. A slew or teleport always aborts the candidate. *Changed during implementation:* the approved plan also held off *new* events for 10 s after every pause. That would lose the landing after a pause on short final, so by default the hold-off now applies only when the aircraft moved. `DetectorConfig::holdOffNewEventsAfterPause = true` restores the strict behaviour.
 - **Takeoff.** On ground→air: liftoff = t. Confirm once airborne continuously for at least 5 s and AGL > 50 ft. Clip start = max(last t on ground with GS < 10 kt, start of this ground segment), which keeps touch-and-go takeoffs sane. Clip end = AGL ≥ 1000 ft, or 60 s after liftoff, or touchdown.
 - **Landing.** On air→ground after at least 5 s airborne (`landingMinAirborneSec`, added so takeoff-roll skips aren't "landings"): first touchdown = t, recording touchdown VS (`PLANE TOUCHDOWN NORMAL VELOCITY` if available, else VS at contact). Confirm after 3 s of continuous ground contact. A re-liftoff that doesn't meet the takeoff criteria (5 s and 50 ft) counts as a **bounce** and stays in the same landing (`bounces++`). One that does meet them cancels the landing candidate (an aborted landing). Clip = [first touchdown − 120 s, GS < 30 kt or airborne again]. Peak G is measured over [touchdown − 1 s, end].
-- **Save.** On finalize, the frame range is streamed from the ring buffer straight to `\work\YYYY-MM-DD_HHMM_<event>.rpl`, with `_2`, `_3`… on collision. Times are **UTC**, since WASM has no time zone. Then `index.json` is rewritten (write `.tmp` → rename) and retention runs: the newest 50 non-kept auto clips survive. Manual and kept clips are never auto-deleted. If `index.json` is missing or corrupt, it's rebuilt by scanning `*.rpl` headers.
+- **Save.** On finalize, the frame range is streamed from the ring buffer straight to `\work\YYYY-MM-DD_HHMM_<event>.rpl`, with `_2`, `_3`… on collision. Times are **UTC**, since WASM has no time zone. Then `index.json` is rewritten (write `.tmp` → rename) and retention runs: the newest 20 auto clips survive (also applied at startup). Manual clips are never auto-deleted. *Changed after in-sim testing:* the Keep flag was removed and the limit lowered from 50. If `index.json` is missing or corrupt, it's rebuilt by scanning `*.rpl` headers.
 - **No per-frame allocation.** The ring buffer (9000 frames × up to 48 channels × f64 ≈ 3.5 MB) and SimConnect receive slots are preallocated. JSON is built into a fixed scratch buffer, and only when the panel asks.
 - **Playback.** Load the clip, then snapshot the playback channels plus body velocities. Send `FREEZE_LATITUDE_LONGITUDE_SET`/`FREEZE_ALTITUDE_SET`/`FREEZE_ATTITUDE_SET` = 1. Each frame: playhead += dt × speed (0.25–4×), binary-search the frame pair, interpolate, then `SetDataOnSimObject`. lat/alt lerp; lon, pitch, bank and heading use shortest-angle; gear, flaps and surfaces lerp. Lights step, and only changes are sent, as key events. At the end, playback auto-pauses. Stop: write the snapshot, unfreeze, resume recording, then a 10 s arming hold-off. Leaving the flight during playback just stops.
 
@@ -126,11 +126,11 @@ chunk*: fourcc type, u32 size, payload        (unknown chunks are skipped → fo
 ```
 When playing, channels are matched by **key**. Unknown keys are ignored, and channels a file doesn't have are left untouched on the aircraft.
 
-`index.json`: `{version, clips:[{file, event, utc, aircraft, durationSec, touchdownVsFpm, peakG, bounces, keep, auto}]}`.
+`index.json`: `{version, clips:[{file, event, utc, aircraft, durationSec, touchdownVsFpm, peakG, bounces, auto}]}` (a `keep` field from older files is ignored).
 
 ## 6. CommBus protocol (panel is stateless)
 
-- JS → WASM, event `BetterReplay.Cmd`, payload `{"op":…, "id":n, …}`. Ops: `status`, `clips`, `play{file}`, `pause`, `resume`, `seek{t}`, `speed{x}`, `stop`, `keep{file,keep}`, `delete{file}`, `saveLast`.
+- JS → WASM, event `BetterReplay.Cmd`, payload `{"op":…, "id":n, …}`. Ops: `status`, `clips`, `play{file}`, `pause`, `resume`, `seek{t}`, `speed{x}`, `stop`, `delete{file}`, `saveLast`.
 - WASM → JS: `BetterReplay.Status` (recorder state + reason, armed/arm-in, buffer seconds, detector phase, playback {file, t, dur, speed, paused}, `clipsRev`), `BetterReplay.Clips` (the list), and `BetterReplay.Reply` (`{id, ok, error}`).
 - While active, the panel polls `status` at 4 Hz and refetches `clips` when `clipsRev` changes. Closing the panel stops polling. The module doesn't care whether a panel exists.
 
@@ -146,7 +146,7 @@ When playing, channels are matched by **key**. Unknown keys are ignored, and cha
 
 ## Status (2026-10-17)
 
-Milestones 1–7 are implemented and committed. The core has 84 passing unit tests, the module builds with the SDK clang, and the panel has been exercised in a browser harness against a fake module. Still pending: in-sim verification ([MANUAL_TEST.md](MANUAL_TEST.md)) and compiling the panel `.spb` (`build.ps1 -Package`, which needs the sim's package builder).
+Milestones 1–7 are implemented and committed. The core has 86 passing unit tests, the module builds with the SDK clang, and the panel has been exercised in a browser harness against a fake module. Still pending: in-sim verification ([MANUAL_TEST.md](MANUAL_TEST.md)) and compiling the panel `.spb` (`build.ps1 -Package`, which needs the sim's package builder).
 
 ## 8. Decisions (answered: defaults approved)
 

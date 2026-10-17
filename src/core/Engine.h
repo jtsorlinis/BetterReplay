@@ -49,7 +49,7 @@ struct EngineConfig {
     DetectorConfig detector;
     double sampleRateHz = 30.0;
     double bufferSeconds = 300.0;
-    size_t maxAutoClips = 50;
+    size_t maxAutoClips = 20;  // newest takeoff/landing clips kept; manual saves are never auto-deleted
     double maxFrameDtSec = 0.5;  // longer gaps (hitches, loading) are clamped
 };
 
@@ -90,7 +90,6 @@ public:
 
     // ---- commands (return false and set `error` on failure)
     bool saveLast(int64_t utcNowMs, std::string& error);
-    bool setKeep(const std::string& file, bool keep, std::string& error);
     bool deleteClip(const std::string& file, std::string& error);
 
     // Playback. play() snapshots the aircraft, freezes it and starts from the beginning;

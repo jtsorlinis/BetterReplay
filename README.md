@@ -4,9 +4,9 @@ An in-sim auto replay recorder for Microsoft Flight Simulator 2024. It records y
 
 - **Recorder:** a standalone WASM module. It keeps a 5-minute ring buffer at 30 Hz and runs whether or not the panel is open.
 - **Auto clips:** takeoffs and landings, including touchdown vertical speed, peak G and bounce count. They're written to disk as soon as each event finishes.
-- **Toolbar panel:** shows recorder status and the clip list, and has play/pause, seek, speed (0.25x–4x), stop, keep, delete and "save last 5 min".
+- **Toolbar panel:** shows recorder status and the clip list, and has play/pause, seek, speed (0.25x–4x), stop, delete and "save last 5 min".
 
-> **Status: MVP, early in-sim testing.** The platform-independent core has 84 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
+> **Status: MVP, early in-sim testing.** The platform-independent core has 86 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
 
 ## Requirements
 
@@ -55,7 +55,7 @@ You can also build the package in DevMode: **File → Open project…** → `bui
    - The dot shows the recorder state: green = recording and armed, amber = arming, grey = paused (the reason is shown), blue = replaying.
    - **Save last 5 min** saves the whole buffer as a manual clip.
    - **Play** freezes your aircraft and replays the clip on it. Use pause, seek (the amber mark is the touchdown) and speed while it plays. **Stop** puts the aircraft back exactly where it was, with its velocities, and recording resumes.
-   - **Keep** protects a clip from automatic cleanup, and **Delete** asks for a second click.
+   - **Delete** asks for a second click.
 
 Recording pauses while the sim is paused, in slew, in the menus, during the sim's own replay, and during BetterReplay playback.
 
@@ -64,10 +64,10 @@ Recording pauses while the sim is paused, in slew, in the menus, during the sim'
 `%APPDATA%\Microsoft Flight Simulator 2024\WASM\MSFS2024\betterreplay-recorder\work\` (Steam). That folder holds:
 
 - `YYYY-MM-DD_HHMM_<takeoff|landing|manual>.rpl`: one file per clip, timestamped in **UTC**.
-- `index.json`: the library (event, date, aircraft, duration, touchdown VS, peak G, bounces, keep flag). If it's lost, it's rebuilt from the clip headers, but keep flags are lost.
+- `index.json`: the library (event, date, aircraft, duration, touchdown VS, peak G, bounces). If it's lost, it's rebuilt from the clip headers.
 - `betterreplay.log` and `betterreplay.prev.log`: the module's log for this and the previous sim session.
 
-Only the newest 50 auto clips that aren't marked keep are retained. Manual and kept clips are never deleted automatically.
+Only the newest 20 auto clips (takeoffs and landings) are retained; older ones are deleted when a new one is saved, and at startup. "Save last 5 min" clips are never deleted automatically.
 
 To inspect a clip outside the sim:
 
@@ -117,7 +117,7 @@ Two detector rules go slightly beyond the original spec:
   - `status`
   - `clips{offset}` (20 per page)
   - `play{file}`, `pause`, `resume`, `seek{t}`, `speed{x}`, `stop`
-  - `keep{file,keep}`, `delete{file}`, `saveLast`
+  - `delete{file}`, `saveLast`
   - `setDebug{on}`
 - Replies come back on `BetterReplay.Status`, `BetterReplay.Clips` and `BetterReplay.Reply`.
 

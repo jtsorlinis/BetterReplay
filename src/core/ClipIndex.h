@@ -20,7 +20,6 @@ struct ClipEntry {
     double touchdownVsFpm = NAN;
     double peakG = NAN;
     int bounces = 0;
-    bool keep = false;
     bool autoClip = false;  // takeoff/landing clips are subject to retention; manual ones aren't
 };
 
@@ -43,7 +42,7 @@ public:
     // YYYY-MM-DD_HHMM_<event>.rpl (UTC), with _2, _3... appended on collision.
     std::string uniqueFileName(int64_t utcMs, EventType event) const;
 
-    // Removes the oldest non-kept auto clips beyond `maxAuto` and returns their file names.
+    // Removes the oldest auto clips beyond `maxAuto` and returns their file names.
     std::vector<std::string> enforceRetention(size_t maxAuto);
 
     void toJson(std::string& out) const;

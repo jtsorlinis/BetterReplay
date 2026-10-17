@@ -83,8 +83,12 @@ void Engine::detectorLog(void* ctx, const char* msg) { static_cast<Engine*>(ctx)
 void Engine::init() {
     loadIndex();
     reconcileWithDisk();
+    // Also applies a lowered limit to an existing library.
     const std::vector<std::string> removed = index_.enforceRetention(cfg_.maxAutoClips);
-    for (const std::string& f : removed) storage_.removeFile(f);
+    for (const std::string& f : removed) {
+        storage_.removeFile(f);
+        logf(0, "retention: deleted %s (only the newest %zu auto clips are kept)", f.c_str(), cfg_.maxAutoClips);
+    }
     if (!removed.empty()) saveIndex();
     ++clipsRev_;
     logf(0, "library: %zu clip(s)", index_.size());
@@ -362,19 +366,6 @@ bool Engine::saveLast(int64_t utcNowMs, std::string& error) {
         return false;
     }
     return saveRange(EventType::Manual, ring_.front().t, ring_.back().t, nullptr, utcNowMs, error, nullptr);
-}
-
-bool Engine::setKeep(const std::string& file, bool keep, std::string& error) {
-    ClipEntry* e = isSafeClipFileName(file) ? index_.find(file) : nullptr;
-    if (!e) {
-        error = "unknown clip";
-        return false;
-    }
-    e->keep = keep;
-    saveIndex();
-    ++clipsRev_;
-    logf(0, "%s %s", keep ? "keeping" : "no longer keeping", file.c_str());
-    return true;
 }
 
 bool Engine::deleteClip(const std::string& file, std::string& error) {

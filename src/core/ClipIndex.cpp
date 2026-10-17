@@ -72,7 +72,7 @@ std::vector<std::string> ClipIndex::enforceRetention(size_t maxAuto) {
     size_t autoCount = 0;
     // clips_ is newest first, so everything past the first maxAuto eligible clips goes.
     for (auto it = clips_.begin(); it != clips_.end();) {
-        if (it->autoClip && !it->keep) {
+        if (it->autoClip) {
             if (++autoCount > maxAuto) {
                 removed.push_back(it->file);
                 it = clips_.erase(it);
@@ -95,7 +95,6 @@ void writeClipEntryJson(JsonWriter& w, const ClipEntry& e) {
     w.kv("touchdownVsFpm", e.touchdownVsFpm);
     w.kv("peakG", e.peakG);
     w.kv("bounces", e.bounces);
-    w.kv("keep", e.keep);
     w.kv("auto", e.autoClip);
     w.endObject();
 }
@@ -131,8 +130,7 @@ bool ClipIndex::fromJson(const char* text, size_t length, std::string* error) {
         e.durationSec = v.getNumber("durationSec", 0.0);
         e.touchdownVsFpm = v.getNumber("touchdownVsFpm", NAN);
         e.peakG = v.getNumber("peakG", NAN);
-        e.bounces = static_cast<int>(v.getNumber("bounces", 0.0));
-        e.keep = v.getBool("keep", false);
+        e.bounces = static_cast<int>(v.getNumber("bounces", 0.0));  // an old "keep" flag is ignored
         e.autoClip = v.getBool("auto", e.event != EventType::Manual);
         loaded.push_back(e);
     }

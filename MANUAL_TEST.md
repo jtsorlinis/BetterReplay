@@ -193,10 +193,10 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 
 ## 12. Library management
 
-- [ ] **Keep** a clip (it turns amber, "Kept"). **Delete** another: the first click shows "Sure?", the second deletes it, and the file disappears from the work folder.
-- [ ] Restart the sim. The library reloads (`loaded index.json (N clips)`) and keep flags are preserved.
+- [ ] **Delete** a clip: the first click shows "Sure?", the second deletes it, and the file disappears from the work folder.
+- [ ] Restart the sim. The library reloads (`loaded index.json (N clips)`).
 - [ ] *(Optional)* Delete `index.json` while the sim is closed, then restart.
-  - **Expect** `adopted … from disk` for each clip. Keep flags are reset.
+  - **Expect** `adopted … from disk` for each clip.
 
 ## 13. Report back
 

@@ -68,8 +68,6 @@ void CommBridge::onCommand(const char* buf, unsigned int size) {
     bool ok = true;
     if (op == "saveLast") {
         ok = engine_.saveLast(utcNowMs(), err);
-    } else if (op == "keep") {
-        ok = engine_.setKeep(cmd.getString("file", ""), cmd.getBool("keep", true), err);
     } else if (op == "delete") {
         ok = engine_.deleteClip(cmd.getString("file", ""), err);
     } else if (op == "play") {

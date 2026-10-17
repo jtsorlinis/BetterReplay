@@ -52,7 +52,6 @@ interface ClipInfo {
     touchdownVsFpm: number | null;
     peakG: number | null;
     bounces: number;
-    keep: boolean;
     auto: boolean;
 }
 interface ClipsPage {
@@ -378,9 +377,6 @@ class BetterReplayPanel extends UIElement {
             const act = button.getAttribute("data-act");
             if (act === "play") {
                 this.send({ op: "play", file: file });
-            } else if (act === "keep") {
-                const clip = this.findClip(file);
-                this.send({ op: "keep", file: file, keep: !(clip && clip.keep) });
             } else if (act === "delete") {
                 this.confirmDelete(file);
             }
@@ -518,8 +514,6 @@ class BetterReplayPanel extends UIElement {
                 "</div>" +
                 '<div class="br-clip-btns">' +
                 '<button type="button" class="br-btn br-primary" data-act="play" data-file="' + file + '">Play</button>' +
-                '<button type="button" class="br-btn' + (c.keep ? " kept" : "") + '" data-act="keep" data-file="' + file + '">' +
-                (c.keep ? "Kept" : "Keep") + "</button>" +
                 '<button type="button" class="br-btn br-danger' + (confirming ? " confirm" : "") + '" data-act="delete" data-file="' + file + '">' +
                 (confirming ? "Sure?" : "Delete") + "</button>" +
                 "</div></div>";

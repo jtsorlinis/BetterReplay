@@ -36,7 +36,7 @@ const commBusMock = `
     clips.push({ file: 'clip' + i + '_' + ev + '.rpl', event: ev, utc: '', utcMs: now - i * 3600e3,
       aircraft: aircraft[i % 4], durationSec: ev === 'landing' ? 141 + i : 75 + i,
       touchdownVsFpm: ev === 'landing' ? -90 - i * 13 : null, peakG: ev === 'landing' ? 1.1 + i * 0.03 : null,
-      bounces: ev === 'landing' ? i % 3 : 0, keep: i === 4, auto: ev !== 'manual' });
+      bounces: ev === 'landing' ? i % 3 : 0, auto: ev !== 'manual' });
   }
   const state = { rev: 1, rec: true, why: '', armed: false, armIn: 6, phase: 'disarmed', buffer: 0,
     play: { active: false, file: '', t: 0, dur: 0, speed: 1, playing: false, eventT: 0 } };
@@ -75,10 +75,8 @@ const commBusMock = `
       }
       case 'saveLast':
         clips.unshift({ file: 'manual_' + Date.now() + '.rpl', event: 'manual', utc: '', utcMs: Date.now(),
-          aircraft: 'Cessna 172 Skyhawk', durationSec: state.buffer, touchdownVsFpm: null, peakG: null, bounces: 0, keep: false, auto: false });
+          aircraft: 'Cessna 172 Skyhawk', durationSec: state.buffer, touchdownVsFpm: null, peakG: null, bounces: 0, auto: false });
         state.rev++; return reply(cmd.id, cmd.op, true);
-      case 'keep': { const i = find(cmd.file); if (i < 0) return reply(cmd.id, cmd.op, false, 'unknown clip');
-        clips[i].keep = cmd.keep; state.rev++; return reply(cmd.id, cmd.op, true); }
       case 'delete': { const i = find(cmd.file); if (i < 0) return reply(cmd.id, cmd.op, false, 'unknown clip');
         clips.splice(i, 1); state.rev++; if (state.play.file === cmd.file) state.play.active = false; return reply(cmd.id, cmd.op, true); }
       case 'play': { const i = find(cmd.file); if (i < 0) return reply(cmd.id, cmd.op, false, 'unknown clip');

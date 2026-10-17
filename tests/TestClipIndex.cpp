@@ -7,13 +7,12 @@ using namespace br;
 
 namespace {
 
-ClipEntry entry(const std::string& file, EventType ev, int64_t utc, bool keep = false) {
+ClipEntry entry(const std::string& file, EventType ev, int64_t utc) {
     ClipEntry e;
     e.file = file;
     e.event = ev;
     e.utcStartMs = utc;
     e.autoClip = ev != EventType::Manual;
-    e.keep = keep;
     return e;
 }
 
@@ -44,32 +43,42 @@ TEST(ClipIndex_UniqueFileNames) {
     CHECK_EQ(idx.uniqueFileName(t, EventType::Takeoff), std::string("2026-10-17_1432_takeoff.rpl"));
 }
 
-TEST(ClipIndex_RetentionSparesKeptAndManualClips) {
+TEST(ClipIndex_RetentionKeepsNewestAutoAndAllManualClips) {
     ClipIndex idx;
-    for (int i = 0; i < 60; ++i) {
-        const bool keep = (i == 3 || i == 10);  // two old kept clips
-        idx.add(entry("auto" + std::to_string(i) + ".rpl", i % 2 ? EventType::Landing : EventType::Takeoff, i, keep));
+    for (int i = 0; i < 30; ++i) {
+        idx.add(entry("auto" + std::to_string(i) + ".rpl", i % 2 ? EventType::Landing : EventType::Takeoff, i));
     }
     idx.add(entry("manual_old.rpl", EventType::Manual, -5));
-    const std::vector<std::string> removed = idx.enforceRetention(50);
-    // 58 non-kept auto clips; the newest 50 of those are auto59..auto11 and auto9 (auto10 is
-    // kept, so it doesn't count). auto0..auto8 go, except the kept auto3.
-    CHECK_EQ(removed.size(), 8u);
-    CHECK(idx.find("auto3.rpl") != nullptr);
-    CHECK(idx.find("auto10.rpl") != nullptr);
+    const std::vector<std::string> removed = idx.enforceRetention(20);
+    // The newest 20 auto clips are auto29..auto10; auto0..auto9 go. Manual clips always stay.
+    CHECK_EQ(removed.size(), 10u);
     CHECK(idx.find("manual_old.rpl") != nullptr);
     CHECK(idx.find("auto0.rpl") == nullptr);
-    CHECK(idx.find("auto8.rpl") == nullptr);
-    CHECK(idx.find("auto9.rpl") != nullptr);
-    CHECK(idx.find("auto11.rpl") != nullptr);
-    CHECK(idx.find("auto59.rpl") != nullptr);
-    CHECK_EQ(idx.size(), 53u);  // 60 + 1 manual - 8
-    CHECK(idx.enforceRetention(50).empty());
+    CHECK(idx.find("auto9.rpl") == nullptr);
+    CHECK(idx.find("auto10.rpl") != nullptr);
+    CHECK(idx.find("auto29.rpl") != nullptr);
+    CHECK_EQ(idx.size(), 21u);  // 20 auto + 1 manual
+    CHECK(idx.enforceRetention(20).empty());
+}
+
+TEST(ClipIndex_OldKeepFlagIsIgnored) {
+    // index.json from before Keep was removed: the flag no longer protects a clip.
+    const std::string json =
+        "{\"clips\":[{\"file\":\"new.rpl\",\"event\":\"landing\",\"utcMs\":2,\"auto\":true},"
+        "{\"file\":\"old.rpl\",\"event\":\"takeoff\",\"utcMs\":1,\"keep\":true,\"auto\":true}]}";
+    ClipIndex idx;
+    REQUIRE(idx.fromJson(json.data(), json.size(), nullptr));
+    const std::vector<std::string> removed = idx.enforceRetention(1);
+    REQUIRE(removed.size() == 1);
+    CHECK_EQ(removed[0], std::string("old.rpl"));
+    std::string out;
+    idx.toJson(out);
+    CHECK(out.find("keep") == std::string::npos);
 }
 
 TEST(ClipIndex_JsonRoundTrip) {
     ClipIndex idx;
-    ClipEntry e = entry("2026-10-17_1432_landing.rpl", EventType::Landing, 1792247525000, true);
+    ClipEntry e = entry("2026-10-17_1432_landing.rpl", EventType::Landing, 1792247525000);
     e.aircraft = "Airbus A320neo \"Asobo\"";
     e.durationSec = 154.25;
     e.touchdownVsFpm = -142.5;
@@ -93,7 +102,6 @@ TEST(ClipIndex_JsonRoundTrip) {
     CHECK_NEAR(l->touchdownVsFpm, -142.5, 1e-9);
     CHECK_NEAR(l->peakG, 1.31, 1e-9);
     CHECK_EQ(l->bounces, 1);
-    CHECK(l->keep);
     CHECK(l->autoClip);
     const ClipEntry* m = back.find("2026-10-17_1300_manual.rpl");
     REQUIRE(m != nullptr);

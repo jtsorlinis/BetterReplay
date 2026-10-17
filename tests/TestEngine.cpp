@@ -266,20 +266,28 @@ TEST(Engine_RetentionKeepsNewestAutoClips) {
         // Each new flight restarts sim time from 0.
         h.feedAll(g.samples);
         saved.push_back(h.engine.index().clips()[0].file);
-        if (flight == 0) {
-            std::string err;
-            REQUIRE(h.engine.setKeep(saved[0], true, err));
-        }
     }
-    // Flight 0 is kept; of flights 1..3 only the newest two survive.
-    CHECK_EQ(h.engine.index().size(), 3u);
-    CHECK(h.engine.index().find(saved[0]) != nullptr);
+    // Only the newest two survive, in the index and on disk.
+    CHECK_EQ(h.engine.index().size(), 2u);
+    CHECK(h.engine.index().find(saved[0]) == nullptr);
     CHECK(h.engine.index().find(saved[1]) == nullptr);
+    CHECK(h.storage.files.count(saved[0]) == 0);
     CHECK(h.storage.files.count(saved[1]) == 0);
     CHECK(h.engine.index().find(saved[2]) != nullptr);
     CHECK(h.engine.index().find(saved[3]) != nullptr);
-    CHECK_EQ(h.storage.clipCount(), 3u);
+    CHECK_EQ(h.storage.clipCount(), 2u);
+
+    // A lower limit applies to the existing library at startup.
+    EngineConfig lower;
+    lower.maxAutoClips = 1;
+    Engine restarted(h.storage, lower);
+    restarted.init();
+    CHECK_EQ(restarted.index().size(), 1u);
+    CHECK(restarted.index().find(saved[3]) != nullptr);
+    CHECK_EQ(h.storage.clipCount(), 1u);
 }
+
+TEST(Engine_DefaultRetentionIsTwentyAutoClips) { CHECK_EQ(EngineConfig().maxAutoClips, 20u); }
 
 TEST(Engine_IndexPersistsAndRebuildsFromDisk) {
     MemoryStorage storage;
@@ -292,21 +300,19 @@ TEST(Engine_IndexPersistsAndRebuildsFromDisk) {
         g.hold(10.0, false);
         for (const DetectorSample& s : g.samples) e.onFrame(toInput(s), kUtcBase);
         REQUIRE(e.saveLast(kUtcBase, err));
-        REQUIRE(e.setKeep(e.index().clips()[0].file, true, err));
     }
     {
         Engine e(storage);
         e.init();
         REQUIRE(e.index().size() == 1);
-        CHECK(e.index().clips()[0].keep);
+        CHECK(e.index().clips()[0].event == EventType::Manual);
     }
-    // Lose the index: the clip is adopted back from its header (the keep flag is lost).
+    // Lose the index: the clip is adopted back from its header.
     storage.files.erase("index.json");
     {
         Engine e(storage);
         e.init();
         REQUIRE(e.index().size() == 1);
-        CHECK(!e.index().clips()[0].keep);
         CHECK(e.index().clips()[0].event == EventType::Manual);
         CHECK_NEAR(e.index().clips()[0].durationSec, 10.0, 0.1);
     }
@@ -343,7 +349,7 @@ TEST(Engine_IndexFallbacks) {
     CHECK_EQ(e.index().size(), 1u);
 }
 
-TEST(Engine_KeepAndDeleteValidateNames) {
+TEST(Engine_DeleteValidatesNames) {
     Harness h;
     TraceGen g(false, 3000.0, 150.0);
     g.hold(5.0, false);
@@ -353,7 +359,6 @@ TEST(Engine_KeepAndDeleteValidateNames) {
     const std::string file = h.engine.index().clips()[0].file;
     CHECK(!h.engine.deleteClip("../index.json", err));
     CHECK(!h.engine.deleteClip("nope.rpl", err));
-    CHECK(!h.engine.setKeep("nope.rpl", true, err));
     const int rev = h.engine.clipsRevision();
     REQUIRE(h.engine.deleteClip(file, err));
     CHECK(h.engine.clipsRevision() > rev);
