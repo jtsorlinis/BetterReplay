@@ -1,0 +1,3 @@
+*.spb binary
+*.wasm binary
+*.rpl binary

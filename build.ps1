@@ -187,8 +187,12 @@ function Assert-PackageToolCanRun {
     }
 }
 
+# Hashes the text with normalized line endings so a CRLF checkout still matches the cache.
 function Get-SpbSourceHash {
-    return (Get-FileHash -Algorithm SHA256 $SpbSource).Hash
+    $text = [IO.File]::ReadAllText($SpbSource).Replace("`r`n", "`n")
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text))
+    return [BitConverter]::ToString($bytes).Replace('-', '')
 }
 
 function Invoke-PackageTool([string]$Stage) {
