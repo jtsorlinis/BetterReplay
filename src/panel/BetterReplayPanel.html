@@ -45,6 +45,9 @@
             </button>
           </div>
           <div class="br-error hidden" id="br-error"></div>
+          <!-- a command that failed from this screen, for a few seconds (clips and the player show
+               theirs in place) -->
+          <div class="br-error hidden" id="br-main-note"></div>
           <div class="br-plane hidden" id="br-plane">
             <span class="br-plane-icon">
               <svg viewBox="0 0 24 24"><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z" fill="currentColor"/></svg>
@@ -98,6 +101,7 @@
             <strong>Saved clips</strong>
             <span class="br-clips-count" id="br-clips-count"></span>
           </div>
+          <div class="br-clips-note hidden" id="br-clips-note"></div>
           <div class="br-list" id="br-list">
             <div class="br-empty">No clips yet. Takeoffs and landings are saved automatically.</div>
           </div>
@@ -105,9 +109,18 @@
 
         <!-- player: while a clip plays; Stop brings back the main screen -->
         <section class="br-player" id="br-player">
-          <span class="br-player-kicker">Replaying</span>
+          <span class="br-player-kicker" id="br-player-kicker">Replaying</span>
           <div class="br-now" id="br-now"></div>
           <div class="br-now-sub" id="br-now-sub"></div>
+          <!-- before the replay starts (.preparing): what it's waiting for, in place of the controls -->
+          <div class="br-prep">
+            <div class="br-prep-spinner">
+              <svg viewBox="0 0 24 24"><path d="M11 4h2v12.2l4.6-4.6 1.4 1.4-7 7-7-7 1.4-1.4 4.6 4.6z" fill="currentColor"/></svg>
+            </div>
+            <div class="br-prep-title">Lowering the gear</div>
+            <div class="br-prep-sub">The replay starts as soon as it's down</div>
+            <button type="button" class="br-btn br-prep-cancel" id="br-prep-cancel">Cancel</button>
+          </div>
           <div class="br-player-body">
             <div class="br-seek" id="br-seek">
               <div class="br-seek-fill" id="br-seek-fill"></div>
@@ -129,8 +142,6 @@
             </div>
           </div>
         </section>
-
-        <div class="br-toast hidden" id="br-toast"></div>
       </div>
     </ingame-ui>
   </ingamepanel-betterreplay>

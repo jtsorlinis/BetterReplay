@@ -265,14 +265,44 @@ private:
     bool throttleAxisLogged_ = false;
     // Before a jump onto the ground with the gear down, on an aircraft whose gear can't be snapped:
     // lower it where the aircraft is first (see prepareJump).
-    static constexpr int kPrepareGearMaxFrames = 1800;  // ~30 s at 60 fps
-    int prepareFrames_ = 0;
+    static constexpr int64_t kPrepareGearMaxMs = 30000;
+    int64_t prepareStartMs_ = 0;
     bool prepareGearSent_ = false;
     bool snapAccepted_ = false;    // a gear snap held on this aircraft: no need to lower it first
     bool restoreDeferred_ = false;  // Stop: lowering the gear before putting the aircraft back
     static double gearExtensionOf(const Frame& f);
     void commandGearDown(const Frame& target);
     void writeRestore(const Frame& snapshot);
+    // After a jump, and after Stop puts the aircraft back, a flap lever the profile or an input
+    // event drives waits until the aircraft is where the clip has it (on the ground or not, at its
+    // speed) for a moment. Aircraft that pick the flap setting from the lever and their speed
+    // otherwise see the lever move while still fast: the A320neo V2 then gives CONF 1 (slats
+    // only) instead of 1+F on the runway.
+    static constexpr int64_t kFlapsSettleMs = 1500;
+    static constexpr int64_t kFlapsHoldMaxMs = 5000;
+    static constexpr double kFlapsSpeedMatchKt = 20.0;
+    bool flapsHold_ = false;            // playback: the flap lever is left where the aircraft has it
+    bool restoreFlapsPending_ = false;  // Stop: the profile puts the flaps back once settled
+    int64_t flapsHoldStartMs_ = 0;
+    int64_t flapsMatchSinceMs_ = 0;
+    void holdFlaps();
+    bool flapsSettled(const Frame& target);
+    void checkRestoreFlaps();
+    void cancelRestoreFlaps();
+    // Diagnostics for the engine sound: does each engine's N1 follow the clip, or hunt?
+    int64_t engineStartMs_ = 0;
+    int64_t engineLastMs_ = 0;
+    double n1DiffSum_[4] = {};
+    double n1DiffMax_[4] = {};
+    int n1Frames_[4] = {};
+    double n1Last_[4] = {};      // live, then the clip: direction changes of each
+    double n1ClipLast_[4] = {};
+    int n1Dir_[4] = {};
+    int n1ClipDir_[4] = {};
+    int n1Reversals_[4] = {};
+    int n1ClipReversals_[4] = {};
+    void trackEngines(const Frame& frame, bool jumped);
+    void logEngines();
     // Event channel diagnostics (gear has its own check): the state each should be in, checked
     // after a grace period following every change, since reversers take a moment to move.
     static constexpr int kEventGraceFrames = 180;  // ~3 s at 60 fps

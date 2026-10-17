@@ -75,6 +75,10 @@ private:
     // least minStep from what was last sent. No periodic resend, and no creeping in tiny steps:
     // every event makes the aircraft re-evaluate its lever.
     static bool dueOnChange(Slot& s, int i, double v, bool force, double minStep);
+    // Like dueOnChange, for a value that isn't quite the lever: a change of nowStep or more is due
+    // at once, one of minStep or more once it has lasted `frames` frames.
+    static bool dueWhenLasting(Slot& s, int i, double v, bool force, double minStep, double nowStep, int frames);
+    static constexpr int kLastingFrames = 30;
     void applyKeyEvent(Control c, Slot& s, const Frame& f, bool force);
     static void keyEvent(int id, int32_t value);
 

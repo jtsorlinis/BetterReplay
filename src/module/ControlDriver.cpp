@@ -42,6 +42,16 @@ bool ControlDriver::dueOnChange(Slot& s, int i, double v, bool force, double min
     return true;
 }
 
+bool ControlDriver::dueWhenLasting(Slot& s, int i, double v, bool force, double minStep, double nowStep, int frames) {
+    if (force || !std::isfinite(s.sent[i]) || std::fabs(v - s.sent[i]) >= nowStep) return dueOnChange(s, i, v, true, 0.0);
+    if (std::fabs(v - s.sent[i]) < minStep) {
+        s.since[i] = 0;
+        return false;
+    }
+    if (++s.since[i] < frames) return false;
+    return dueOnChange(s, i, v, true, 0.0);
+}
+
 bool ControlDriver::begin(Control c, const ControlMethod& m, std::string& why) {
     if (number_ == FS_INVALID_UNIT) number_ = fsVarsGetUnitId("number");
     Slot& s = slots_[static_cast<int>(c)];
@@ -177,6 +187,7 @@ void ControlDriver::apply(Control c, const Frame& f, bool force) {
             break;
         case MethodKind::SimVar:
             // Written every frame, like playback's own simvar channels.
+            ++s.sends;
             for (int i = 0; i < s.simvarCount; ++i) {
                 const SimVarTarget& t = s.simvars[i];
                 const double v = f.v[t.channel];
@@ -213,6 +224,7 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
         case Control::Throttle:
             for (int e = 0; e < s.count; ++e) {
                 double fraction = NAN;
+                bool lever = true;  // the source is the lever itself
                 const double hw = f.v[kThrottleAxis1 + e];
                 if (std::isfinite(hw)) {
                     // The pilot's own hardware axis: puts the lever exactly where it was, detents
@@ -226,6 +238,7 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                     // reverse. Hold idle until the aircraft's reverser matches the clip.
                     const double pct = f.v[kThrottle1 + e];
                     if (!std::isfinite(pct)) continue;
+                    lever = false;
                     const double rev = f.v[kReverser1 + e];
                     const bool clipReverse = std::isfinite(rev) ? rev >= 0.5 : pct < 0.0;
                     const bool liveReverse = ctx_.live && ctx_.live->v[kReverser1 + e] >= 0.5;
@@ -239,7 +252,13 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                     }
                 }
                 const double axis = static_cast<double>(std::lround(clamp(fraction, 0.0, 1.0) * 32768.0 - 16384.0));
-                if (dueOnChange(s, e, axis, force, 48.0)) keyEvent(kThrottleAxisKeys[e], static_cast<int32_t>(axis));
+                // The simvar isn't always the lever: on the A320neo V2 under autothrust it's the
+                // thrust demand, which creeps with speed. Every event makes the aircraft re-evaluate
+                // its lever (and the engine sound follows), so from the simvar a change of 2% goes
+                // at once and a smaller one only once it has lasted.
+                const bool send = lever ? dueOnChange(s, e, axis, force, 48.0)
+                                        : dueWhenLasting(s, e, axis, force, 48.0, 655.0, kLastingFrames);
+                if (send) keyEvent(kThrottleAxisKeys[e], static_cast<int32_t>(axis));
             }
             break;
         case Control::Flaps: {
@@ -263,6 +282,7 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
             const double state = g >= 0.5 ? 1.0 : 0.0;
             if (!force && state == s.sent[0]) break;  // a command, not a position: only on change
             s.sent[0] = state;
+            ++s.sends;
             keyEvent(KEY_GEAR_SET, state > 0.5 ? 1 : 0);
             keyEvent(state > 0.5 ? KEY_GEAR_DOWN : KEY_GEAR_UP, 0);
             log::info("controls: gear %s (key events)", state > 0.5 ? "down" : "up");
@@ -275,8 +295,9 @@ void ControlDriver::end(Control c) {
     Slot& s = slots_[static_cast<int>(c)];
     if (!s.active) return;
     s.active = false;
-    log::info("controls: %d value(s) sent to the %s with %s", s.sends, controlSpec(c).label,
-              describeMethod(c, s.method).c_str());
+    log::info(s.method.kind == MethodKind::SimVar ? "controls: %d frame(s) written to the %s with %s"
+                                                  : "controls: %d value(s) sent to the %s with %s",
+              s.sends, controlSpec(c).label, describeMethod(c, s.method).c_str());
     if (s.errors > 0) log::warn("controls: %d error(s) driving the %s", s.errors, controlSpec(c).label);
 }
 

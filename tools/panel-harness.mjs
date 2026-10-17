@@ -43,7 +43,9 @@ const commBusMock = `
   const state = { rev: 1, rec: true, why: '', armed: false, armIn: 6, phase: 'disarmed', buffer: 0,
     play: { active: false, file: '', t: 0, dur: 0, speed: 1, playing: false, eventT: 0 } };
   const listeners = {};
-  window.harness = { state: state, clips: clips, log: [], setup: window.harnessSetup };
+  // prepareSec: Play first holds that long, "lowering the gear"; fail: { op: 'error' } fails the
+  // next command of that op with that error.
+  window.harness = { state: state, clips: clips, log: [], setup: window.harnessSetup, prepareSec: 0, fail: {} };
 
   setInterval(() => {
     window.harnessSetup.tick(0.1);
@@ -51,6 +53,9 @@ const commBusMock = `
       state.buffer = Math.min(300, state.buffer + 0.1);
       state.armIn = Math.max(0, state.armIn - 0.1);
       if (state.armIn === 0) { state.armed = true; state.phase = 'airborne'; }
+    } else if (state.play.preparing) {
+      state.play.prepareLeft -= 0.1;
+      if (state.play.prepareLeft <= 0) state.play.preparing = false;
     } else if (state.play.playing) {
       state.play.t = Math.min(state.play.dur, state.play.t + 0.1 * state.play.speed);
       if (state.play.t >= state.play.dur) state.play.playing = false;
@@ -72,6 +77,11 @@ const commBusMock = `
     const setupReply = window.harnessSetup.command(cmd, state.play.active);
     if (setupReply) return reply(cmd.id, cmd.op, setupReply[0], setupReply[1]);
     const find = (f) => clips.findIndex((c) => c.file === f);
+    const failure = window.harness.fail[cmd.op];
+    if (failure && cmd.op !== 'status' && cmd.op !== 'clips') {
+      delete window.harness.fail[cmd.op];
+      return reply(cmd.id, cmd.op, false, failure);
+    }
     switch (cmd.op) {
       case 'status': return emit('BetterReplay.Status', status());
       case 'clips': {
@@ -86,12 +96,14 @@ const commBusMock = `
         clips.splice(i, 1); state.rev++; if (state.play.file === cmd.file) state.play.active = false; return reply(cmd.id, cmd.op, true); }
       case 'play': { const i = find(cmd.file); if (i < 0) return reply(cmd.id, cmd.op, false, 'unknown clip');
         Object.assign(state.play, { active: true, file: cmd.file, t: 0, dur: clips[i].durationSec, playing: true,
-          eventT: clips[i].event === 'landing' ? 120 : 0 }); return reply(cmd.id, cmd.op, true); }
+          eventT: clips[i].event === 'landing' ? 120 : 0, preparing: window.harness.prepareSec > 0,
+          prepareLeft: window.harness.prepareSec }); return reply(cmd.id, cmd.op, true); }
       case 'pause': state.play.playing = false; return reply(cmd.id, cmd.op, state.play.active, state.play.active ? '' : 'nothing is playing');
       case 'resume': if (state.play.t >= state.play.dur) state.play.t = 0; state.play.playing = true; return reply(cmd.id, cmd.op, true);
       case 'seek': state.play.t = Math.max(0, Math.min(state.play.dur, cmd.t)); return reply(cmd.id, cmd.op, true);
       case 'speed': state.play.speed = Math.max(0.25, Math.min(4, cmd.x)); return reply(cmd.id, cmd.op, true);
-      case 'stop': state.play.active = false; state.play.playing = false; return reply(cmd.id, cmd.op, true);
+      case 'stop': state.play.active = false; state.play.playing = false; state.play.preparing = false;
+        return reply(cmd.id, cmd.op, true);
       default: return reply(cmd.id, cmd.op, false, 'unknown command: ' + cmd.op);
     }
   }

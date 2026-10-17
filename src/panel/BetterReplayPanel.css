@@ -1225,6 +1225,100 @@ button {
   min-height: 0;
 }
 
+.br-now-sub.failed {
+  color: var(--br-red);
+}
+
+/* Before the replay starts (lowering the gear first): a big message in place of the controls. */
+.br-prep {
+  display: none;
+}
+
+.br-player.preparing .br-player-body {
+  display: none;
+}
+
+.br-player.preparing .br-player-kicker {
+  color: var(--br-amber);
+}
+
+.br-player.preparing .br-prep {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  text-align: center;
+}
+
+.br-prep-spinner {
+  position: relative;
+  width: 96px;
+  height: 96px;
+}
+
+/* The ring turns; the arrow in it stays upright. */
+.br-prep-spinner:before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  border: 6px solid rgba(245, 177, 61, 0.2);
+  border-top-color: var(--br-amber);
+  border-radius: 50%;
+  animation: br-spin 1.1s linear infinite;
+}
+
+.br-prep-spinner svg {
+  position: absolute;
+  top: 24px;
+  left: 24px;
+  width: 48px;
+  height: 48px;
+  color: var(--br-amber);
+  animation: br-bob 1.4s ease-in-out infinite;
+}
+
+@keyframes br-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes br-bob {
+  0%,
+  100% {
+    transform: translateY(-4px);
+  }
+  50% {
+    transform: translateY(4px);
+  }
+}
+
+.br-prep-title {
+  margin-top: 26px;
+  font-size: 30px;
+  font-weight: bold;
+}
+
+.br-prep-sub {
+  margin-top: 8px;
+  color: var(--br-muted);
+  font-size: 17px;
+}
+
+.br-btn.br-prep-cancel {
+  margin-top: 30px;
+  padding: 10px 26px;
+  font-size: 16px;
+}
+
 .br-seek {
   position: relative;
   height: 22px;
@@ -1428,11 +1522,20 @@ button {
   margin-left: 8px;
 }
 
-.br-toast {
-  margin-top: 8px;
+/* A play or delete that failed says so on its row for a few seconds. */
+.br-clip.failed {
+  border-color: rgba(255, 107, 107, 0.6);
+}
+
+.br-clip.failed .br-clip-sub {
+  color: var(--br-red);
+}
+
+.br-clips-note {
+  margin-bottom: 10px;
   padding: 10px 12px;
-  border-radius: 6px;
-  background: var(--br-surface-2);
-  font-size: 15px;
-  text-align: center;
+  border-radius: 8px;
+  background: rgba(255, 107, 107, 0.15);
+  color: var(--br-red);
+  font-size: 14px;
 }

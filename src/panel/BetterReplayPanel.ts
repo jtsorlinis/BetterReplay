@@ -102,6 +102,13 @@ interface Reply {
     error: string;
 }
 type Command = { [key: string]: string | number | boolean };
+// A command that failed: shown on the screen it was given from ("main", "clips" or "player"),
+// on its clip's row if it was for one.
+interface Note {
+    text: string;
+    view: string;
+    file: string;
+}
 
 const CMD_EVENT = "BetterReplay.Cmd";
 const STATUS_EVENT = "BetterReplay.Status";
@@ -162,6 +169,7 @@ const SETUP_PHASES: { [phase: string]: string } = {
 // Phases where the pilot is doing something: when what they were told changes there, they did it.
 const PILOT_PHASES: { [phase: string]: boolean } = { prepare: true, takeoff: true, user: true };
 const TICK_HOLD_MS = 1100;  // a done instruction stays up, ticked, this long
+const NOTE_MS = 5000;       // a failed command's message stays this long
 
 const CONTROL_LABELS: { [control: string]: string } = {
     spoilers: "Spoilers",
@@ -366,7 +374,9 @@ class BetterReplayPanel extends UIElement {
     declare seekFraction: number;
     declare confirmFile: string;
     declare confirmTimer: number;
-    declare toastTimer: number;
+    declare note: Note | null;  // a command that failed, shown where it was given
+    declare noteTimer: number;
+    declare commandFiles: { [id: number]: string };  // replies still to come for clip commands
     declare saveState: string;  // the save button: "", "saving", "saved" or "failed"
     declare saveTimer: number;
     declare view: string;  // "main" or "clips" (the player shows whenever a clip plays)
@@ -400,7 +410,9 @@ class BetterReplayPanel extends UIElement {
         this.seekFraction = 0;
         this.confirmFile = "";
         this.confirmTimer = 0;
-        this.toastTimer = 0;
+        this.note = null;
+        this.noteTimer = 0;
+        this.commandFiles = {};
         this.saveState = "";
         this.saveTimer = 0;
         this.view = "main";
@@ -470,6 +482,7 @@ class BetterReplayPanel extends UIElement {
         if (!this.listener) return;
         this.requestId += 1;
         cmd.id = this.requestId;
+        if (typeof cmd.file === "string") this.commandFiles[this.requestId] = cmd.file;
         try {
             const result = this.listener.callWasm(CMD_EVENT, JSON.stringify(cmd)) as { catch?: (fn: (e: unknown) => void) => void };
             if (result && typeof result.catch === "function") {
@@ -534,12 +547,14 @@ class BetterReplayPanel extends UIElement {
     onReply(payload: string): void {
         const r = parsePayload<Reply>(payload);
         if (!r) return;
+        const file = this.commandFiles[r.id] || "";
+        delete this.commandFiles[r.id];
+        // Successes show for themselves (the player opens, the row goes); the save button tells
+        // its own outcome.
         if (r.op === "saveLast") {
             this.setSaveState(r.ok ? "saved" : "failed", r.error);
         } else if (!r.ok) {
-            this.toast(r.error || "Command failed");
-        } else if (r.op === "delete") {
-            this.toast("Clip deleted");
+            this.showNote(capitalize(r.error || "that didn't work"), file);
         }
         this.send({ op: "status" });
     }
@@ -554,10 +569,12 @@ class BetterReplayPanel extends UIElement {
         });
         byId("br-open-clips").addEventListener("click", () => this.showView("clips"));
         byId("br-back").addEventListener("click", () => this.showView("main"));
-        byId("br-stop").addEventListener("click", () => {
+        const stop = () => {
             this.send({ op: "stop" });
             this.showView("main");  // stopping goes back to the main screen
-        });
+        };
+        byId("br-stop").addEventListener("click", stop);
+        byId("br-prep-cancel").addEventListener("click", stop);
         byId("br-playpause").addEventListener("click", () => {
             const playing = this.status && this.status.play.playing;
             this.send({ op: playing ? "pause" : "resume" });
@@ -662,12 +679,29 @@ class BetterReplayPanel extends UIElement {
         return null;
     }
 
-    toast(message: string): void {
-        const el = byId("br-toast");
-        el.textContent = message;
-        el.classList.remove("hidden");
-        window.clearTimeout(this.toastTimer);
-        this.toastTimer = window.setTimeout(() => el.classList.add("hidden"), 3500);
+    // A command that failed says so where it was given, for a few seconds: on its clip's row, in
+    // the player, or on the screen showing.
+    showNote(text: string, file: string): void {
+        const view = this.status && this.status.play.active ? "player" : this.view;
+        this.note = { text: text, view: view, file: view === "clips" ? file : "" };
+        window.clearTimeout(this.noteTimer);
+        this.noteTimer = window.setTimeout(() => {
+            this.note = null;
+            this.renderNotes();
+        }, NOTE_MS);
+        this.renderNotes();
+    }
+
+    renderNotes(): void {
+        const n = this.note;
+        const main = byId("br-main-note");
+        main.textContent = n && n.view === "main" ? n.text : "";
+        main.classList.toggle("hidden", !(n && n.view === "main"));
+        const clips = byId("br-clips-note");
+        clips.textContent = n && n.view === "clips" && !n.file ? n.text : "";
+        clips.classList.toggle("hidden", !(n && n.view === "clips" && !n.file));
+        this.renderList();
+        if (this.status) this.renderPlayer(this.status.play);
     }
 
     // ---- rendering
@@ -939,12 +973,15 @@ class BetterReplayPanel extends UIElement {
         if (!p.active) return;
 
         const clip = this.findClip(p.file);
+        // Until the replay starts (the gear going down first), a big message instead of the controls.
+        const preparing = !!p.preparing;
+        byId("br-player").classList.toggle("preparing", preparing);
+        byId("br-player-kicker").textContent = preparing ? "Getting ready" : "Replaying";
         byId("br-now").textContent = clip ? eventLabel(clip.event) + " · " + formatLocalDate(clip.utcMs) : p.file;
-        byId("br-now-sub").textContent = p.preparing
-            ? "Lowering the gear before the replay starts…"
-            : clip
-              ? clipFacts(clip).join(" · ")
-              : "";
+        const note = this.note && this.note.view === "player" ? this.note.text : "";
+        const sub = byId("br-now-sub");
+        sub.textContent = note || (clip ? clipFacts(clip).join(" · ") : "");
+        sub.classList.toggle("failed", !!note);
         if (!this.seekDragging) this.renderSeek(p.dur > 0 ? p.t / p.dur : 0);
 
         const marker = byId("br-seek-marker");
@@ -984,12 +1021,14 @@ class BetterReplayPanel extends UIElement {
             const file = escapeHtml(c.file);
             const parts = clipFacts(c).map(escapeHtml);
             const confirming = this.confirmFile === c.file;
+            const failed = this.note && this.note.view === "clips" && this.note.file === c.file ? this.note.text : "";
             html +=
-                '<div class="br-clip' + (c.file === playing ? " playing" : "") + '" data-file="' + file + '">' +
+                '<div class="br-clip' + (c.file === playing ? " playing" : "") + (failed ? " failed" : "") +
+                '" data-file="' + file + '">' +
                 '<span class="br-badge ' + escapeHtml(c.event) + '">' + eventLabel(c.event) + "</span>" +
                 '<div class="br-clip-text">' +
                 '<div class="br-clip-title">' + formatLocalDate(c.utcMs) + "</div>" +
-                '<div class="br-clip-sub">' + parts.join(" · ") + "</div>" +
+                '<div class="br-clip-sub">' + (failed ? escapeHtml(failed) : parts.join(" · ")) + "</div>" +
                 "</div>" +
                 '<div class="br-clip-btns">' +
                 '<button type="button" class="br-icon-btn br-play" title="Play" data-act="play" data-file="' + file + '">' +

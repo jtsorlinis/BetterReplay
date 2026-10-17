@@ -6,6 +6,12 @@
       "runtimeExecutable": "node",
       "runtimeArgs": ["tools/panel-harness.mjs", "8077"],
       "port": 8077
+    },
+    {
+      "name": "panel-harness-8078",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["tools/panel-harness.mjs", "8078"],
+      "port": 8078
     }
   ]
 }
