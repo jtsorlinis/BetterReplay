@@ -300,6 +300,7 @@ private:
     FsAVarId engineVarId_[2] = {FS_VAR_INVALID_ID, FS_VAR_INVALID_ID};  // TURB ENG N1, N2
     FsUnitId percentUnit_ = FS_INVALID_UNIT;
     bool engineWrite_[2] = {};  // this playback writes N1 / N2
+    bool engineWritesRejected_ = false;  // this aircraft kept its own N1: don't write it again
     double engineWritten_[2][4] = {};
     int engineWriteErrors_ = 0;
     int engineWrites_ = 0;      // frames written

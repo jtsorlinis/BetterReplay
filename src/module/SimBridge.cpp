@@ -1220,6 +1220,12 @@ void SimBridge::beginEngineWrites(const ChannelMask& present) {
         log::info("playback: engines left to the aircraft (engine type %d isn't a turbine)", engineType_);
         return;
     }
+    // Writing against an aircraft that keeps its own N1 only fights its engines for the first
+    // seconds of every replay (the A350 V2 does).
+    if (engineWritesRejected_) {
+        log::info("playback: engines left to the aircraft (it kept its own N1 when it was written before)");
+        return;
+    }
     if (percentUnit_ == FS_INVALID_UNIT) percentUnit_ = fsVarsGetUnitId("percent");
     for (int k = 0; k < 2; ++k) {
         if (engineVarId_[k] == FS_VAR_INVALID_ID) engineVarId_[k] = fsVarsGetAVarId(kNames[k]);
@@ -1272,6 +1278,7 @@ void SimBridge::writeEngines(const Frame& frame, bool jumped) {
                               "%.0f%% off what was written); leaving the engines to it for the rest of this playback",
                               engineWindowOff_, engineWindowChecked_, kEngineKeptPct);
                     engineWrite_[0] = engineWrite_[1] = false;
+                    engineWritesRejected_ = true;
                     return;
                 }
                 engineWindowChecked_ = engineWindowOff_ = 0;
@@ -1679,6 +1686,7 @@ void SimBridge::onAircraftChanged() {
     throttleViaEvents_ = false;
     snapRejected_ = false;
     snapAccepted_ = false;
+    engineWritesRejected_ = false;
     cancelRestoreFlaps();
 }
 
