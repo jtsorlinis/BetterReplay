@@ -27,6 +27,9 @@ public:
     virtual void sendChannelEvent(int channel, double value) = 0;
     // Optionally restore the pre-playback snapshot, then unfreeze.
     virtual void endPlayback(const Frame& snapshot, bool restore) = 0;
+    // True while the sim side is still settling the restored aircraft (e.g. waiting for the gear
+    // to come back down before unfreezing on the ground). Recording stays suspended meanwhile.
+    virtual bool restoring() const { return false; }
 };
 
 // Persistent storage for clips and index.json (the module maps this onto \work).
@@ -116,6 +119,7 @@ private:
     enum class ResumeKind { None, Pause, Relocate };
 
     const char* computeSuspendReason(bool slewActive) const;
+    bool restoringAircraft() const { return settleFrames_ > 0 || (out_ && out_->restoring()); }
     void recordFrame(const FrameInput& in, int64_t utcNowMs);
     void playbackFrame(double dt);
     void endPlayback(bool restore, const char* why);

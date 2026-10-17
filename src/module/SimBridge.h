@@ -24,6 +24,7 @@ public:
     void writePlaybackFrame(const Frame& frame) override;
     void sendChannelEvent(int channel, double value) override;
     void endPlayback(const Frame& snapshot, bool restore) override;
+    bool restoring() const override { return restoreWaitFrames_ > 0; }
 
 private:
     enum DataDef : DWORD { DEF_RECORD = 1, DEF_TITLE = 2, DEF_PLAYBACK = 3, DEF_RESTORE = 4 };
@@ -56,6 +57,7 @@ private:
     void heartbeat();
     void sendFreeze(bool on);
     void verifyFreeze();
+    void checkRestoreGear();
 
     // Remembers what each SimConnect call was so exceptions can be logged meaningfully.
     void track(HRESULT hr, const char* what);
@@ -81,7 +83,12 @@ private:
     int restoreChannels_[kChannelCount] = {};  // PlayMode::Set channels + body velocities
     int restoreChannelCount_ = 0;
     double setBuffer_[kChannelCount] = {};
+    bool playDefDefined_ = false;
     bool firstPlaybackWrite_ = false;
+    // Restoring onto the ground: stay frozen until the gear is back where the snapshot had it.
+    static constexpr int kRestoreGearMaxFrames = 1200;  // ~20 s at 60 fps
+    int restoreWaitFrames_ = 0;
+    double restoreGear_[3] = {};
     bool wantFreeze_ = false;
     bool freezeState_[kFreezeCount] = {};
     bool freezeToggled_[kFreezeCount] = {};

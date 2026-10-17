@@ -32,6 +32,10 @@ private:
 
 double frameTime(const Frame& f) { return f.t; }
 
+// PlayMode::Event channels are on/off (lights, gear handle); only a change of state is sent, so a
+// handle recorded mid-travel at 0.3, 0.6, 0.9 produces one event, not three.
+double eventState(double v) { return std::isnan(v) ? NAN : (v >= 0.5 ? 1.0 : 0.0); }
+
 DetectorSample toDetectorSample(const Frame& f, double touchdownNormalVelFps) {
     DetectorSample s;
     s.t = f.t;
@@ -210,7 +214,7 @@ void Engine::setAircraftTitle(const std::string& title) {
 
 const char* Engine::computeSuspendReason(bool slewActive) const {
     if (playbackActive_) return "playback";
-    if (settleFrames_ > 0) return "restoring aircraft";
+    if (restoringAircraft()) return "restoring aircraft";
     if (atMainMenu_) return "main menu";
     if (!simRunning_) return "sim not running";
     if (pauseFlags_ != 0) return kReasonPaused;
@@ -235,7 +239,7 @@ void Engine::onFrame(const FrameInput& in, int64_t utcNowMs) {
     if (!(dt > 0.0)) dt = 0.0;
     if (dt > cfg_.maxFrameDtSec) dt = cfg_.maxFrameDtSec;
 
-    if (!playbackActive_ && settleFrames_ == 0) {
+    if (!playbackActive_ && !restoringAircraft()) {
         lastRaw_ = in.raw;
         haveLastRaw_ = true;
     }
@@ -428,7 +432,7 @@ bool Engine::play(const std::string& file, std::string& error) {
     playback_.load(std::move(clip), file);
     if (!switching) {
         snapshot_ = lastRaw_;
-        for (int c = 0; c < kChannelCount; ++c) lastEventValue_[c] = snapshot_.v[c];
+        for (int c = 0; c < kChannelCount; ++c) lastEventValue_[c] = eventState(snapshot_.v[c]);
         playbackActive_ = true;
     }
     out_->beginPlayback(playback_.present());
@@ -492,10 +496,10 @@ void Engine::playbackFrame(double dt) {
     const ChannelMask& present = playback_.present();
     for (int c = 0; c < kChannelCount; ++c) {
         if (kChannels[c].play != PlayMode::Event || !present.test(static_cast<size_t>(c))) continue;
-        const double v = playFrame_.v[c];
-        if (std::isnan(v) || v == lastEventValue_[c]) continue;
-        out_->sendChannelEvent(c, v);
-        lastEventValue_[c] = v;
+        const double state = eventState(playFrame_.v[c]);
+        if (std::isnan(state) || state == lastEventValue_[c]) continue;
+        out_->sendChannelEvent(c, state);
+        lastEventValue_[c] = state;
     }
 }
 
@@ -504,9 +508,9 @@ void Engine::endPlayback(bool restore, const char* why) {
     if (out_) {
         if (restore) {
             for (int c = 0; c < kChannelCount; ++c) {
-                const double v = snapshot_.v[c];
-                if (kChannels[c].play == PlayMode::Event && !std::isnan(v) && v != lastEventValue_[c]) {
-                    out_->sendChannelEvent(c, v);
+                const double state = eventState(snapshot_.v[c]);
+                if (kChannels[c].play == PlayMode::Event && !std::isnan(state) && state != lastEventValue_[c]) {
+                    out_->sendChannelEvent(c, state);
                 }
             }
         }

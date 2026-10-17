@@ -134,15 +134,16 @@ Work through these in order. Each step says what to do, what you should see, and
 - [ ] In flight (any phase), click **Play** on a landing clip. **Expect:**
   ```
   playback of …_landing.rpl (N s, N frames, 37/37 channels); aircraft snapshot taken
-  playback: writing 18 channels per frame; freezing position/altitude/attitude
+  playback: writing 20 channels per frame; freezing position/altitude/attitude
   DEBUG lat/lon freeze on confirmed        (Debug build; x3)
   ```
   - If you see `freeze still off after SET; sending TOGGLE`, note it. Note whether it then worked.
   - If you see `could not turn … freeze on`, playback will fight the sim.
 - [ ] The aircraft jumps to the clip start and flies the recorded path smoothly. Note any jitter, drift or stutter.
 - [ ] The panel shows **Replaying** (blue) and the player bar, with the amber touchdown mark at 2:00.
+- [ ] The PFD airspeed and vertical speed follow the clip (body velocities are written every frame), not the speed you had before pressing Play.
 - [ ] Check visually, and note what doesn't follow the clip:
-  - gear position and gear handle
+  - gear: only the handle is replayed (`DEBUG playback: GEAR_SET 0/1`), and the sim animates the gear at its normal speed, so it can lag the recording a little, especially after a seek. There should be no flicker.
   - flaps
   - spoilers
   - ailerons, elevator and rudder
@@ -157,8 +158,9 @@ Work through these in order. Each step says what to do, what you should see, and
   recording resumed (was: restoring aircraft)
   detector: detector disarmed (restoring aircraft); arming in 10 s
   ```
-  - The aircraft is back where it was, at the same attitude and speed. Lights are back as they were.
+  - The aircraft is back where it was, at the same attitude and speed. Lights and gear handle are back as they were.
   - The aircraft is unfrozen and flies normally.
+- [ ] **Stop on the ground after a clip that ends gear-up** (e.g. a takeoff clip, played while parked). **Expect** `playback: waiting for the gear before unfreezing`, then `playback: gear back in place; unfreezing`. The aircraft stays frozen until the gear is down, so it doesn't drop onto its belly.
 - [ ] Play a clip, then play a **different** clip without stopping, then Stop. You're returned to the position from *before the first* clip.
 - [ ] While a clip plays, pause the sim. Playback holds, then continues when you unpause.
 - [ ] Note whether crash detection ever triggered during playback (e.g. near the ground).

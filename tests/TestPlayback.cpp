@@ -120,6 +120,7 @@ struct MemStorage : IStorage {
 struct FakeSim : ISimOutput {
     int begins = 0;
     int ends = 0;
+    bool busyRestoring = false;
     bool lastRestore = false;
     Frame restored;
     std::vector<Frame> written;
@@ -137,6 +138,7 @@ struct FakeSim : ISimOutput {
         lastRestore = restore;
         restored = snapshot;
     }
+    bool restoring() const override { return busyRestoring; }
 };
 
 FrameInput liveFrame(double simTime, double lat) {
@@ -297,6 +299,46 @@ TEST(EnginePlayback_RejectsBadRequests) {
     h.storage.files[h.clipFile].resize(20);
     CHECK(!h.engine.play(h.clipFile, err));
     CHECK(!h.engine.playbackActive());
+}
+
+TEST(EnginePlayback_EventChannelsSendStateChangesOnly) {
+    // A gear handle recorded mid-travel (0.3, 0.6, 0.9) is one state change: down.
+    PlaybackHarness h;
+    Clip clip = makeClip(3.0);
+    for (Frame& f : clip.frames) {
+        f.v[kLightLanding] = 0.0;
+        f.v[kGearHandle] = f.t < 1.0 ? 0.0 : (f.t < 1.5 ? 0.3 : (f.t < 2.0 ? 0.6 : 0.9));
+    }
+    std::vector<uint8_t> bytes;
+    writeClip(clip.meta, VectorFrameSource(clip.frames), bytes);
+    h.storage.files[h.clipFile] = bytes;
+    std::string err;
+    REQUIRE(h.engine.play(h.clipFile, err));
+    h.frames(60 * 4, -33.0);
+    REQUIRE(h.sim.events.size() == 1);
+    CHECK_EQ(h.sim.events[0].first, static_cast<int>(kGearHandle));
+    CHECK_NEAR(h.sim.events[0].second, 1.0, 0);
+    REQUIRE(h.engine.stopPlayback(err));  // live aircraft had the handle up: send it back up
+    REQUIRE(h.sim.events.size() == 2);
+    CHECK_EQ(h.sim.events[1].first, static_cast<int>(kGearHandle));
+    CHECK_NEAR(h.sim.events[1].second, 0.0, 0);
+}
+
+TEST(EnginePlayback_RecordingWaitsWhileSimIsRestoring) {
+    PlaybackHarness h;
+    std::string err;
+    REQUIRE(h.engine.play(h.clipFile, err));
+    h.frames(30, -33.0);
+    h.sim.busyRestoring = true;  // e.g. waiting for the gear to come back down
+    REQUIRE(h.engine.stopPlayback(err));
+    const size_t before = h.engine.bufferedFrames();
+    h.frames(120, -33.0);  // well past the fixed settle frames
+    CHECK_EQ(std::string(h.engine.suspendReason()), std::string("restoring aircraft"));
+    CHECK_EQ(h.engine.bufferedFrames(), before);
+    h.sim.busyRestoring = false;
+    h.frames(30, -33.0);
+    CHECK(h.engine.recording());
+    CHECK(h.engine.bufferedFrames() > before);
 }
 
 TEST(EnginePlayback_DeletingThePlayingClipStopsIt) {

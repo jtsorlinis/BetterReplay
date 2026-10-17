@@ -315,7 +315,12 @@ function Install-Package([string]$PackageDir) {
 
 # -------------------------------------------------------------------------------------- main
 
-if ($Package) { Assert-PackageToolCanRun }  # fail fast, before the slower build steps
+# Fail fast, before the slower build steps.
+if ($Package) { Assert-PackageToolCanRun }
+if ($Install -and (Get-Process -Name 'FlightSimulator2024' -ErrorAction SilentlyContinue)) {
+    throw ('Quit Microsoft Flight Simulator 2024 before installing: the module only loads at startup and its ' +
+        'files are in use while the sim runs. (You can build without -Install while it is running.)')
+}
 $msbuild = Find-MSBuild
 if (-not $SkipTests) { Invoke-Tests $msbuild }
 $wasm = Build-Module $msbuild

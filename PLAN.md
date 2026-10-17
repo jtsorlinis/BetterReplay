@@ -87,14 +87,14 @@ Each row has a stable key, simvar, units, storage (`f64|f32|u8`), interp (`linea
 | alt | PLANE ALTITUDE (`feet`) f64 | set |
 | agl | PLANE ALT ABOVE GROUND (`feet`) | none (detection) |
 | pitch, bank, hdg | PLANE PITCH DEGREES / BANK DEGREES / HEADING DEGREES TRUE (`degrees`; the docs default is radians) | set, angle |
-| vbx, vby, vbz | VELOCITY BODY X/Y/Z (`feet per second`) | none (restored from snapshot on stop) |
-| rvx, rvy, rvz | ROTATION VELOCITY BODY X/Y/Z (`radians per second`) | none (restored from snapshot on stop) |
+| vbx, vby, vbz | VELOCITY BODY X/Y/Z (`feet per second`) | set (so airspeed/VS indications follow the clip; added after the first in-sim test) |
+| rvx, rvy, rvz | ROTATION VELOCITY BODY X/Y/Z (`radians per second`) | set |
 | gs | GROUND VELOCITY (`knots`; not settable) | none |
 | vs | VERTICAL SPEED (`feet/minute`; the docs default is ft/s) | none |
 | ongnd | SIM ON GROUND (`bool`) u8 | none |
 | g | G FORCE (`gforce`) | none |
-| gear_c/l/r | GEAR CENTER/LEFT/RIGHT POSITION (`percent over 100`). Not `GEAR POSITION:n`, whose *set* is an up/down enum. | set |
-| gear_h | GEAR HANDLE POSITION (`percent over 100`) | set |
+| gear_c/l/r | GEAR CENTER/LEFT/RIGHT POSITION (`percent over 100`) | none. Writing them every frame made the gear flicker in the sim. |
+| gear_h | GEAR HANDLE POSITION (`percent over 100`) | event: `GEAR_SET` on change; the sim animates the gear |
 | flap_l/r | TRAILING EDGE FLAPS LEFT/RIGHT PERCENT (`percent over 100`) | set |
 | flap_idx | FLAPS HANDLE INDEX (`number`) | set, step |
 | spoil_h | SPOILERS HANDLE POSITION (`percent over 100`) | set |
@@ -140,7 +140,7 @@ When playing, channels are matched by **key**. Unknown keys are ignored, and cha
 
 ## Status (2026-10-17)
 
-Milestones 1–7 are implemented and committed. The core has 74 passing unit tests, the module builds with the SDK clang, and the panel has been exercised in a browser harness against a fake module. Still pending: in-sim verification ([MANUAL_TEST.md](MANUAL_TEST.md)) and compiling the panel `.spb` (`build.ps1 -Package`, which needs the sim's package builder).
+Milestones 1–7 are implemented and committed. The core has 76 passing unit tests, the module builds with the SDK clang, and the panel has been exercised in a browser harness against a fake module. Still pending: in-sim verification ([MANUAL_TEST.md](MANUAL_TEST.md)) and compiling the panel `.spb` (`build.ps1 -Package`, which needs the sim's package builder).
 
 ## 8. Decisions (answered: defaults approved)
 

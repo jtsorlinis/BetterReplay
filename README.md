@@ -6,7 +6,7 @@ An in-sim auto replay recorder for Microsoft Flight Simulator 2024. It records y
 - **Auto clips:** takeoffs and landings, including touchdown vertical speed, peak G and bounce count. They're written to disk as soon as each event finishes.
 - **Toolbar panel:** shows recorder status and the clip list, and has play/pause, seek, speed (0.25x–4x), stop, keep, delete and "save last 5 min".
 
-> **Status: MVP, not yet flown.** The platform-independent core has 74 unit tests and the module builds and links against the MSFS 2024 SDK. Nothing has run inside the sim yet. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
+> **Status: MVP, not yet flown.** The platform-independent core has 76 unit tests and the module builds and links against the MSFS 2024 SDK. Nothing has run inside the sim yet. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
 
 ## Requirements
 
@@ -144,7 +144,8 @@ None of these could be verified without running the sim. Each is covered by a st
 - **No MSFS2024 VS toolset.** Builds use the SDK's clang directly, with the same exports and version library as a working 2024 module. The VS project has never been built.
 - **SimConnect dispatch in WASM.** `SimConnect_CallDispatch` is called once at init. If no messages arrive within 2 s, the module falls back to calling it every frame and logs that.
 - **Freeze event parameter is undocumented.** `FREEZE_*_SET` is sent with 1/0 and verified through `IS … FREEZE ON`. If it didn't take, the module sends `FREEZE_*_TOGGLE` and logs it.
-- **Gear, flaps, surfaces and lights** are written via simvars and key events. Aircraft systems, especially complex add-ons that animate from their own LVars, may override them during playback. That's what the future LVar recording is for.
+- **Flaps, spoilers and surfaces** are written every frame via simvars. Aircraft systems, especially complex add-ons that animate from their own LVars, may override them during playback. That's what the future LVar recording is for.
+- **Gear** is replayed through the handle only (`GEAR_SET` on change), because writing gear positions every frame made the gear flicker. The sim animates it at its own speed, so it can lag the recording, especially after a seek. When stopping on the ground, the aircraft stays frozen until the gear is back down.
 - **Light key events** are sent with circuit index 0, assumed to mean "all circuits".
 
 ## Future work (designed for, not built)

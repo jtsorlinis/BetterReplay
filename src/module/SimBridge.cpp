@@ -327,6 +327,7 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     freezeState_[kFreezeAlt] = v[kChannelCount + kExFreezeAlt] >= 0.5;
     freezeState_[kFreezeAtt] = v[kChannelCount + kExFreezeAtt] >= 0.5;
     if (freezeCheckFrames_ > 0 && --freezeCheckFrames_ == 0) verifyFreeze();
+    if (restoreWaitFrames_ > 0) checkRestoreGear();
 
     if (frameCount_++ == 0) {
         log::info("first data frame: lat %.5f lon %.5f alt %.0f ft, AGL %.0f ft, on ground %d, sim time %.1f",
@@ -338,11 +339,14 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
 // ---------------------------------------------------------------------------- playback
 
 void SimBridge::sendFreeze(bool on) {
+    static const char* kWhat[kFreezeCount] = {"FREEZE_LATITUDE_LONGITUDE_SET", "FREEZE_ALTITUDE_SET",
+                                              "FREEZE_ATTITUDE_SET"};
     for (int i = 0; i < kFreezeCount; ++i) {
         freezeToggled_[i] = false;
-        SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, EVT_FREEZE_SET_FIRST + i,
-                                           SIMCONNECT_GROUP_PRIORITY_HIGHEST, SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY,
-                                           on ? 1 : 0);
+        track(SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, EVT_FREEZE_SET_FIRST + i,
+                                                 SIMCONNECT_GROUP_PRIORITY_HIGHEST,
+                                                 SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY, on ? 1 : 0),
+              kWhat[i]);
     }
     wantFreeze_ = on;
     freezeCheckFrames_ = 20;  // read back IS ... FREEZE ON a few frames later
@@ -360,9 +364,10 @@ void SimBridge::verifyFreeze() {
         }
         if (!freezeToggled_[i]) {
             log::warn("%s freeze still %s after SET; sending TOGGLE", kNames[i], freezeState_[i] ? "on" : "off");
-            SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, EVT_FREEZE_TOGGLE_FIRST + i,
-                                               SIMCONNECT_GROUP_PRIORITY_HIGHEST,
-                                               SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY, 0);
+            track(SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, EVT_FREEZE_TOGGLE_FIRST + i,
+                                                     SIMCONNECT_GROUP_PRIORITY_HIGHEST,
+                                                     SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY, 0),
+                  "FREEZE_*_TOGGLE");
             freezeToggled_[i] = true;
             retry = true;
         } else {
@@ -374,7 +379,11 @@ void SimBridge::verifyFreeze() {
 
 void SimBridge::beginPlayback(const ChannelMask& present) {
     if (!h_) return;
-    SimConnect_ClearDataDefinition(h_, DEF_PLAYBACK);
+    restoreWaitFrames_ = 0;  // a new clip started while still settling a restore: playback wins
+    // The definition is rebuilt per clip (channels the clip has). Clearing one that was never
+    // defined raises UNRECOGNIZED_ID, so only clear after the first build.
+    if (playDefDefined_) track(SimConnect_ClearDataDefinition(h_, DEF_PLAYBACK), "ClearDataDefinition (playback)");
+    playDefDefined_ = true;
     playChannelCount_ = 0;
     for (int c = 0; c < kChannelCount; ++c) {
         if (kChannels[c].play != PlayMode::Set || !present.test(static_cast<size_t>(c))) continue;
@@ -406,25 +415,61 @@ void SimBridge::writePlaybackFrame(const Frame& frame) {
 void SimBridge::sendChannelEvent(int channel, double value) {
     if (!h_ || channel < 0 || channel >= kChannelCount) return;
     const DWORD state = value >= 0.5 ? 1 : 0;
-    // Parameter 0: on/off; parameter 1: circuit index (0 = all circuits).
-    SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, EVT_CHANNEL_FIRST + channel,
-                                       SIMCONNECT_GROUP_PRIORITY_HIGHEST, SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY,
-                                       state, 0);
+    // Lights: parameter 0 on/off, parameter 1 circuit index (0 = all circuits).
+    // GEAR_SET: parameter 0 is 1 = down, 0 = up; parameter 1 is ignored.
+    track(SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, EVT_CHANNEL_FIRST + channel,
+                                             SIMCONNECT_GROUP_PRIORITY_HIGHEST,
+                                             SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY, state, 0),
+          kChannels[channel].playEvent);
     log::debug("playback: %s %lu", kChannels[channel].playEvent, static_cast<unsigned long>(state));
 }
 
 void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     if (!h_) return;
-    if (restore) {
-        for (int i = 0; i < restoreChannelCount_; ++i) setBuffer_[i] = snapshot.v[restoreChannels_[i]];
-        track(SimConnect_SetDataOnSimObject(h_, DEF_RESTORE, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, 0, 0,
-                                            static_cast<DWORD>(restoreChannelCount_ * sizeof(double)), setBuffer_),
-              "SetDataOnSimObject (restore snapshot)");
-        log::info("playback: restored aircraft to lat %.5f lon %.5f alt %.0f ft", snapshot.v[kLat], snapshot.v[kLon],
-                  snapshot.v[kAlt]);
-    }
-    sendFreeze(false);
     playChannelCount_ = 0;
+    if (!restore) {
+        sendFreeze(false);
+        return;
+    }
+    for (int i = 0; i < restoreChannelCount_; ++i) setBuffer_[i] = snapshot.v[restoreChannels_[i]];
+    track(SimConnect_SetDataOnSimObject(h_, DEF_RESTORE, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, 0, 0,
+                                        static_cast<DWORD>(restoreChannelCount_ * sizeof(double)), setBuffer_),
+          "SetDataOnSimObject (restore snapshot)");
+    log::info("playback: restored aircraft to lat %.5f lon %.5f alt %.0f ft", snapshot.v[kLat], snapshot.v[kLon],
+              snapshot.v[kAlt]);
+
+    // The gear handle was just put back (GEAR_SET) and the sim animates the gear from wherever the
+    // clip left it. On the ground, stay frozen until it's back down, or the aircraft would drop
+    // onto its belly. In the air it can finish moving while flying.
+    restoreGear_[0] = snapshot.v[kGearCenter];
+    restoreGear_[1] = snapshot.v[kGearLeft];
+    restoreGear_[2] = snapshot.v[kGearRight];
+    if (snapshot.v[kOnGround] >= 0.5) {
+        restoreWaitFrames_ = kRestoreGearMaxFrames;
+        checkRestoreGear();
+    } else {
+        sendFreeze(false);
+    }
+}
+
+void SimBridge::checkRestoreGear() {
+    static const int kGear[3] = {kGearCenter, kGearLeft, kGearRight};
+    bool settled = true;
+    for (int i = 0; i < 3; ++i) {
+        const double target = restoreGear_[i];
+        const double live = input_.raw.v[kGear[i]];
+        if (std::isfinite(target) && std::isfinite(live) && std::fabs(live - target) > 0.02) settled = false;
+    }
+    if (settled) {
+        if (restoreWaitFrames_ < kRestoreGearMaxFrames) log::info("playback: gear back in place; unfreezing");
+    } else if (--restoreWaitFrames_ > 0) {
+        if (restoreWaitFrames_ == kRestoreGearMaxFrames - 1) log::info("playback: waiting for the gear before unfreezing");
+        return;
+    } else {
+        log::warn("playback: gear did not return to its pre-playback position within 20 s; unfreezing anyway");
+    }
+    restoreWaitFrames_ = 0;
+    sendFreeze(false);
 }
 
 void SimBridge::onTitleData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size) {
