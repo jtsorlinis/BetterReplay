@@ -10,9 +10,24 @@
 
 #include "ClipIndex.h"
 #include "EventDetector.h"
+#include "PlaybackController.h"
 #include "RingBuffer.h"
 
 namespace br {
+
+// What playback needs from the sim (the module implements it with SimConnect).
+class ISimOutput {
+public:
+    virtual ~ISimOutput() = default;
+    // Freeze lat/lon, altitude and attitude; `present` = channels the clip has.
+    virtual void beginPlayback(const ChannelMask& present) = 0;
+    // Write every PlayMode::Set channel in `present` (NaN values: keep the snapshot value).
+    virtual void writePlaybackFrame(const Frame& frame) = 0;
+    // A PlayMode::Event channel changed value.
+    virtual void sendChannelEvent(int channel, double value) = 0;
+    // Optionally restore the pre-playback snapshot, then unfreeze.
+    virtual void endPlayback(const Frame& snapshot, bool restore) = 0;
+};
 
 // Persistent storage for clips and index.json (the module maps this onto \work).
 class IStorage {
@@ -49,6 +64,7 @@ public:
     Engine(IStorage& storage, const EngineConfig& config = EngineConfig());
 
     void setLogger(LogFn fn, void* ctx);
+    void setSimOutput(ISimOutput* out) { out_ = out; }
 
     // Loads index.json (falling back to its .tmp copy, then to scanning *.rpl headers) and
     // reconciles it with the files actually present.
@@ -72,6 +88,17 @@ public:
     bool setKeep(const std::string& file, bool keep, std::string& error);
     bool deleteClip(const std::string& file, std::string& error);
 
+    // Playback. play() snapshots the aircraft, freezes it and starts from the beginning;
+    // playing another clip while one is active keeps the original snapshot.
+    bool play(const std::string& file, std::string& error);
+    bool pausePlayback(std::string& error);
+    bool resumePlayback(std::string& error);
+    bool seek(double t, std::string& error);
+    bool setSpeed(double speed, std::string& error);
+    bool stopPlayback(std::string& error);  // restores the snapshot and unfreezes
+    bool playbackActive() const { return playbackActive_; }
+    const PlaybackController& playback() const { return playback_; }
+
     // ---- status
     bool recording() const { return suspendReason_ == nullptr; }
     const char* suspendReason() const { return suspendReason_; }
@@ -90,6 +117,8 @@ private:
 
     const char* computeSuspendReason(bool slewActive) const;
     void recordFrame(const FrameInput& in, int64_t utcNowMs);
+    void playbackFrame(double dt);
+    void endPlayback(bool restore, const char* why);
     bool saveRange(EventType type, double startT, double endT, const DetectedEvent* ev, int64_t utcNowMs,
                    std::string& error, std::string* savedName);
     void saveIndex();
@@ -115,8 +144,20 @@ private:
     bool simReplay_ = false;
     bool relocating_ = false;
     bool slewActive_ = false;
-    bool playbackActive_ = false;  // set by playback (milestone 5)
     std::string aircraft_;
+
+    // playback
+    ISimOutput* out_ = nullptr;
+    PlaybackController playback_;
+    bool playbackActive_ = false;
+    bool haveLastRaw_ = false;
+    Frame lastRaw_;   // latest live frame (snapshot source)
+    Frame snapshot_;  // aircraft state when playback started
+    double lastEventValue_[kChannelCount] = {};
+    Frame playFrame_;
+    // After a restore the sim may report the old position for a frame or two; don't record those.
+    static constexpr int kSettleFrames = 30;
+    int settleFrames_ = 0;
 
     // recording clock
     double recTime_ = 0.0;

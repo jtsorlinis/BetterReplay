@@ -159,13 +159,21 @@ void Engine::saveIndex() {
 void Engine::onFlightLoaded(const char* what) {
     // Note: the sim also loads a default flight when returning to the menu, so this must not
     // clear atMainMenu_ (the flow events own that flag).
+    endPlayback(false, "flight loaded");
     ring_.clear();
     prevSimTime_ = NAN;
     detector_.disarm(recTime_, what);
     logf(0, "flight loaded (%s): buffer cleared", what);
 }
 
-void Engine::onRelocated(const char* what) { detector_.disarm(recTime_, what); }
+void Engine::onRelocated(const char* what) {
+    if (playbackActive_) {
+        // Our own position writes must not be mistaken for a user relocation.
+        logf(0, "ignoring '%s' during playback", what);
+        return;
+    }
+    detector_.disarm(recTime_, what);
+}
 
 void Engine::setSimRunning(bool running) {
     if (running != simRunning_) logf(0, "sim %s", running ? "running" : "stopped");
@@ -179,6 +187,7 @@ void Engine::setPauseFlags(uint32_t flags) {
 
 void Engine::setAtMainMenu(bool atMenu) {
     if (atMenu != atMainMenu_) logf(0, atMenu ? "back at the main menu" : "left the main menu");
+    if (atMenu) endPlayback(false, "main menu");
     atMainMenu_ = atMenu;
 }
 
@@ -201,6 +210,7 @@ void Engine::setAircraftTitle(const std::string& title) {
 
 const char* Engine::computeSuspendReason(bool slewActive) const {
     if (playbackActive_) return "playback";
+    if (settleFrames_ > 0) return "restoring aircraft";
     if (atMainMenu_) return "main menu";
     if (!simRunning_) return "sim not running";
     if (pauseFlags_ != 0) return kReasonPaused;
@@ -225,7 +235,13 @@ void Engine::onFrame(const FrameInput& in, int64_t utcNowMs) {
     if (!(dt > 0.0)) dt = 0.0;
     if (dt > cfg_.maxFrameDtSec) dt = cfg_.maxFrameDtSec;
 
+    if (!playbackActive_ && settleFrames_ == 0) {
+        lastRaw_ = in.raw;
+        haveLastRaw_ = true;
+    }
+
     const char* reason = computeSuspendReason(in.slewActive);
+    if (settleFrames_ > 0) --settleFrames_;
     if (reason) {
         if (suspendReason_ == nullptr || std::strcmp(reason, suspendReason_) != 0) {
             logf(0, "recording suspended: %s", reason);
@@ -234,6 +250,7 @@ void Engine::onFrame(const FrameInput& in, int64_t utcNowMs) {
         const ResumeKind kind = std::strcmp(reason, kReasonPaused) == 0 ? ResumeKind::Pause : ResumeKind::Relocate;
         if (kind == ResumeKind::Relocate || pendingResume_ == ResumeKind::None) pendingResume_ = kind;
         suspendReason_ = reason;
+        if (playbackActive_) playbackFrame(dt);
         return;
     }
     if (suspendReason_ != nullptr) {
@@ -361,12 +378,144 @@ bool Engine::deleteClip(const std::string& file, std::string& error) {
         error = "unknown clip";
         return false;
     }
+    if (playbackActive_ && playback_.file() == file) endPlayback(true, "clip deleted");
     if (!storage_.removeFile(file)) logf(1, "could not delete %s from disk (dropping it from the index anyway)", file.c_str());
     index_.remove(file);
     saveIndex();
     ++clipsRev_;
     logf(0, "deleted %s", file.c_str());
     return true;
+}
+
+// ---------------------------------------------------------------------------- playback
+
+bool Engine::play(const std::string& file, std::string& error) {
+    if (!out_) {
+        error = "playback unavailable";
+        return false;
+    }
+    if (!isSafeClipFileName(file) || !index_.find(file)) {
+        error = "unknown clip";
+        return false;
+    }
+    if (!playbackActive_) {
+        if (atMainMenu_ || !simRunning_) {
+            error = "not in a flight";
+            return false;
+        }
+        if (!haveLastRaw_) {
+            error = "no aircraft data yet";
+            return false;
+        }
+    }
+    std::vector<uint8_t> buf;
+    if (!storage_.readFile(file, buf)) {
+        error = "could not read " + file;
+        return false;
+    }
+    Clip clip;
+    std::string parseError;
+    if (!readClip(buf.data(), buf.size(), clip, &parseError)) {
+        error = file + ": " + parseError;
+        return false;
+    }
+    if (clip.frames.size() < 2) {
+        error = "clip is empty";
+        return false;
+    }
+
+    const bool switching = playbackActive_;
+    playback_.load(std::move(clip), file);
+    if (!switching) {
+        snapshot_ = lastRaw_;
+        for (int c = 0; c < kChannelCount; ++c) lastEventValue_[c] = snapshot_.v[c];
+        playbackActive_ = true;
+    }
+    out_->beginPlayback(playback_.present());
+    playback_.play();
+    logf(0, "playback %s %s (%.1f s, %zu frames, %zu/%d channels)%s", switching ? "switched to" : "of", file.c_str(),
+         playback_.duration(), playback_.clip().frames.size(), playback_.present().count(),
+         static_cast<int>(kChannelCount), switching ? "" : "; aircraft snapshot taken");
+    return true;
+}
+
+bool Engine::pausePlayback(std::string& error) {
+    if (!playbackActive_) {
+        error = "nothing is playing";
+        return false;
+    }
+    playback_.pause();
+    return true;
+}
+
+bool Engine::resumePlayback(std::string& error) {
+    if (!playbackActive_) {
+        error = "nothing is playing";
+        return false;
+    }
+    playback_.play();
+    return true;
+}
+
+bool Engine::seek(double t, std::string& error) {
+    if (!playbackActive_) {
+        error = "nothing is playing";
+        return false;
+    }
+    playback_.seek(t);
+    return true;
+}
+
+bool Engine::setSpeed(double speed, std::string& error) {
+    if (!playbackActive_) {
+        error = "nothing is playing";
+        return false;
+    }
+    playback_.setSpeed(speed);
+    return true;
+}
+
+bool Engine::stopPlayback(std::string& error) {
+    if (!playbackActive_) {
+        error = "nothing is playing";
+        return false;
+    }
+    endPlayback(true, "stopped");
+    return true;
+}
+
+void Engine::playbackFrame(double dt) {
+    playback_.advance(dt);
+    playback_.current(playFrame_);
+    if (!out_) return;
+    out_->writePlaybackFrame(playFrame_);
+    const ChannelMask& present = playback_.present();
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (kChannels[c].play != PlayMode::Event || !present.test(static_cast<size_t>(c))) continue;
+        const double v = playFrame_.v[c];
+        if (std::isnan(v) || v == lastEventValue_[c]) continue;
+        out_->sendChannelEvent(c, v);
+        lastEventValue_[c] = v;
+    }
+}
+
+void Engine::endPlayback(bool restore, const char* why) {
+    if (!playbackActive_) return;
+    if (out_) {
+        if (restore) {
+            for (int c = 0; c < kChannelCount; ++c) {
+                const double v = snapshot_.v[c];
+                if (kChannels[c].play == PlayMode::Event && !std::isnan(v) && v != lastEventValue_[c]) {
+                    out_->sendChannelEvent(c, v);
+                }
+            }
+        }
+        out_->endPlayback(snapshot_, restore);
+    }
+    playback_.unload();
+    playbackActive_ = false;
+    settleFrames_ = kSettleFrames;
+    logf(0, "playback ended (%s)%s", why, restore ? "; aircraft restored" : "");
 }
 
 // ---------------------------------------------------------------------------- status
@@ -387,6 +536,15 @@ void Engine::statusJson(std::string& out) const {
     w.kv("clipCount", static_cast<int>(index_.size()));
     w.kv("lastSaved", lastSaved_);
     w.kv("error", lastError_);
+    w.key("play").beginObject();
+    w.kv("active", playbackActive_);
+    w.kv("file", playback_.file());
+    w.kv("t", playback_.time());
+    w.kv("dur", playback_.duration());
+    w.kv("speed", playback_.speed());
+    w.kv("playing", playback_.playing());
+    w.kv("eventT", playback_.loaded() ? static_cast<double>(playback_.clip().meta.eventOffsetSec) : 0.0);
+    w.endObject();
     w.endObject();
 }
 

@@ -72,6 +72,18 @@ void CommBridge::onCommand(const char* buf, unsigned int size) {
         ok = engine_.setKeep(cmd.getString("file", ""), cmd.getBool("keep", true), err);
     } else if (op == "delete") {
         ok = engine_.deleteClip(cmd.getString("file", ""), err);
+    } else if (op == "play") {
+        ok = engine_.play(cmd.getString("file", ""), err);
+    } else if (op == "pause") {
+        ok = engine_.pausePlayback(err);
+    } else if (op == "resume") {
+        ok = engine_.resumePlayback(err);
+    } else if (op == "seek") {
+        ok = engine_.seek(cmd.getNumber("t", 0.0), err);
+    } else if (op == "speed") {
+        ok = engine_.setSpeed(cmd.getNumber("x", 1.0), err);
+    } else if (op == "stop") {
+        ok = engine_.stopPlayback(err);
     } else if (op == "setDebug") {
         log::g_debug = cmd.getBool("on", false);
         log::info("debug logging %s", log::g_debug ? "on" : "off");

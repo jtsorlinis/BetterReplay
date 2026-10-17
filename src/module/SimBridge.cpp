@@ -1,5 +1,6 @@
 #include "SimBridge.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -88,6 +89,32 @@ bool SimBridge::open() {
         track(SimConnect_AddToDataDefinition(h_, DEF_RECORD, e.simvar, e.units, SIMCONNECT_DATATYPE_FLOAT64), e.simvar);
     }
     track(SimConnect_AddToDataDefinition(h_, DEF_TITLE, "TITLE", nullptr, SIMCONNECT_DATATYPE_STRING256), "TITLE");
+
+    // Restore definition: everything playback writes, plus body velocities so the aircraft
+    // continues where it was when playback started.
+    for (int c = 0; c < kChannelCount; ++c) {
+        const bool velocity = c >= kVelBodyX && c <= kRotVelBodyZ;
+        if (kChannels[c].play != PlayMode::Set && !velocity) continue;
+        restoreChannels_[restoreChannelCount_++] = c;
+        track(SimConnect_AddToDataDefinition(h_, DEF_RESTORE, kChannels[c].simvar, kChannels[c].units,
+                                             SIMCONNECT_DATATYPE_FLOAT64),
+              kChannels[c].simvar);
+    }
+
+    // Key events used by playback (names verified against the 2024 Key Events docs).
+    static const char* kFreezeSet[kFreezeCount] = {"FREEZE_LATITUDE_LONGITUDE_SET", "FREEZE_ALTITUDE_SET",
+                                                   "FREEZE_ATTITUDE_SET"};
+    static const char* kFreezeToggle[kFreezeCount] = {"FREEZE_LATITUDE_LONGITUDE_TOGGLE", "FREEZE_ALTITUDE_TOGGLE",
+                                                      "FREEZE_ATTITUDE_TOGGLE"};
+    for (int i = 0; i < kFreezeCount; ++i) {
+        track(SimConnect_MapClientEventToSimEvent(h_, EVT_FREEZE_SET_FIRST + i, kFreezeSet[i]), kFreezeSet[i]);
+        track(SimConnect_MapClientEventToSimEvent(h_, EVT_FREEZE_TOGGLE_FIRST + i, kFreezeToggle[i]), kFreezeToggle[i]);
+    }
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (kChannels[c].play != PlayMode::Event || !kChannels[c].playEvent) continue;
+        track(SimConnect_MapClientEventToSimEvent(h_, EVT_CHANNEL_FIRST + c, kChannels[c].playEvent),
+              kChannels[c].playEvent);
+    }
 
     track(SimConnect_RequestDataOnSimObject(h_, REQ_RECORD, DEF_RECORD, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT,
                                             SIMCONNECT_PERIOD_SIM_FRAME),
@@ -296,12 +323,108 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     input_.touchdownNormalVelFps = v[kChannelCount + kExTouchdownNormalVel];
     input_.fallbackDtSec = pendingDt_;
     pendingDt_ = 0.0f;
+    freezeState_[kFreezeLatLon] = v[kChannelCount + kExFreezeLatLon] >= 0.5;
+    freezeState_[kFreezeAlt] = v[kChannelCount + kExFreezeAlt] >= 0.5;
+    freezeState_[kFreezeAtt] = v[kChannelCount + kExFreezeAtt] >= 0.5;
+    if (freezeCheckFrames_ > 0 && --freezeCheckFrames_ == 0) verifyFreeze();
 
     if (frameCount_++ == 0) {
         log::info("first data frame: lat %.5f lon %.5f alt %.0f ft, AGL %.0f ft, on ground %d, sim time %.1f",
                   v[kLat], v[kLon], v[kAlt], v[kAgl], v[kOnGround] >= 0.5 ? 1 : 0, input_.simTimeSec);
     }
     engine_.onFrame(input_, utcNowMs());
+}
+
+// ---------------------------------------------------------------------------- playback
+
+void SimBridge::sendFreeze(bool on) {
+    for (int i = 0; i < kFreezeCount; ++i) {
+        freezeToggled_[i] = false;
+        SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, EVT_FREEZE_SET_FIRST + i,
+                                           SIMCONNECT_GROUP_PRIORITY_HIGHEST, SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY,
+                                           on ? 1 : 0);
+    }
+    wantFreeze_ = on;
+    freezeCheckFrames_ = 20;  // read back IS ... FREEZE ON a few frames later
+}
+
+// The *_SET events' parameter isn't documented, so confirm the result and fall back to the
+// toggle events if a SET didn't take.
+void SimBridge::verifyFreeze() {
+    static const char* kNames[kFreezeCount] = {"lat/lon", "altitude", "attitude"};
+    bool retry = false;
+    for (int i = 0; i < kFreezeCount; ++i) {
+        if (freezeState_[i] == wantFreeze_) {
+            log::debug("%s freeze %s confirmed", kNames[i], wantFreeze_ ? "on" : "off");
+            continue;
+        }
+        if (!freezeToggled_[i]) {
+            log::warn("%s freeze still %s after SET; sending TOGGLE", kNames[i], freezeState_[i] ? "on" : "off");
+            SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, EVT_FREEZE_TOGGLE_FIRST + i,
+                                               SIMCONNECT_GROUP_PRIORITY_HIGHEST,
+                                               SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY, 0);
+            freezeToggled_[i] = true;
+            retry = true;
+        } else {
+            log::error("could not turn %s freeze %s", kNames[i], wantFreeze_ ? "on" : "off");
+        }
+    }
+    if (retry) freezeCheckFrames_ = 20;
+}
+
+void SimBridge::beginPlayback(const ChannelMask& present) {
+    if (!h_) return;
+    SimConnect_ClearDataDefinition(h_, DEF_PLAYBACK);
+    playChannelCount_ = 0;
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (kChannels[c].play != PlayMode::Set || !present.test(static_cast<size_t>(c))) continue;
+        playChannels_[playChannelCount_++] = c;
+        track(SimConnect_AddToDataDefinition(h_, DEF_PLAYBACK, kChannels[c].simvar, kChannels[c].units,
+                                             SIMCONNECT_DATATYPE_FLOAT64),
+              kChannels[c].simvar);
+    }
+    firstPlaybackWrite_ = true;
+    sendFreeze(true);
+    log::info("playback: writing %d channels per frame; freezing position/altitude/attitude", playChannelCount_);
+}
+
+void SimBridge::writePlaybackFrame(const Frame& frame) {
+    if (!h_ || playChannelCount_ == 0) return;
+    for (int i = 0; i < playChannelCount_; ++i) {
+        const int c = playChannels_[i];
+        const double v = frame.v[c];
+        setBuffer_[i] = std::isnan(v) ? input_.raw.v[c] : v;  // gap in the clip: hold the live value
+    }
+    const HRESULT hr = SimConnect_SetDataOnSimObject(h_, DEF_PLAYBACK, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, 0, 0,
+                                                     static_cast<DWORD>(playChannelCount_ * sizeof(double)), setBuffer_);
+    if (firstPlaybackWrite_) {
+        firstPlaybackWrite_ = false;
+        track(hr, "SetDataOnSimObject (playback frame)");
+    }
+}
+
+void SimBridge::sendChannelEvent(int channel, double value) {
+    if (!h_ || channel < 0 || channel >= kChannelCount) return;
+    const DWORD state = value >= 0.5 ? 1 : 0;
+    // Parameter 0: on/off; parameter 1: circuit index (0 = all circuits).
+    SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, EVT_CHANNEL_FIRST + channel,
+                                       SIMCONNECT_GROUP_PRIORITY_HIGHEST, SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY,
+                                       state, 0);
+    log::debug("playback: %s %lu", kChannels[channel].playEvent, static_cast<unsigned long>(state));
+}
+
+void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
+    if (!h_) return;
+    if (restore) {
+        for (int i = 0; i < restoreChannelCount_; ++i) setBuffer_[i] = snapshot.v[restoreChannels_[i]];
+        track(SimConnect_SetDataOnSimObject(h_, DEF_RESTORE, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, 0, 0,
+                                            static_cast<DWORD>(restoreChannelCount_ * sizeof(double)), setBuffer_),
+              "SetDataOnSimObject (restore snapshot)");
+        log::info("playback: restored aircraft to lat %.5f lon %.5f alt %.0f ft", snapshot.v[kLat], snapshot.v[kLon],
+                  snapshot.v[kAlt]);
+    }
+    sendFreeze(false);
+    playChannelCount_ = 0;
 }
 
 void SimBridge::onTitleData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size) {

@@ -1,5 +1,5 @@
 // SimConnect adapter: builds data definitions from the channel table, subscribes to system and
-// flow events, and feeds every sim frame into the Engine.
+// flow events, feeds every sim frame into the Engine, and drives the aircraft during playback.
 #pragma once
 
 #include <MSFS/MSFS_WindowsTypes.h>
@@ -9,7 +9,7 @@
 
 namespace br {
 
-class SimBridge {
+class SimBridge : public ISimOutput {
 public:
     explicit SimBridge(Engine& engine) : engine_(engine) {}
 
@@ -19,8 +19,20 @@ public:
 
     bool connected() const { return h_ != 0; }
 
+    // ISimOutput
+    void beginPlayback(const ChannelMask& present) override;
+    void writePlaybackFrame(const Frame& frame) override;
+    void sendChannelEvent(int channel, double value) override;
+    void endPlayback(const Frame& snapshot, bool restore) override;
+
 private:
-    enum DataDef : DWORD { DEF_RECORD = 1, DEF_TITLE = 2 };
+    enum DataDef : DWORD { DEF_RECORD = 1, DEF_TITLE = 2, DEF_PLAYBACK = 3, DEF_RESTORE = 4 };
+    enum ClientEvent : DWORD {
+        EVT_FREEZE_SET_FIRST = 100,    // + Freeze
+        EVT_FREEZE_TOGGLE_FIRST = 110, // + Freeze
+        EVT_CHANNEL_FIRST = 200,       // + channel index, for PlayMode::Event channels
+    };
+    enum Freeze { kFreezeLatLon, kFreezeAlt, kFreezeAtt, kFreezeCount };
     enum Request : DWORD { REQ_RECORD = 1, REQ_TITLE = 2 };
     enum SysEvent : DWORD {
         EVT_FLIGHT_LOADED = 1,
@@ -42,6 +54,8 @@ private:
     void onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* data, DWORD size);
     void onTitleData(const SIMCONNECT_RECV_SIMOBJECT_DATA* data, DWORD size);
     void heartbeat();
+    void sendFreeze(bool on);
+    void verifyFreeze();
 
     // Remembers what each SimConnect call was so exceptions can be logged meaningfully.
     void track(HRESULT hr, const char* what);
@@ -60,6 +74,18 @@ private:
     bool sizeWarned_ = false;
     bool simReplay_ = false;
     bool rtc_ = false;
+
+    // playback
+    int playChannels_[kChannelCount] = {};     // PlayMode::Set channels present in the clip
+    int playChannelCount_ = 0;
+    int restoreChannels_[kChannelCount] = {};  // PlayMode::Set channels + body velocities
+    int restoreChannelCount_ = 0;
+    double setBuffer_[kChannelCount] = {};
+    bool firstPlaybackWrite_ = false;
+    bool wantFreeze_ = false;
+    bool freezeState_[kFreezeCount] = {};
+    bool freezeToggled_[kFreezeCount] = {};
+    int freezeCheckFrames_ = 0;
 
     struct Packet {
         DWORD id;

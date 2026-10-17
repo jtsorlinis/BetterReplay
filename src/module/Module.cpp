@@ -30,6 +30,7 @@ struct App {
     void init() {
         br::log::info("BetterReplay %s starting", kVersion);
         engine.setLogger(&engineLog, nullptr);
+        engine.setSimOutput(&sim);
         files.probe();
         engine.init();
         sim.open();
