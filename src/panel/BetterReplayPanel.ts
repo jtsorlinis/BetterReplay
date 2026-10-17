@@ -615,6 +615,7 @@ class BetterReplayPanel extends UIElement {
         };
         track.addEventListener("mousedown", (e: MouseEvent) => {
             this.seekDragging = true;
+            track.classList.add("dragging");
             this.seekFraction = fractionAt(e);
             this.renderSeek(this.seekFraction);
         });
@@ -626,6 +627,7 @@ class BetterReplayPanel extends UIElement {
         window.addEventListener("mouseup", () => {
             if (!this.seekDragging) return;
             this.seekDragging = false;
+            track.classList.remove("dragging");
             const dur = this.status ? this.status.play.dur : 0;
             this.send({ op: "seek", t: this.seekFraction * dur });
         });
@@ -983,7 +985,9 @@ class BetterReplayPanel extends UIElement {
     }
 
     renderSeek(fraction: number): void {
-        byId("br-seek-fill").style.width = (fraction * 100).toFixed(2) + "%";
+        const percent = (fraction * 100).toFixed(2) + "%";
+        byId("br-seek-fill").style.width = percent;
+        byId("br-seek-thumb").style.left = percent;
     }
 
     renderPlayer(p: PlayState): void {
