@@ -10,6 +10,7 @@ Work through these in order. Each step says what to do, what you should see, and
   - Debug builds log every command and freeze check.
   - `-Package` runs `fspackagetool` once to compile the panel `.spb`. It briefly starts the sim in builder mode.
   - **Expect:** `cached InGamePanel_BetterReplay.spb in package\spb\` and no `No compiled panel` warning.
+  - **If it stops with "Steam still thinks MSFS 2024 is running":** click Stop on the game in Steam, or exit and restart Steam, then run it again.
   - **If the `.spb` step fails:** read `%APPDATA%\Microsoft Flight Simulator 2024\BuilderLogError.txt` and note the error. The package still installs without the panel. Use the console log for everything below, and check steps 2–9 via the files in the work folder.
 - [ ] Check that `…\Community\betterreplay-recorder\` contains `layout.json`, `manifest.json`, `modules\BetterReplay.wasm`, `html_ui\…` and `InGamePanels\InGamePanel_BetterReplay.spb`.
 - [ ] Enable Developer Mode (Options → General → Developers). Open the Console from the DevMode toolbar (Tools → Console) and filter on `BetterReplay`.

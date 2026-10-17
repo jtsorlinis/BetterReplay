@@ -41,6 +41,8 @@ The output is `dist\Community\betterreplay-recorder`. To install by hand, copy t
 
 If the `.spb` hasn't been built, the recorder still runs and saves clips, but the toolbar panel won't appear. `build.ps1` warns about this.
 
+`-Package` needs Steam to agree that MSFS 2024 isn't running. If a previous sim instance ended abnormally (crash, or killed in Task Manager), Steam can keep its "running" flag, and then it refuses with *"game is already running"*. `build.ps1` checks for this first. To clear it, click **Stop** on MSFS 2024 in your Steam library, or exit Steam completely and restart it.
+
 You can also build the package in DevMode: **File → Open project…** → `build\package\BetterReplay.xml` (created by `build.ps1`) → **Build**.
 
 ## Using it

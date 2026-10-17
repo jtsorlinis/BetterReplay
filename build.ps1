@@ -172,6 +172,21 @@ function New-PackageStage([string]$Wasm, [string]$PanelJs) {
     return $stage
 }
 
+# fspackagetool asks Steam to start FlightSimulator2024.exe in package-builder mode. Steam
+# refuses ("game is already running") if the sim is open, or if a previous instance exited
+# abnormally and Steam never cleared its running flag.
+function Assert-PackageToolCanRun {
+    if (Get-Process -Name 'FlightSimulator2024' -ErrorAction SilentlyContinue) {
+        throw 'Close Microsoft Flight Simulator 2024 first: fspackagetool starts its own copy in package-builder mode.'
+    }
+    $steamApp = Get-ItemProperty 'HKCU:\Software\Valve\Steam\Apps\2537590' -ErrorAction SilentlyContinue
+    if ($steamApp -and $steamApp.Running -eq 1) {
+        throw ('Steam still thinks MSFS 2024 is running, but it is not (an earlier instance ended abnormally), ' +
+            'so it would refuse to start the package builder. In Steam, click Stop on Microsoft Flight Simulator 2024, ' +
+            'or exit Steam completely and start it again, then re-run this build.')
+    }
+}
+
 function Get-SpbSourceHash {
     return (Get-FileHash -Algorithm SHA256 $SpbSource).Hash
 }
@@ -296,6 +311,7 @@ function Install-Package([string]$PackageDir) {
 
 # -------------------------------------------------------------------------------------- main
 
+if ($Package) { Assert-PackageToolCanRun }  # fail fast, before the slower build steps
 $msbuild = Find-MSBuild
 if (-not $SkipTests) { Invoke-Tests $msbuild }
 $wasm = Build-Module $msbuild
