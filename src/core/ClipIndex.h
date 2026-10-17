@@ -26,6 +26,9 @@ struct ClipEntry {
 
 ClipEntry makeEntry(const std::string& file, const ClipMeta& meta, double durationSec);
 
+class JsonWriter;
+void writeClipEntryJson(JsonWriter& w, const ClipEntry& e);  // one entry as a JSON object
+
 class ClipIndex {
 public:
     const std::vector<ClipEntry>& clips() const { return clips_; }  // newest first

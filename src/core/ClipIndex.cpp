@@ -84,26 +84,28 @@ std::vector<std::string> ClipIndex::enforceRetention(size_t maxAuto) {
     return removed;
 }
 
+void writeClipEntryJson(JsonWriter& w, const ClipEntry& e) {
+    w.beginObject();
+    w.kv("file", e.file);
+    w.kv("event", eventName(e.event));
+    w.kv("utc", formatIsoUtc(e.utcStartMs));
+    w.kv("utcMs", e.utcStartMs);
+    w.kv("aircraft", e.aircraft);
+    w.kv("durationSec", e.durationSec);
+    w.kv("touchdownVsFpm", e.touchdownVsFpm);
+    w.kv("peakG", e.peakG);
+    w.kv("bounces", e.bounces);
+    w.kv("keep", e.keep);
+    w.kv("auto", e.autoClip);
+    w.endObject();
+}
+
 void ClipIndex::toJson(std::string& out) const {
     JsonWriter w(out);
     w.beginObject();
     w.kv("version", 1);
     w.key("clips").beginArray();
-    for (const ClipEntry& e : clips_) {
-        w.beginObject();
-        w.kv("file", e.file);
-        w.kv("event", eventName(e.event));
-        w.kv("utc", formatIsoUtc(e.utcStartMs));
-        w.kv("utcMs", e.utcStartMs);
-        w.kv("aircraft", e.aircraft);
-        w.kv("durationSec", e.durationSec);
-        w.kv("touchdownVsFpm", e.touchdownVsFpm);
-        w.kv("peakG", e.peakG);
-        w.kv("bounces", e.bounces);
-        w.kv("keep", e.keep);
-        w.kv("auto", e.autoClip);
-        w.endObject();
-    }
+    for (const ClipEntry& e : clips_) writeClipEntryJson(w, e);
     w.endArray();
     w.endObject();
 }

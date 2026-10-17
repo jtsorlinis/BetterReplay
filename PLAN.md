@@ -42,13 +42,17 @@ src/core/                       # C++17, no SDK headers, compiles natively and i
   Interp.h/.cpp                 # lerp, shortest-angle, step
   PlaybackController.h/.cpp     # playhead/speed/seek → interpolated frame
   Json.h/.cpp                   # tiny JSON writer + parser (commands, index.json)
+  Engine.h/.cpp                 # orchestration: suspend/resume, 30 Hz decimation, detection → save,
+                                #   index persistence/rebuild, retention, commands, status JSON
+                                #   (IStorage interface; unit-tested end to end with in-memory storage)
 src/module/                     # WASM adapter (SDK-dependent, thin)
   Module.cpp                    # module_init/deinit/update callbacks
   SimBridge.h/.cpp              # SimConnect defs built from channel table, events, freeze, set data
   CommBridge.h/.cpp             # CommBus command routing + JSON replies
-  FileStore.h/.cpp              # \work stdio I/O, index persistence, deletes
-  Log.h                         # "[BetterReplay]" console logging with levels
+  FileStore.h/.cpp              # \work stdio I/O (IStorage)
+  Log.h/.cpp                    # "[BetterReplay]" console logging with levels
   BetterReplayModule.vcxproj    # MSFS|MSFS2024
+tools/check-wasm.mjs            # post-build check: required exports present, only known host imports
 src/panel/                      # TypeScript, erasable syntax only → JS via Node 24 stripTypeScriptTypes
   BetterReplayPanel.ts/.html/.css
 tests/                          # native x64 vcxproj, built with MSBuild (Build Tools 2022)
