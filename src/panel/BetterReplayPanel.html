@@ -23,27 +23,44 @@
       <!-- One screen at a time (.view-main / .view-clips / .view-player on the root); the control
            setup takes over the whole panel while it's offered or running (.setup-mode). -->
       <div class="br-root view-main" id="br-root">
-        <!-- main: the recorder's status -->
+        <!-- main: the recorder's status, the aircraft, and the way to the clips -->
         <section class="br-main" id="br-main">
           <div class="br-status">
-            <span class="br-dot" id="br-dot"></span>
-            <strong class="br-state" id="br-state">Connecting...</strong>
-            <span class="br-detail" id="br-detail"></span>
-            <div class="br-facts">
-              <div class="br-fact"><span class="br-fact-label">Buffer</span><span class="br-fact-value" id="br-buffer">0:00</span></div>
-              <div class="br-fact"><span class="br-fact-label">Clips</span><span class="br-fact-value" id="br-count">0</span></div>
+            <div class="br-hero">
+              <span class="br-dot" id="br-dot"></span>
+              <strong class="br-state" id="br-state">Connecting...</strong>
+              <span class="br-detail" id="br-detail"></span>
             </div>
-            <span class="br-aircraft" id="br-aircraft"></span>
-            <button type="button" class="br-btn br-wide" id="br-save">Save last 5 minutes</button>
+            <div class="br-buffer">
+              <div class="br-buffer-head">
+                <span class="br-label">Buffer</span>
+                <span class="br-buffer-time"><strong id="br-buffer">0:00</strong> <span id="br-buffer-max"></span></span>
+              </div>
+              <div class="br-meter"><div class="br-meter-fill" id="br-buffer-fill"></div></div>
+            </div>
+            <!-- says how a save went, in place: Saving..., Saved / Couldn't save, then back -->
+            <button type="button" class="br-btn br-save" id="br-save">
+              <span class="br-save-icon" id="br-save-icon"></span>
+              <span id="br-save-label">Save last 5 minutes</span>
+            </button>
           </div>
           <div class="br-error hidden" id="br-error"></div>
-          <div class="br-controls-line hidden" id="br-controls">
-            <span id="br-controls-text"></span>
-            <button type="button" class="br-btn br-small" id="br-setup-run">Set up</button>
-            <button type="button" class="br-btn br-small br-danger hidden" id="br-setup-reset">Reset</button>
+          <div class="br-plane hidden" id="br-plane">
+            <span class="br-plane-icon">
+              <svg viewBox="0 0 24 24"><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z" fill="currentColor"/></svg>
+            </span>
+            <div class="br-plane-text">
+              <span class="br-aircraft" id="br-aircraft"></span>
+              <!-- whether replays can move its controls -->
+              <span class="br-pill hidden" id="br-controls-pill"></span>
+            </div>
+            <button type="button" class="br-btn br-setup-run hidden" id="br-setup-run">Set up</button>
           </div>
-          <button type="button" class="br-btn br-big br-primary br-open-clips" id="br-open-clips">
-            <span>Saved clips</span><span class="br-open-count" id="br-open-count"></span>
+          <button type="button" class="br-btn br-open-clips" id="br-open-clips">
+            <svg viewBox="0 0 24 24"><path d="M4 5h3v3H4zm5 0h11v3H9zM4 10.5h3v3H4zm5 0h11v3H9zM4 16h3v3H4zm5 0h11v3H9z" fill="currentColor"/></svg>
+            <span class="br-open-label">Saved clips</span>
+            <span class="br-open-count" id="br-open-count"></span>
+            <svg class="br-chevron" viewBox="0 0 24 24"><path d="M8.6 5.4 10 4l8 8-8 8-1.4-1.4 6.6-6.6z" fill="currentColor"/></svg>
           </button>
         </section>
 

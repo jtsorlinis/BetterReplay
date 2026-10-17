@@ -62,7 +62,7 @@ const commBusMock = `
   }
   function status() {
     return { v: 1, rec: state.rec && !state.play.active, why: state.play.active ? 'playback' : state.why,
-      armed: state.armed, armIn: state.armIn, phase: state.phase, bufferSec: state.buffer,
+      armed: state.armed, armIn: state.armIn, phase: state.phase, bufferSec: state.buffer, bufferMax: 300,
       aircraft: 'Airbus A320neo', clipsRev: state.rev, clipCount: clips.length, lastSaved: '', error: '',
       play: Object.assign({}, state.play), setup: window.harnessSetup.status() };
   }

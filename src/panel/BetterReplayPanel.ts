@@ -67,6 +67,7 @@ interface Status {
     armIn: number;
     phase: string;
     bufferSec: number;
+    bufferMax?: number;  // how much the buffer holds
     aircraft: string;
     clipsRev: number;
     clipCount: number;
@@ -178,15 +179,11 @@ const ICON_PLAY = '<svg viewBox="0 0 24 24"><path d="M8 5.6v12.8a1 1 0 0 0 1.53.
 const ICON_PAUSE = '<svg viewBox="0 0 24 24"><rect x="6" y="5" width="4.4" height="14" rx="1.2" fill="currentColor"/>' +
     '<rect x="13.6" y="5" width="4.4" height="14" rx="1.2" fill="currentColor"/></svg>';
 const ICON_REPLAY = '<svg viewBox="0 0 24 24"><path d="M12 5V2L7.5 6 12 10V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z" fill="currentColor"/></svg>';
+const ICON_SAVE = '<svg viewBox="0 0 24 24"><path d="M11 3h2v9.2l3.3-3.3 1.4 1.4-5.7 5.7-5.7-5.7 1.4-1.4 3.3 3.3V3zM5 18h14v2H5z" fill="currentColor"/></svg>';
+const ICON_CHECK = '<svg viewBox="0 0 24 24"><path d="M9.5 16.2 5.3 12l-1.4 1.4 5.6 5.6L20.1 8.4 18.7 7z" fill="currentColor"/></svg>';
+const ICON_CROSS = '<svg viewBox="0 0 24 24"><path d="M18.3 7.1 16.9 5.7 12 10.6 7.1 5.7 5.7 7.1l4.9 4.9-4.9 4.9 1.4 1.4 4.9-4.9 4.9 4.9 1.4-1.4-4.9-4.9z" fill="currentColor"/></svg>';
 const ICON_TRASH = '<svg viewBox="0 0 24 24"><path d="M9 3h6l1 2h4v2H4V5h4l1-2zM6 9h12l-1 11a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L6 9z' +
     'm4 2v8h1.6v-8H10zm3.4 0v8H15v-8h-1.6z" fill="currentColor"/></svg>';
-
-const CONTROL_STATES: { [state: string]: string } = {
-    ok: "ok",
-    failed: "not replayable",
-    skipped: "skipped",
-    pending: "not set up",
-};
 
 // ---- helpers
 
@@ -369,6 +366,8 @@ class BetterReplayPanel extends UIElement {
     declare confirmFile: string;
     declare confirmTimer: number;
     declare toastTimer: number;
+    declare saveState: string;  // the save button: "", "saving", "saved" or "failed"
+    declare saveTimer: number;
     declare view: string;  // "main" or "clips" (the player shows whenever a clip plays)
     declare setupButtons: string;
     declare shownPrompt: string;   // the setup's main text as shown, and the step and phase it was in
@@ -377,8 +376,6 @@ class BetterReplayPanel extends UIElement {
     declare tickOn: boolean;
     declare holding: boolean;      // showing a done instruction for a moment
     declare heldStatus: Status | null;
-    declare resetConfirm: boolean;
-    declare resetTimer: number;
     declare handleStatus: (payload: string) => void;
     declare handleClips: (payload: string) => void;
     declare handleReply: (payload: string) => void;
@@ -403,6 +400,8 @@ class BetterReplayPanel extends UIElement {
         this.confirmFile = "";
         this.confirmTimer = 0;
         this.toastTimer = 0;
+        this.saveState = "";
+        this.saveTimer = 0;
         this.view = "main";
         this.setupButtons = "";
         this.shownPrompt = "";
@@ -411,8 +410,6 @@ class BetterReplayPanel extends UIElement {
         this.tickOn = false;
         this.holding = false;
         this.heldStatus = null;
-        this.resetConfirm = false;
-        this.resetTimer = 0;
         this.handleStatus = (payload: string) => this.onStatus(payload);
         this.handleClips = (payload: string) => this.onClips(payload);
         this.handleReply = (payload: string) => this.onReply(payload);
@@ -536,14 +533,12 @@ class BetterReplayPanel extends UIElement {
     onReply(payload: string): void {
         const r = parsePayload<Reply>(payload);
         if (!r) return;
-        if (!r.ok) {
+        if (r.op === "saveLast") {
+            this.setSaveState(r.ok ? "saved" : "failed", r.error);
+        } else if (!r.ok) {
             this.toast(r.error || "Command failed");
-        } else if (r.op === "saveLast") {
-            this.toast("Saved the last few minutes");
         } else if (r.op === "delete") {
             this.toast("Clip deleted");
-        } else if (r.op === "setupReset") {
-            this.toast("Control profile removed for this aircraft");
         }
         this.send({ op: "status" });
     }
@@ -551,7 +546,11 @@ class BetterReplayPanel extends UIElement {
     // ---- controls
 
     bindControls(): void {
-        byId("br-save").addEventListener("click", () => this.send({ op: "saveLast" }));
+        byId("br-save").addEventListener("click", () => {
+            if (this.saveState) return;  // one save at a time; the button says how it went
+            this.setSaveState("saving", "");
+            this.send({ op: "saveLast" });
+        });
         byId("br-open-clips").addEventListener("click", () => this.showView("clips"));
         byId("br-back").addEventListener("click", () => this.showView("main"));
         byId("br-stop").addEventListener("click", () => {
@@ -598,20 +597,6 @@ class BetterReplayPanel extends UIElement {
             if (button) this.setupAction(button.getAttribute("data-a") || "");
         });
         byId("br-setup-run").addEventListener("click", () => this.send({ op: "setupStart" }));
-        byId("br-setup-reset").addEventListener("click", () => {
-            window.clearTimeout(this.resetTimer);
-            if (this.resetConfirm) {
-                this.resetConfirm = false;
-                this.send({ op: "setupReset" });
-            } else {
-                this.resetConfirm = true;
-                this.resetTimer = window.setTimeout(() => {
-                    this.resetConfirm = false;
-                    if (this.status) this.renderSetup(this.status);
-                }, 3000);
-            }
-            if (this.status) this.renderSetup(this.status);
-        });
 
         const list = byId("br-list");
         list.addEventListener("click", (e: Event) => {
@@ -688,6 +673,7 @@ class BetterReplayPanel extends UIElement {
 
     renderOffline(): void {
         byId("br-dot").className = "br-dot offline";
+        byId("br-main").className = "br-main offline";
         byId("br-state").textContent = "No response from the recorder";
         byId("br-detail").textContent = "Is the betterreplay-recorder package installed?";
     }
@@ -709,22 +695,59 @@ class BetterReplayPanel extends UIElement {
             detail = capitalize(s.why);
         }
         byId("br-dot").className = "br-dot " + dot;
+        byId("br-main").className = "br-main " + (dot || "paused");  // colours the buffer meter
         byId("br-state").textContent = state;
         byId("br-detail").textContent = detail;
+        // The buffer fills up to what it holds, then rolls.
+        const max = s.bufferMax || 0;
         byId("br-buffer").textContent = formatClock(s.bufferSec);
-        byId("br-count").textContent = String(s.clipCount);
+        byId("br-buffer-max").textContent = max > 0 ? "of " + formatClock(max) : "";
+        byId("br-buffer-fill").style.width = (max > 0 ? Math.min(1, s.bufferSec / max) * 100 : 0).toFixed(1) + "%";
+        this.renderSave();
         byId("br-open-count").textContent = String(s.clipCount);
         byId("br-clips-count").textContent = String(s.clipCount);
-        byId("br-aircraft").textContent = s.aircraft || "";
-        byId<HTMLButtonElement>("br-save").disabled = s.play.active || s.bufferSec < 1;
 
         const error = byId("br-error");
         error.textContent = s.error;
         error.classList.toggle("hidden", !s.error);
     }
 
-    // While the setup is offered or running it takes the whole panel; otherwise there's a line
-    // under the status with the aircraft's profile.
+    // The save button tells how the save went, in place: "Saving...", then "Saved" (or "Couldn't
+    // save") for a moment, then back to itself.
+    setSaveState(state: string, error: string): void {
+        this.saveState = state;
+        window.clearTimeout(this.saveTimer);
+        if (state) {
+            // A save that gets no reply gives the button back too.
+            this.saveTimer = window.setTimeout(() => this.setSaveState("", ""), state === "saving" ? 5000 : 2200);
+        }
+        byId("br-save").title = state === "failed" ? error : "";
+        this.renderSave();
+    }
+
+    renderSave(): void {
+        const button = byId<HTMLButtonElement>("br-save");
+        const state = this.saveState;
+        let label = "Save last 5 minutes";
+        const max = this.status ? this.status.bufferMax || 0 : 0;
+        if (max > 0) {
+            const minutes = Math.round(max / 60);
+            label = "Save last " + (minutes === 1 ? "minute" : minutes + " minutes");
+        }
+        if (state === "saving") label = "Saving...";
+        else if (state === "saved") label = "Saved";
+        else if (state === "failed") label = "Couldn't save";
+        byId("br-save-label").textContent = label;
+        if (button.getAttribute("data-state") !== state) {
+            button.setAttribute("data-state", state);
+            button.className = "br-btn br-save" + (state ? " " + state : "");
+            byId("br-save-icon").innerHTML = state === "saved" ? ICON_CHECK : state === "failed" ? ICON_CROSS : ICON_SAVE;
+        }
+        // Not disabled while it shows the outcome, so it keeps its colour.
+        button.disabled = !state && (!this.status || this.status.play.active || this.status.bufferSec < 1);
+    }
+
+    // While the setup is offered or running it takes the whole panel.
     renderSetup(s: Status): void {
         if (this.holding) {
             this.heldStatus = s;  // shown once the done instruction has had its moment
@@ -814,7 +837,7 @@ class BetterReplayPanel extends UIElement {
         const active = !!(setup && setup.active);
         this.shownStep = active && setup ? setup.step || "" : "";
         this.shownPhase = active ? phase : "";
-        this.renderControlsLine(s, show);
+        this.renderPlane(s);
     }
 
     // Whether what the panel shows the pilot to do has just been done: the setup moved on within
@@ -869,37 +892,37 @@ class BetterReplayPanel extends UIElement {
         setHtml("br-setup-minor", minor);
     }
 
-    renderControlsLine(s: Status, setupShown: boolean): void {
+    // The aircraft card: its name, and whether replays can move its controls.
+    renderPlane(s: Status): void {
         const setup = s.setup;
-        const line = byId("br-controls");
-        line.classList.toggle("hidden", !setup || setupShown);
-        if (!setup || setupShown) return;
-        let text = "Replay controls: ";
-        if (setup.have === "none") {
-            text += "not set up for this aircraft";
-        } else if (setup.have === "declined") {
-            text += "setup declined for this aircraft";
-        } else {
-            const parts: string[] = [];
-            for (let i = 0; i < setup.controls.length; ++i) {
-                const c = setup.controls[i];
-                if (c.state === "absent") continue;
-                parts.push(c.control + " " + (CONTROL_STATES[c.state] || c.state));
-            }
-            text += parts.join(" · ");
+        byId("br-plane").classList.toggle("hidden", !s.aircraft && !setup);
+        byId("br-aircraft").textContent = s.aircraft || "Unknown aircraft";
+        byId("br-controls-pill").classList.toggle("hidden", !setup);
+        byId("br-setup-run").classList.toggle("hidden", !setup);
+        if (!setup) return;
+        // Configured: every control the aircraft has replays. Partly: some do, some were skipped,
+        // didn't pass, or are still to do (the gear, after takeoff).
+        const profile = setup.have === "partial" || setup.have === "complete";
+        let present = 0;
+        let ok = 0;
+        const lines: string[] = [];
+        for (let i = 0; i < setup.controls.length; ++i) {
+            const c = setup.controls[i];
+            if (c.state === "absent") continue;
+            ++present;
+            if (c.state === "ok") ++ok;
+            lines.push((CONTROL_LABELS[c.control] || c.control) + ": " +
+                (c.state === "ok" ? c.method : RESULT_LABELS[c.state] || c.state));
         }
-        byId("br-controls-text").textContent = text;
-        byId("br-controls-text").title = setup.controls
-            .filter((c: SetupControl) => !!c.method)
-            .map((c: SetupControl) => c.control + ": " + c.method)
-            .join("\n");
+        const level = !profile ? "missing" : ok === present ? "ok" : ok > 0 ? "partial" : "missing";
+        const pill = byId("br-controls-pill");
+        pill.className = "br-pill " + level;
+        pill.textContent = level === "ok" ? "Configured" : level === "partial" ? "Partially configured" : "Not configured";
+        pill.title = lines.join("\n");
         const run = byId<HTMLButtonElement>("br-setup-run");
-        run.textContent = setup.have === "none" ? "Set up" : "Redo";
+        run.textContent = profile ? "Redo" : "Set up";
+        run.classList.toggle("br-primary", level !== "ok");
         run.disabled = s.play.active;
-        const reset = byId<HTMLButtonElement>("br-setup-reset");
-        reset.classList.toggle("hidden", setup.have === "none");
-        reset.classList.toggle("confirm", this.resetConfirm);
-        reset.textContent = this.resetConfirm ? "Sure?" : "Reset";
     }
 
     renderSeek(fraction: number): void {

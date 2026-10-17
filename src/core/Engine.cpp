@@ -715,6 +715,7 @@ void Engine::statusJson(std::string& out) const {
     w.kv("armIn", detector_.armRemaining(recTime_));
     w.kv("phase", detector_.phase());
     w.kv("bufferSec", bufferedSeconds());
+    w.kv("bufferMax", cfg_.bufferSeconds);
     w.kv("aircraft", aircraft_);
     w.kv("clipsRev", clipsRev_);
     w.kv("clipCount", static_cast<int>(index_.size()));

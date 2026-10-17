@@ -63,51 +63,114 @@ button {
   display: flex;
 }
 
-/* ---- main: the recorder's status */
+/* ---- main: the recorder's status, the aircraft, and the way to the clips */
 
 .br-status {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  padding: 22px 24px 24px;
+  overflow: hidden;
+  border: 1px solid var(--br-line);
+  border-radius: 8px;
+  background: var(--br-surface);
+}
+
+/* the state, centred in the space above the buffer */
+.br-hero {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   min-height: 0;
-  padding: 24px;
-  border: 1px solid var(--br-line);
-  border-radius: 8px;
-  background: var(--br-surface);
   text-align: center;
 }
 
+/* a soft disc with the state's colour at its centre; a ring ripples out while recording */
 .br-dot {
+  position: relative;
   flex: 0 0 auto;
-  width: 26px;
-  height: 26px;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  background: rgba(107, 123, 136, 0.14);
+}
+
+.br-dot::after {
+  content: "";
+  position: absolute;
+  top: 26px;
+  left: 26px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   background: var(--br-grey);
 }
 
+.br-dot.recording::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  border: 2px solid var(--br-green);
+  border-radius: 50%;
+  opacity: 0;
+  animation: br-ripple 2.4s ease-out infinite;
+}
+
+@keyframes br-ripple {
+  0% {
+    opacity: 0.55;
+    transform: scale(0.45);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.25);
+  }
+}
+
 .br-dot.recording {
+  background: rgba(79, 209, 127, 0.14);
+}
+
+.br-dot.recording::after {
   background: var(--br-green);
-  box-shadow: 0 0 16px rgba(79, 209, 127, 0.8);
+  box-shadow: 0 0 14px rgba(79, 209, 127, 0.9);
 }
 
 .br-dot.arming {
+  background: rgba(245, 177, 61, 0.14);
+}
+
+.br-dot.arming::after {
   background: var(--br-amber);
 }
 
 .br-dot.playback {
+  background: rgba(74, 168, 255, 0.14);
+}
+
+.br-dot.playback::after {
   background: var(--br-blue);
-  box-shadow: 0 0 16px rgba(74, 168, 255, 0.8);
+  box-shadow: 0 0 14px rgba(74, 168, 255, 0.9);
 }
 
 .br-dot.offline {
+  background: rgba(255, 107, 107, 0.14);
+}
+
+.br-dot.offline::after {
   background: var(--br-red);
 }
 
 .br-state {
-  margin-top: 16px;
-  font-size: 34px;
+  margin-top: 18px;
+  font-size: 36px;
 }
 
 .br-detail {
@@ -116,95 +179,325 @@ button {
   font-size: 18px;
 }
 
-.br-facts {
-  display: flex;
-  gap: 40px;
-  margin-top: 28px;
-}
-
-.br-fact {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-.br-fact-label {
+.br-label {
   color: var(--br-muted);
   font-size: 12px;
+  font-weight: bold;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
-.br-fact-value {
-  margin-top: 4px;
-  font-size: 28px;
+/* the buffer: how much is held, filling up to what it can hold */
+.br-buffer {
+  flex: 0 0 auto;
+  margin-top: 20px;
+}
+
+.br-buffer-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.br-buffer-time {
+  color: var(--br-muted);
+  font-size: 15px;
+}
+
+.br-buffer-time strong {
+  color: var(--br-text);
+  font-size: 22px;
+}
+
+.br-meter {
+  height: 8px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--br-surface-2);
+}
+
+.br-meter-fill {
+  width: 0;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--br-grey);
+}
+
+.br-main.recording .br-meter-fill {
+  background: var(--br-green);
+}
+
+.br-main.arming .br-meter-fill {
+  background: var(--br-amber);
+}
+
+.br-btn svg {
+  flex: 0 0 auto;
+  pointer-events: none;  /* clicks land on the button */
+}
+
+.br-btn.br-save {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 18px;
+  padding: 13px 18px;
+  border-radius: 8px;
+  font-size: 17px;
   font-weight: bold;
 }
 
-.br-aircraft {
-  max-width: 100%;
-  margin-top: 20px;
-  overflow: hidden;
+.br-save-icon {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+}
+
+.br-save-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* how a save went, shown by the button itself for a moment */
+.br-btn.br-save.saving {
   color: var(--br-muted);
-  font-size: 15px;
+}
+
+.br-btn.br-save.saving .br-save-icon {
+  animation: br-sink 0.8s ease-in-out infinite;
+}
+
+.br-btn.br-save.saved,
+.br-btn.br-save.saved:hover {
+  border-color: var(--br-green);
+  background: rgba(79, 209, 127, 0.16);
+  color: var(--br-green);
+  animation: br-save-pop 0.4s ease-out;
+}
+
+.br-btn.br-save.saved .br-save-icon {
+  animation: br-icon-in 0.4s ease-out;
+}
+
+.br-btn.br-save.failed,
+.br-btn.br-save.failed:hover {
+  border-color: var(--br-red);
+  background: rgba(255, 107, 107, 0.14);
+  color: var(--br-red);
+  animation: br-shake 0.4s ease-in-out;
+}
+
+@keyframes br-sink {
+  0%,
+  100% {
+    transform: translateY(-2px);
+  }
+
+  50% {
+    transform: translateY(3px);
+  }
+}
+
+@keyframes br-save-pop {
+  0% {
+    transform: scale(0.96);
+  }
+
+  50% {
+    transform: scale(1.03);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes br-icon-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+
+  70% {
+    opacity: 1;
+    transform: scale(1.25);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes br-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+
+  25% {
+    transform: translateX(-6px);
+  }
+
+  75% {
+    transform: translateX(6px);
+  }
+}
+
+/* the aircraft, and whether replays can move its controls */
+.br-plane {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 14px;
+  margin-top: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--br-line);
+  border-radius: 8px;
+  background: var(--br-surface);
+}
+
+.br-plane-icon {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: var(--br-surface-2);
+  color: var(--br-muted);
+}
+
+.br-plane-icon svg {
+  width: 24px;
+  height: 24px;
+}
+
+.br-plane-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: flex-start;  /* the chip is as wide as its text */
+  min-width: 0;
+}
+
+.br-aircraft {
+  display: block;
+  align-self: stretch;
+  overflow: hidden;
+  font-size: 17px;
+  font-weight: bold;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.br-btn.br-wide {
-  margin-top: 26px;
-  padding: 11px 24px;
-  font-size: 16px;
+.br-pill {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  margin-top: 7px;
+  gap: 7px;
+  padding: 3px 11px 3px 9px;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: bold;
 }
 
-.br-main .br-btn.br-open-clips {
+.br-pill::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.br-pill.ok {
+  background: rgba(79, 209, 127, 0.15);
+  color: var(--br-green);
+}
+
+.br-pill.partial {
+  background: rgba(245, 177, 61, 0.15);
+  color: var(--br-amber);
+}
+
+.br-pill.missing {
+  background: rgba(255, 107, 107, 0.15);
+  color: var(--br-red);
+}
+
+.br-btn.br-setup-run {
+  padding: 9px 16px;
+  border-radius: 8px;
+  font-size: 15px;
+}
+
+.br-btn.br-setup-run.br-primary {
+  background: rgba(74, 168, 255, 0.14);
+  color: var(--br-blue);
+  font-weight: bold;
+}
+
+.br-btn.br-open-clips {
   display: flex;
-  flex: 0 0 auto;  /* not stretched like the setup's big buttons */
+  flex: 0 0 auto;
   align-items: center;
-  justify-content: space-between;
+  gap: 12px;
   margin-top: 10px;
+  padding: 16px 18px;
+  border-color: var(--br-blue);
+  border-radius: 8px;
+  background: var(--br-blue);
+  color: #04121f;
+  font-size: 19px;
+  font-weight: bold;
+  text-align: left;
+}
+
+.br-btn.br-open-clips:hover {
+  border-color: #8cc8ff;
+  background: #6bb8ff;
+}
+
+.br-btn.br-open-clips svg {
+  width: 24px;
+  height: 24px;
+}
+
+.br-open-label {
+  flex: 1 1 auto;
 }
 
 .br-open-count {
   padding: 2px 12px;
   border-radius: 12px;
-  background: rgba(4, 18, 31, 0.3);
+  background: rgba(4, 18, 31, 0.22);
   font-size: 16px;
 }
 
+.br-btn.br-open-clips .br-chevron {
+  width: 22px;
+  height: 22px;
+  margin-left: -4px;
+}
+
 .br-error {
-  margin-top: 6px;
-  padding: 6px 10px;
-  border-radius: 4px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
   background: rgba(255, 107, 107, 0.15);
   color: var(--br-red);
-  font-size: 12px;
+  font-size: 14px;
 }
 
 /* ---- control setup */
-
-.br-controls-line {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 6px;
-  padding: 0 2px;
-  color: var(--br-muted);
-  font-size: 12px;
-}
-
-.br-controls-line span {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.br-btn.br-small {
-  padding: 3px 8px;
-  font-size: 12px;
-}
 
 /* While the setup is offered or running it takes the whole panel. */
 .br-root.setup-mode .br-main,

@@ -62,8 +62,8 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 
 - [ ] The BetterReplay icon (circular arrow with a play triangle) is in the toolbar. If not, look in the toolbar settings list.
 - [ ] Open it:
-  - The status dot is green, with **Recording · on ground · buffer m:ss · <aircraft>**.
-  - The buffer counts up. **Saved clips** at the bottom opens the library ("No clips yet" at first); the back arrow returns.
+  - The status dot is green, with **Recording** and *On ground* under it, and the aircraft's name on the card below.
+  - The buffer counts up and its bar fills towards 5:00. **Saved clips** at the bottom opens the library ("No clips yet" at first); the back arrow returns.
 - [ ] Close and reopen the panel. The state is the same; the panel holds no state.
 - [ ] If the panel says *"No response from the recorder"*: note whether section 1's lines appeared. This means CommBus isn't reaching the module.
 
@@ -131,7 +131,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 ## 10. Manual save
 
 - [ ] After at least 5 minutes of flight, click **Save last 5 minutes**.
-  - **Expect** `saved …_manual.rpl` and the toast "Saved the last few minutes".
+  - **Expect** `saved …_manual.rpl`, and the button turning green with a tick and *Saved* for a couple of seconds before going back to **Save last 5 minutes**.
   - The clip is about 5 minutes long.
 - [ ] The button is disabled while a clip is playing.
 
@@ -197,10 +197,10 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 Use an aircraft without a profile; the A320neo V2 is the interesting one. Start at the gate.
 
 - [ ] Open the panel. **Expect** the whole panel to show *Get ready: Set up replay controls for this aircraft*, with a checklist: *Parking brake set*, *On a runway*, *Engines running*. Start the engines, taxi onto the runway and set the parking brake; each item should tick as it becomes true.
-  - If *Parking brake set* doesn't tick with the brake set, the aircraft's brake isn't the `BRAKE PARKING POSITION` simvar: note the aircraft. **Later**, then **Set up** under the status, starts the setup anyway.
-  - If *On a runway* never ticks on a runway, note the airport and runway: `ON ANY RUNWAY` isn't set there. **Later**, then **Set up** under the status, starts the setup anyway.
+  - If *Parking brake set* doesn't tick with the brake set, the aircraft's brake isn't the `BRAKE PARKING POSITION` simvar: note the aircraft. **Later**, then **Set up** on the aircraft card, starts the setup anyway.
+  - If *On a runway* never ticks on a runway, note the airport and runway: `ON ANY RUNWAY` isn't set there. **Later**, then **Set up** on the aircraft card, starts the setup anyway.
 - [ ] Once all three are ticked, **expect** the page to change to *Set up replay controls for this aircraft?* with **Start setup**, **Later** and **Never for this aircraft**.
-  - **Later** goes back to the normal panel until the next flight. The line under the status then says *Replay controls: not set up for this aircraft*, and **Set up** there still starts it.
+  - **Later** goes back to the normal panel until the next flight. The aircraft card under the status then says *Not configured* in red, and **Set up** there still starts it.
 - [ ] Click **Start setup**. The steps show across the top, the current one highlighted. **Expect** `control setup started on the ground: spoilers, flaps, throttle, gear (…)`. For each step, expect `setup scan: N input event(s), K of them readable, and M L:var(s)`.
   - **Note K.** If it's 0, input events can't be read this way, and only L:vars can be found by their movement.
 - [ ] **Spoilers:** the panel says *Deploy the spoilers*; deploy them fully and hold. A green tick appears, then *Retract the spoilers*; retract them and wait. Note whether each tick comes at the right moment. **Expect:**
@@ -220,11 +220,11 @@ Use an aircraft without a profile; the A320neo V2 is the interesting one. Start 
   - If the panel keeps saying *Set the parking brake* although the brake is set, the aircraft's brake isn't the simvar. Click **Continue anyway** and note it.
 - [ ] **Gear:** the panel says *Take off*. Take off, then follow *Raise the gear* and *Lower the gear*, staying slow. The replay raises and lowers it once more. Raise it again afterwards.
 - [ ] **Done:** the panel lists each control's result and method. Click **Done**, then check:
-  - the line under the status (hover it to see the methods)
+  - the aircraft card under the status says *Configured* in green, or *Partially configured* in yellow if a step was skipped or didn't pass (hover it to see each control), and **Redo** replaces **Set up**
   - `aircraft.json` in the work folder
 - [ ] Fly a pattern, land, then play the landing clip. **Expect** `playback: spoilers via … (control profile)`, and the same for each set-up control. Note whether each control follows the clip now.
   - Clips from before the setup may log `… profile method … doesn't fit this clip …; using the defaults` instead. That's expected.
-- [ ] Restart the flight: no setup screen, since the profile is known. **Reset** (click twice) brings it back.
+- [ ] Restart the flight: no setup screen, since the profile is known. **Redo** runs the setup again.
 
 ## 13. Library management
 
