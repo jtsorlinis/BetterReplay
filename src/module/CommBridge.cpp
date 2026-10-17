@@ -82,6 +82,16 @@ void CommBridge::onCommand(const char* buf, unsigned int size) {
         ok = engine_.setSpeed(cmd.getNumber("x", 1.0), err);
     } else if (op == "stop") {
         ok = engine_.stopPlayback(err);
+    } else if (op == "setupStart") {
+        ok = engine_.setupStart(err);
+    } else if (op == "setupAnswer") {
+        ok = engine_.setupAnswer(cmd.getString("a", ""), err);
+    } else if (op == "setupLater") {
+        ok = engine_.setupLater(err);
+    } else if (op == "setupNever") {
+        ok = engine_.setupNever(err);
+    } else if (op == "setupReset") {
+        ok = engine_.setupReset(err);
     } else if (op == "setDebug") {
         log::g_debug = cmd.getBool("on", false);
         log::info("debug logging %s", log::g_debug ? "on" : "off");

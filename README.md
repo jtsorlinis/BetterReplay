@@ -5,8 +5,9 @@ An in-sim auto replay recorder for Microsoft Flight Simulator 2024. It records y
 - **Recorder:** a standalone WASM module. It keeps a 5-minute ring buffer at 30 Hz and runs whether or not the panel is open.
 - **Auto clips:** takeoffs and landings, including touchdown vertical speed, peak G and bounce count. They're written to disk as soon as each event finishes.
 - **Toolbar panel:** shows recorder status and the clip list, and has play/pause, seek, speed (0.25x–4x), stop, delete and "save last 5 min".
+- **Control setup:** a guided setup per aircraft that finds out how replays can move its spoilers, flaps, throttle and gear, by watching you move each one and testing ways to replay it. See [Control setup](#control-setup).
 
-> **Status: MVP, early in-sim testing.** The platform-independent core has 87 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
+> **Status: MVP, early in-sim testing.** The platform-independent core has 103 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. The control setup hasn't run in the sim yet. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
 
 ## Requirements
 
@@ -59,12 +60,29 @@ You can also build the package in DevMode: **File → Open project…** → `bui
 
 Recording pauses while the sim is paused, in slew, in the menus, during the sim's own replay, and during BetterReplay playback.
 
+### Control setup
+
+Aircraft differ in how their controls can be driven. Many 2024 aircraft keep their levers in their own input events or L:vars and overwrite the simvars playback would otherwise write. The setup finds out, once per aircraft, what actually works:
+
+1. **The offer.** On the runway with the engines running, an aircraft without a profile gets a card in the panel: **Start**, **Later** (until the next flight) or **Never for this aircraft**. **Set up** / **Redo** under the status line starts it any time, and **Reset** forgets the aircraft's profile.
+2. **Each control, in turn:** spoilers, flaps and throttle on the ground (throttle needs the parking brake set), then the gear after takeoff. Controls the aircraft doesn't have are skipped.
+   - **You move it:** "Deploy the spoilers fully, then retract them", "Advance the throttle to full, then back to idle", and so on. Meanwhile every input event and L:var the aircraft has is watched, to find the ones that moved with the control, whatever they're called.
+   - **It replays your movement**, with each candidate method in turn: the aircraft's own input event preset (the cockpit's path), the legacy key events, the simvars, the L:vars it found. Hands off the controls meanwhile.
+   - **It checks the result automatically:** did the spoilers, flap surfaces, gear or N1 (RPM on pistons) move at least 60% as far as when you did it, and come back? Methods that fail move straight on to the next one.
+   - **It asks you:** "Did the engines spool up and back down?" **Yes** keeps that method, **No** tries the next, **Watch again** replays it once more, **Skip** leaves the control as it is without a profile.
+   - If nothing works, the control is marked *not replayable*, and replays leave it to the aircraft instead of fighting it.
+   - If the aircraft starts to roll during the throttle replay, it stops and goes back to idle.
+3. **Replays** then drive each set-up control with its method, through the same code the setup tested. Clips recorded before the setup (or from different variables) fall back to the defaults for that control, and the log says so.
+
+If you skip the gear step or quit before it, the panel offers just the gear once you're airborne again. Profiles are kept per aircraft (by its `aircraft.cfg` path) in `aircraft.json` in the work folder.
+
 ### Where clips live
 
 `%APPDATA%\Microsoft Flight Simulator 2024\WASM\MSFS2024\betterreplay-recorder\work\` (Steam). That folder holds:
 
 - `YYYY-MM-DD_HHMM_<takeoff|landing|manual>.rpl`: one file per clip, timestamped in **UTC**.
 - `index.json`: the library (event, date, aircraft, duration, touchdown VS, peak G, bounces). If it's lost, it's rebuilt from the clip headers.
+- `aircraft.json`: the control profiles, one per aircraft: for each control its state (`ok`, `failed`, `skipped`, `absent`, `pending`), method and variable.
 - `betterreplay.log` and `betterreplay.prev.log`: the module's log for this and the previous sim session.
 
 Only the newest 20 auto clips (takeoffs and landings) are retained; older ones are deleted when a new one is saved, and at startup. "Save last 5 min" clips are never deleted automatically.
@@ -118,12 +136,15 @@ Two detector rules go slightly beyond the original spec:
   - `clips{offset}` (20 per page)
   - `play{file}`, `pause`, `resume`, `seek{t}`, `speed{x}`, `stop`
   - `delete{file}`, `saveLast`
+  - `setupStart`, `setupAnswer{a}` (`yes`, `no`, `again`, `skip`, `retry`, `ready`, `later`, `cancel`, `close`), `setupLater`, `setupNever`, `setupReset`
   - `setDebug{on}`
+- The status message's `setup` object has the offer, the aircraft's profile summary and, while the setup runs, its step, prompt and the answers that fit.
 - Replies come back on `BetterReplay.Status`, `BetterReplay.Clips` and `BetterReplay.Reply`.
 
 **Clip format.** The `.rpl` format is chunked and little-endian:
 
 - `BRPL` + version, then `META` (event, UTC start, sample rate, stats, aircraft), `CHAN` (channel keys and storage) and `SAMP` (frames).
+- `VARS` (optional) lists which aircraft variable each input event and L:var channel recorded, since that depends on the aircraft and its profile.
 - Unknown chunks and channels are skipped, and channels a clip doesn't have are left alone during playback. That leaves room for new channels and a future `LVAR` chunk without breaking old files.
 - See [src/core/ClipFormat.h](src/core/ClipFormat.h).
 
@@ -157,9 +178,17 @@ None of these could be verified without running the sim. Each is covered by a st
 - **Gear** is replayed as commands, not positions, because writing gear positions every frame made the gear flicker. The command comes from when the *recorded gear positions* start moving, since some aircraft (e.g. the A320neo V2) only update `GEAR HANDLE POSITION` once the gear has finished moving. Playback sends `GEAR_SET` plus `GEAR_UP`/`GEAR_DOWN` and lets the sim animate the gear. After play, seek, replay and stop, the gear (and lights) are resent and the gear positions are snapped for a moment, so a jump starts with the gear where the clip has it. If the aircraft moves the gear back itself, the log says so; when stopping on the ground, the aircraft then stays frozen until the gear is back down.
   - Aircraft that ignore all of these events need their own gear input event. The module logs a warning if the gear doesn't respond, and lists the aircraft's gear- and throttle-related input events after each flight load.
 - **Light key events** are sent with circuit index 0, assumed to mean "all circuits".
+- **Control setup** (untested in the sim). Each of these logs what it found:
+  - **Aircraft identity** is the path from `SimConnect_RequestSystemState("AircraftLoaded")`, falling back to the title. If 2024 gives each livery its own path, each livery needs its own setup. Look for `aircraft path: …`.
+  - **Watching input events** reads them with `fsVarsBVarGet`. If that can't read them, only L:vars are found by their movement. Look for `setup scan: N input event(s), M of them readable`.
+  - **Key events** are sent from WASM with `fsEventsTriggerKeyEvent` (not SimConnect, where the throttle axis events failed on the A320neo V2).
+  - **Simvars** are written with `fsVarsAVarSet`, with the index (`:1`) passed as a parameter.
+  - **L:var channels** (`lv_*`) are only recorded on aircraft whose profile chose an L:var.
+  - **Readings the checks use:** `TURB ENG N1`, `GENERAL ENG RPM`, `SPOILERS LEFT POSITION`, `ENGINE TYPE`, `BRAKE PARKING POSITION`, `ON ANY RUNWAY`, `GENERAL ENG COMBUSTION`, `IS GEAR RETRACTABLE`, `SPOILER AVAILABLE` and `FLAPS NUM HANDLE POSITIONS`. N1, RPM and spoiler position are also recorded in clips (about 0.6 MB more per 5 minutes).
+  - **Parking brake:** if the aircraft's doesn't set the simvar, the throttle step waits on "Set the parking brake first". **Continue anyway** carries on.
 
 ## Future work (designed for, not built)
 
-- **LVar recording:** a change-only `LVAR` chunk with per-aircraft auto-discovery and profiles.
+- **LVar recording:** a change-only `LVAR` chunk with per-aircraft auto-discovery. The control setup's profiles already record the L:vars it chose for the four controls.
 - **"Take control"** from any point in a replay.
 - Nearest-airport file names, go-around detection, and merging touch-and-goes into one clip.

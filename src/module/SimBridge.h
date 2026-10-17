@@ -7,12 +7,15 @@
 #include <SimConnect.h>
 
 #include <cmath>
+#include <string>
+#include <vector>
 
+#include "ControlDriver.h"
 #include "Engine.h"
 
 namespace br {
 
-class SimBridge : public ISimOutput {
+class SimBridge : public ISimOutput, public IControlSim {
 public:
     explicit SimBridge(Engine& engine) : engine_(engine) {}
 
@@ -23,11 +26,20 @@ public:
     bool connected() const { return h_ != 0; }
 
     // ISimOutput
-    void beginPlayback(const ChannelMask& present, const Frame& peak) override;
+    void beginPlayback(const Clip& clip, const Frame& peak) override;
     void writePlaybackFrame(const Frame& frame, bool jumped) override;
     void sendChannelEvent(int channel, double value) override;
     void endPlayback(const Frame& snapshot, bool restore) override;
     bool restoring() const override { return restoreWaitFrames_ > 0; }
+    void applyProfile(const AircraftProfile* profile) override;
+
+    // IControlSim (the control setup)
+    void scanBegin(std::vector<ScanVar>& vars) override;
+    void scanRead(std::vector<double>& values) override;
+    void scanEnd() override;
+    bool beginControl(Control c, const ControlMethod& m, std::string& why) override;
+    void applyControl(Control c, const Frame& f, bool force) override;
+    void endControl(Control c) override;
 
 private:
     enum DataDef : DWORD { DEF_RECORD = 1, DEF_TITLE = 2, DEF_PLAYBACK = 3, DEF_RESTORE = 4, DEF_SNAP = 5 };
@@ -46,6 +58,7 @@ private:
         REQ_RECORD = 1,
         REQ_TITLE = 2,
         REQ_INPUT_EVENTS = 3,
+        REQ_AIRCRAFT_PATH = 4,  // RequestSystemState("AircraftLoaded"): the aircraft's profile key
         REQ_INPUT_VALUE_FIRST = 100,  // + channel index: GetInputEvent for an input event channel
     };
     enum SysEvent : DWORD {
@@ -68,6 +81,17 @@ private:
         kExFreezeAtt,
         kExNumEngines,
         kExThrottleLowerLimit,
+        // for the control setup (SetupFacts)
+        kExEngineType,
+        kExParkingBrake,
+        kExOnRunway,
+        kExCombustion1,
+        kExCombustion2,
+        kExCombustion3,
+        kExCombustion4,
+        kExGearRetractable,
+        kExSpoilerAvailable,
+        kExFlapPositions,
         kExtraCount
     };
 
@@ -99,6 +123,11 @@ private:
     void checkEventChannels();
     // Input event channels: resolve them against the aircraft's list, replay and check them.
     void resetInputEvents(bool unsubscribe);
+    void matchInputChannels();   // input event channels <- the aircraft's list (profile names first)
+    void resolveLVarChannels();  // L:var channels <- the profile's L:vars
+    void reresolveForProfile();
+    void requestAircraftPath();
+    void onSystemState(const SIMCONNECT_RECV_SYSTEM_STATE* s);
     void logLVars();       // lists the aircraft's L:vars for gear/throttle/flaps/spoilers (research)
     void tracePlayback();  // debug: once a second, what playback sent vs what the aircraft reports
     void resolveInputEvents();
@@ -158,6 +187,25 @@ private:
     int traceFrames_ = 0;
     bool firstInputSet_ = false;
     static constexpr int kInputResendFrames = 15;
+    // Every numeric input event the aircraft has (for the setup's scan and profile names).
+    std::vector<InputEventInfo> inputEvents_;
+    bool inputEventsListed_ = false;
+
+    // The aircraft's control profile (applyProfile) and what follows from it.
+    bool haveProfile_ = false;
+    AircraftProfile profile_;
+    bool profilePending_ = false;  // changed during playback: re-resolve when it ends
+    FsLVarId lvId_[kChannelCount] = {};
+    FsUnitId numberUnit_ = FS_INVALID_UNIT;
+    ControlDriver driver_;
+    bool profileDrives_[kControlCount] = {};  // this playback: the profile drives the control
+    bool throttleByProfile_ = false;
+    bool setupMasking_ = false;  // the setup is driving the throttle simvars: hardware masked
+    // the setup's scan: input events (B: vars) then L:vars
+    std::vector<FsBVarId> scanB_;
+    std::vector<FsLVarId> scanL_;
+    int flapPositions_ = 0;
+    bool aircraftPathRequested_ = false;
 
     // playback
     ChannelMask playPresent_;                  // channels the playing clip has

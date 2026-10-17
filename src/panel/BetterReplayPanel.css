@@ -112,6 +112,83 @@ button {
   font-size: 12px;
 }
 
+/* ---- control setup */
+
+.br-controls-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 0 2px;
+  color: var(--br-muted);
+  font-size: 12px;
+}
+
+.br-controls-line span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.br-btn.br-small {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.br-setup {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid rgba(245, 177, 61, 0.5);
+  border-radius: 6px;
+  background: var(--br-surface);
+}
+
+.br-setup.asking {
+  border-color: var(--br-green);
+}
+
+.br-setup-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--br-amber);
+  font-size: 13px;
+}
+
+.br-setup-head span {
+  color: var(--br-muted);
+  white-space: nowrap;
+}
+
+.br-setup-prompt {
+  margin-top: 8px;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.br-setup-detail {
+  margin-top: 4px;
+  color: var(--br-muted);
+  font-size: 12px;
+}
+
+.br-setup-note {
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--br-surface-2);
+  font-size: 12px;
+}
+
+.br-setup-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
 /* ---- buttons */
 
 .br-btn {

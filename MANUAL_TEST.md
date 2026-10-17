@@ -27,7 +27,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   [BetterReplay] BetterReplay 0.1.0, debug logging on
   [BetterReplay] no index found; starting a new library        (first run only)
   [BetterReplay] library: 0 clip(s)
-  [BetterReplay] SimConnect ready: 49 simvar channels + 8 extras per frame, 7 input event channels
+  [BetterReplay] SimConnect ready: 58 simvar channels + 18 extras per frame, 14 input event / L:var channels
   [BetterReplay] CommBus: listening on BetterReplay.Cmd
   [BetterReplay] connected to … (SimConnect …)
   ```
@@ -53,7 +53,8 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   - lat/lon are your real position in **degrees**
   - AGL is about 0
   - on ground = 1
-- [ ] About 2 s after the flight loads: `input event channels: recording ie_thr_1, ie_thr_2, ie_gear…; not on this aircraft: …`. That says which of the aircraft's own controls get recorded.
+- [ ] About 2 s after the flight loads: `input event channels: recording ie_thr_1=ENGINE_THROTTLE_1, ie_gear=LANDING_GEAR_GEAR…; not on this aircraft: …`. That says which of the aircraft's own controls get recorded, and from which input event.
+- [ ] `aircraft path: …`, then `aircraft key …: no control profile yet` (or the profile's summary). Note the path: control profiles are stored under it.
 - [ ] **No clip is created by the spawn**: no `saved` line.
 - [ ] After a minute: `status: recording, phase ground, buffer 60 s, …` (the heartbeat repeats every 60 s).
 
@@ -191,14 +192,45 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 - [ ] While a clip plays, pause the sim. Playback holds, then continues when you unpause.
 - [ ] Note whether crash detection ever triggered during playback (e.g. near the ground).
 
-## 12. Library management
+## 12. Control setup
+
+Use an aircraft without a profile; the A320neo V2 is the interesting one. Line up on a runway with the engines running.
+
+- [ ] Open the panel. **Expect** the card *Set up replay controls for this aircraft?* with **Start**, **Later** and **Never for this aircraft**. Under the status: *Replay controls: not set up for this aircraft*.
+  - **Later** hides the card until the next flight. **Set up** under the status still starts it.
+- [ ] Click **Start**. **Expect** `control setup started on the ground: spoilers, flaps, throttle, gear (…)`. For each step, expect `setup scan: N input event(s), K of them readable, and M L:var(s)`.
+  - **Note K.** If it's 0, input events can't be read this way, and only L:vars can be found by their movement.
+- [ ] **Spoilers:** deploy them fully, retract them, and wait. **Expect:**
+  ```
+  control setup: the spoilers started moving (…)
+  control setup:   input event … moved with it (score …, peak …)      (and/or L:var …)
+  control setup: you moved the spoilers over N s (…); trying N method(s)
+  control setup: replaying the spoilers with … (method 1 of N)
+  ```
+  - Keep your hands off the controls while it replays.
+  - Each method that doesn't move the spoilers is logged as `… moved the spoilers N% as far as you did`, and the next one starts by itself.
+  - When one passes, the panel asks *Did the spoilers come up and go back down?* Watch the spoilers (the external view helps), then answer. **Watch again** replays it once more.
+  - **Copy the `moved with it` lines, and note which method you said yes to.** On the A320neo V2 this step is the most likely to find something new, since it has no speed brake input event.
+- [ ] **Flaps:** one notch, wait for them to extend, retract them, and wait. Expect the same pattern. Going by your earlier test, `HANDLING_FLAPS` with its value as read should pass.
+- [ ] **Throttle:** set the parking brake first (the card says so if it isn't set). Full, then idle, and wait for the engines to spool down. Each method can take up to half a minute while the engines spool.
+  - If the aircraft starts to roll, the replay stops (`the aircraft started to roll …`), the throttle goes back to idle, and it asks anyway.
+  - If the card keeps saying *Set the parking brake first* although the brake is set, the aircraft's brake isn't the simvar. Click **Continue anyway** and note it.
+- [ ] **Gear:** the card says *Take off…*. Take off, then raise the gear and lower it again, staying slow. The replay raises and lowers it once more. Raise it again afterwards.
+- [ ] **Done:** the card lists each control's result. Click **Close**, then check:
+  - the line under the status (hover it to see the methods)
+  - `aircraft.json` in the work folder
+- [ ] Fly a pattern, land, then play the landing clip. **Expect** `playback: spoilers via … (control profile)`, and the same for each set-up control. Note whether each control follows the clip now.
+  - Clips from before the setup may log `… profile method … doesn't fit this clip …; using the defaults` instead. That's expected.
+- [ ] Restart the flight: no card, since the profile is known. **Reset** (click twice) brings the card back.
+
+## 13. Library management
 
 - [ ] **Delete** a clip: the first click shows "Sure?", the second deletes it, and the file disappears from the work folder.
 - [ ] Restart the sim. The library reloads (`loaded index.json (N clips)`).
 - [ ] *(Optional)* Delete `index.json` while the sim is closed, then restart.
   - **Expect** `adopted … from disk` for each clip.
 
-## 13. Report back
+## 14. Report back
 
 Send:
 

@@ -28,6 +28,8 @@ enum class PlayMode : uint8_t {
                 // state), then left to the sim to animate
     Input = 4,  // an aircraft input event (B: var, e.g. a 2024 aircraft's own throttle lever),
                 // recorded from it and set back with SimConnect_SetInputEvent
+    LVar = 5,   // an aircraft L:var named by the aircraft's control profile (AircraftProfile.h):
+                // recorded and replayed only on aircraft whose setup chose it
 };
 
 struct ChannelDef {
@@ -112,6 +114,22 @@ enum Channel : uint16_t {
     kInputGear,
     kInputFlaps,
     kInputSpeedBrakes,
+    kEngineN1_1,
+    kEngineN1_2,
+    kEngineN1_3,
+    kEngineN1_4,
+    kEngineRpm1,
+    kEngineRpm2,
+    kEngineRpm3,
+    kEngineRpm4,
+    kSpoilersLeft,
+    kLVarThrottle1,
+    kLVarThrottle2,
+    kLVarThrottle3,
+    kLVarThrottle4,
+    kLVarGear,
+    kLVarFlaps,
+    kLVarSpeedBrakes,
     kChannelCount
 };
 

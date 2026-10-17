@@ -17,6 +17,7 @@ constexpr PlayMode SET = PlayMode::Set;
 constexpr PlayMode EVT = PlayMode::Event;
 constexpr PlayMode SNAP = PlayMode::Snap;
 constexpr PlayMode INPUT = PlayMode::Input;
+constexpr PlayMode LVAR = PlayMode::LVar;
 }  // namespace
 
 // Names, units and settable flags verified against the MSFS 2024 SimVar documentation.
@@ -108,6 +109,26 @@ const ChannelDef kChannels[kChannelCount] = {
     {"ie_flaps", nullptr, nullptr, F32, STEP, INPUT, nullptr, nullptr, nullptr, 0, "HANDLING_FLAPS", kFlapsLeft, 3, false},
     {"ie_spdbrk", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 0,
      "HANDLING_SPEED_BRAKES|HANDLING_SPOILERS|HANDLING_SPEEDBRAKES", kSpoilersHandle, 1, true},
+    // What the controls did, for the control setup's checks (did the engines spool up, did the
+    // spoilers come up?) and for analysis. Not settable.
+    {"n1_1", "TURB ENG N1:1", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 1},
+    {"n1_2", "TURB ENG N1:2", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 2},
+    {"n1_3", "TURB ENG N1:3", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 3},
+    {"n1_4", "TURB ENG N1:4", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 4},
+    {"rpm_1", "GENERAL ENG RPM:1", "rpm", F32, LIN, NONE, nullptr, nullptr, nullptr, 1},
+    {"rpm_2", "GENERAL ENG RPM:2", "rpm", F32, LIN, NONE, nullptr, nullptr, nullptr, 2},
+    {"rpm_3", "GENERAL ENG RPM:3", "rpm", F32, LIN, NONE, nullptr, nullptr, nullptr, 3},
+    {"rpm_4", "GENERAL ENG RPM:4", "rpm", F32, LIN, NONE, nullptr, nullptr, nullptr, 4},
+    {"spoil_l", "SPOILERS LEFT POSITION", "percent over 100", F32, LIN, NONE, nullptr},
+    // L:vars the control setup found driving a control on this aircraft (its profile names them;
+    // NaN everywhere else). Replayed only through the profile.
+    {"lv_thr_1", nullptr, nullptr, F32, LIN, LVAR, nullptr, nullptr, nullptr, 1},
+    {"lv_thr_2", nullptr, nullptr, F32, LIN, LVAR, nullptr, nullptr, nullptr, 2},
+    {"lv_thr_3", nullptr, nullptr, F32, LIN, LVAR, nullptr, nullptr, nullptr, 3},
+    {"lv_thr_4", nullptr, nullptr, F32, LIN, LVAR, nullptr, nullptr, nullptr, 4},
+    {"lv_gear", nullptr, nullptr, F32, STEP, LVAR, nullptr},
+    {"lv_flaps", nullptr, nullptr, F32, STEP, LVAR, nullptr},
+    {"lv_spdbrk", nullptr, nullptr, F32, LIN, LVAR, nullptr},
 };
 
 int findChannel(const char* key) {

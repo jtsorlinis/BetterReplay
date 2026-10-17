@@ -125,6 +125,16 @@ void writeClip(const ClipMeta& meta, const FrameSource& frames, std::vector<uint
     w.str(meta.aircraft);
     w.endChunk(chunk);
 
+    if (!meta.vars.empty()) {
+        chunk = w.beginChunk("VARS");
+        w.u16(static_cast<uint16_t>(meta.vars.size()));
+        for (const auto& kv : meta.vars) {
+            w.str(kv.first);
+            w.str(kv.second);
+        }
+        w.endChunk(chunk);
+    }
+
     uint32_t stride = 4;
     chunk = w.beginChunk("CHAN");
     w.u16(static_cast<uint16_t>(kChannelCount));
@@ -187,6 +197,15 @@ bool readClip(const uint8_t* data, size_t size, Clip& out, std::string* error) {
         if (std::memcmp(c.id, "META", 4) == 0) {
             parseMeta(c.payload, c.size, out.meta);
             haveMeta = true;
+        } else if (std::memcmp(c.id, "VARS", 4) == 0) {
+            ByteReader vr(c.payload, c.size);
+            const uint16_t count = vr.u16();
+            out.meta.vars.clear();
+            for (uint16_t i = 0; i < count && vr.ok(); ++i) {
+                std::string key = vr.str();
+                std::string var = vr.str();
+                if (vr.ok()) out.meta.vars.emplace_back(std::move(key), std::move(var));
+            }
         } else if (std::memcmp(c.id, "CHAN", 4) == 0) {
             ByteReader cr(c.payload, c.size);
             const uint16_t count = cr.u16();

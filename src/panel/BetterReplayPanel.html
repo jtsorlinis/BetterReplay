@@ -30,6 +30,22 @@
           <button type="button" class="br-btn" id="br-save">Save last 5 min</button>
         </header>
         <div class="br-error hidden" id="br-error"></div>
+        <div class="br-controls-line hidden" id="br-controls">
+          <span id="br-controls-text"></span>
+          <button type="button" class="br-btn br-small" id="br-setup-run">Set up</button>
+          <button type="button" class="br-btn br-small br-danger hidden" id="br-setup-reset">Reset</button>
+        </div>
+
+        <section class="br-setup hidden" id="br-setup">
+          <div class="br-setup-head">
+            <strong id="br-setup-title"></strong>
+            <span id="br-setup-step"></span>
+          </div>
+          <div class="br-setup-prompt" id="br-setup-prompt"></div>
+          <div class="br-setup-detail hidden" id="br-setup-detail"></div>
+          <div class="br-setup-note hidden" id="br-setup-note"></div>
+          <div class="br-setup-btns" id="br-setup-btns"></div>
+        </section>
 
         <section class="br-player hidden" id="br-player">
           <div class="br-now" id="br-now"></div>

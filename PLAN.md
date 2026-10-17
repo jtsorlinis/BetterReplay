@@ -148,6 +148,8 @@ When playing, channels are matched by **key**. Unknown keys are ignored, and cha
 
 Milestones 1–7 are implemented and committed. The core has 87 passing unit tests, the module builds with the SDK clang, and the panel has been exercised in a browser harness against a fake module. Still pending: in-sim verification ([MANUAL_TEST.md](MANUAL_TEST.md)) and compiling the panel `.spb` (`build.ps1 -Package`, which needs the sim's package builder).
 
+**Control setup (added 2026-10-17):** guided per-aircraft setup (`src/core/ControlSetup.*`, `AircraftProfile.*`, `src/module/ControlDriver.*`, panel card), with profiles in `aircraft.json`. It's covered by 16 more core tests (103 in total) and the panel harness. It hasn't run in the sim yet: see README → Known gaps → Control setup, and MANUAL_TEST.md §12.
+
 ## 8. Decisions (answered: defaults approved)
 
 1. Package name `betterreplay-recorder` and toolbar title "BetterReplay". OK?

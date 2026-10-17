@@ -94,10 +94,12 @@ bool SimBridge::open() {
     // Recording definition: every simvar channel, then the extras, all as FLOAT64. Input event
     // channels are filled from their subscriptions instead.
     recordCount_ = 0;
+    numberUnit_ = fsVarsGetUnitId("number");
     for (int c = 0; c < kChannelCount; ++c) {
         const ChannelDef& ch = kChannels[c];
         ieValue_[c] = NAN;
         ieSetId_[c] = FS_VAR_INVALID_ID;
+        lvId_[c] = FS_VAR_INVALID_ID;
         if (!ch.simvar) continue;
         recordChannels_[recordCount_++] = c;
         track(SimConnect_AddToDataDefinition(h_, DEF_RECORD, ch.simvar, ch.units, SIMCONNECT_DATATYPE_FLOAT64),
@@ -115,6 +117,16 @@ bool SimBridge::open() {
         {"IS ATTITUDE FREEZE ON", "bool"},
         {"NUMBER OF ENGINES", "number"},
         {"THROTTLE LOWER LIMIT", "percent"},
+        {"ENGINE TYPE", "enum"},
+        {"BRAKE PARKING POSITION", "bool"},
+        {"ON ANY RUNWAY", "bool"},
+        {"GENERAL ENG COMBUSTION:1", "bool"},
+        {"GENERAL ENG COMBUSTION:2", "bool"},
+        {"GENERAL ENG COMBUSTION:3", "bool"},
+        {"GENERAL ENG COMBUSTION:4", "bool"},
+        {"IS GEAR RETRACTABLE", "bool"},
+        {"SPOILER AVAILABLE", "bool"},
+        {"FLAPS NUM HANDLE POSITIONS", "number"},
     };
     for (const auto& e : kExtras) {
         track(SimConnect_AddToDataDefinition(h_, DEF_RECORD, e.simvar, e.units, SIMCONNECT_DATATYPE_FLOAT64), e.simvar);
@@ -180,9 +192,44 @@ bool SimBridge::open() {
     hr = SimConnect_CallDispatch(h_, &SimBridge::dispatchThunk, this);
     if (FAILED(hr)) log::error("SimConnect_CallDispatch failed (0x%08lx)", static_cast<unsigned long>(hr));
 
-    log::info("SimConnect ready: %d simvar channels + %d extras per frame, %d input event channels", recordCount_,
-              static_cast<int>(kExtraCount), static_cast<int>(kChannelCount) - recordCount_);
+    ControlDriver::Context ctx;
+    ctx.h = h_;
+    ctx.live = &input_.raw;
+    ctx.engines = &numEngines_;
+    ctx.flapPositions = &flapPositions_;
+    ctx.throttleLowerLimit = &throttleLowerLimit_;
+    ctx.inputEvents = &inputEvents_;
+    driver_.setContext(ctx);
+    requestAircraftPath();
+
+    log::info("SimConnect ready: %d simvar channels + %d extras per frame, %d input event / L:var channels",
+              recordCount_, static_cast<int>(kExtraCount), static_cast<int>(kChannelCount) - recordCount_);
     return true;
+}
+
+// The aircraft.cfg path identifies the aircraft for its control profile. Asked for after every
+// flight load and aircraft change.
+void SimBridge::requestAircraftPath() {
+    aircraftPathRequested_ = true;
+    track(SimConnect_RequestSystemState(h_, REQ_AIRCRAFT_PATH, "AircraftLoaded"), "RequestSystemState AircraftLoaded");
+}
+
+void SimBridge::onSystemState(const SIMCONNECT_RECV_SYSTEM_STATE* s) {
+    if (s->dwRequestID != REQ_AIRCRAFT_PATH) return;
+    aircraftPathRequested_ = false;
+    std::string key;
+    for (const char* p = s->szString; *p && key.size() < 255; ++p) {
+        const char ch = *p == '\\' ? '/' : *p;
+        key.push_back(static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch + 32 : ch));
+    }
+    const std::string cfg = "/aircraft.cfg";
+    if (key.size() > cfg.size() && key.compare(key.size() - cfg.size(), cfg.size(), cfg) == 0) key.resize(key.size() - cfg.size());
+    if (key.empty()) {
+        if (!lastTitle_[0]) return;  // try again once the title is known
+        key = std::string("title:") + lastTitle_;
+    }
+    log::info("aircraft path: %s", s->szString[0] ? s->szString : "(none; using the title)");
+    engine_.setAircraftKey(key);
 }
 
 void SimBridge::close() {
@@ -251,10 +298,16 @@ void SimBridge::dispatch(SIMCONNECT_RECV* p, DWORD size) {
                 engine_.onFlightLoaded("FlightLoaded event");
                 onAircraftChanged();
                 resetInputEvents(false);  // the old aircraft's input events are gone; don't poll them
+                inputEvents_.clear();
+                inputEventsListed_ = false;
                 enumerateAtFrame_ = frameCount_ + 120;  // list the new aircraft's input events once it's settled
+                requestAircraftPath();
             }
             break;
         }
+        case SIMCONNECT_RECV_ID_SYSTEM_STATE:
+            onSystemState(reinterpret_cast<const SIMCONNECT_RECV_SYSTEM_STATE*>(p));
+            break;
         case SIMCONNECT_RECV_ID_FLOW_EVENT: {
             const auto* f = reinterpret_cast<const SIMCONNECT_RECV_FLOW_EVENT*>(p);
             onFlowEvent(static_cast<DWORD>(f->FlowEvent), f->FltPath);
@@ -392,7 +445,13 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     std::memcpy(v, reinterpret_cast<const uint8_t*>(d) + offset, values * sizeof(double));
     for (int i = 0; i < recordCount_; ++i) input_.raw.v[recordChannels_[i]] = v[i];
     for (int c = 0; c < kChannelCount; ++c) {
-        if (kChannels[c].play == PlayMode::Input) input_.raw.v[c] = ieValue_[c];
+        if (kChannels[c].play == PlayMode::Input) {
+            input_.raw.v[c] = ieValue_[c];
+        } else if (kChannels[c].play == PlayMode::LVar) {
+            double lv = NAN;
+            if (lvId_[c] != FS_VAR_INVALID_ID && fsVarsLVarGet(lvId_[c], numberUnit_, &lv) != FS_VAR_ERROR_NONE) lv = NAN;
+            input_.raw.v[c] = lv;
+        }
     }
     const double* ex = v + recordCount_;
     input_.simTimeSec = ex[kExSimTime];
@@ -406,6 +465,18 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     const double engines = ex[kExNumEngines];
     if (std::isfinite(engines) && engines >= 0.0 && engines <= 16.0) numEngines_ = static_cast<int>(engines);
     throttleLowerLimit_ = ex[kExThrottleLowerLimit];
+    const double flaps = ex[kExFlapPositions];
+    flapPositions_ = std::isfinite(flaps) && flaps >= 0.0 && flaps < 64.0 ? static_cast<int>(flaps) : 0;
+    SetupFacts& facts = input_.facts;
+    facts.engines = numEngines_;
+    facts.engineType = std::isfinite(ex[kExEngineType]) ? static_cast<int>(ex[kExEngineType]) : 1;
+    facts.parkingBrake = ex[kExParkingBrake] >= 0.5;
+    facts.onRunway = ex[kExOnRunway] >= 0.5;
+    facts.engineRunning = false;
+    for (int e = 0; e < 4 && e < numEngines_; ++e) facts.engineRunning |= ex[kExCombustion1 + e] >= 0.5;
+    facts.gearRetractable = ex[kExGearRetractable] >= 0.5;
+    facts.hasSpoilers = ex[kExSpoilerAvailable] >= 0.5;
+    facts.flapPositions = flapPositions_;
     if (freezeCheckFrames_ > 0 && --freezeCheckFrames_ == 0) verifyFreeze();
     if (playChannelCount_ > 0 && haveWritten_) checkOverrides();
     if (playing_ && throttleViaEvents_ && clipHasThrottle_) checkThrottleEvents();
@@ -416,6 +487,7 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
         tracePlayback();
     }
     pollInputEvents();
+    if (!playing_ && profilePending_) reresolveForProfile();  // the profile changed during a replay
     if (snapCheckFrames_ > 0 && --snapCheckFrames_ == 0) checkSnap();
     if (!playing_ && snapFramesLeft_ > 0) writeSnap(restoreSnap_);
     if (restoreWaitFrames_ > 0) checkRestoreGear();
@@ -724,15 +796,48 @@ void SimBridge::checkEventChannels() {
     }
 }
 
-void SimBridge::beginPlayback(const ChannelMask& present, const Frame& peak) {
+void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     if (!h_) return;
+    const ChannelMask& present = clip.present;
     restoreWaitFrames_ = 0;  // a new clip started while still settling a restore: playback wins
     snapFramesLeft_ = 0;
     snapCheckFrames_ = 0;
+    if (playing_) driver_.endAll();  // switching clips
     playing_ = true;
     playPresent_ = present;
     playSkip_.reset();
     yieldedCount_ = 0;
+
+    // Controls the aircraft's profile drives: its method, through the driver, instead of the
+    // defaults below (or nothing, if the setup found no way). Their channels are left alone here.
+    ChannelMask owned;
+    throttleByProfile_ = false;
+    for (int i = 0; i < kControlCount; ++i) {
+        const Control c = controlAt(i);
+        profileDrives_[i] = false;
+        if (!haveProfile_ || !profile_.drives(c)) continue;
+        const ControlProfile& cp = profile_[c];
+        std::string why;
+        if (cp.state == ControlState::Ok && !clipSupports(c, cp.method, clip, numEngines_, &why)) {
+            log::info("playback: the %s's profile method (%s) doesn't fit this clip (%s); using the defaults",
+                      controlSpec(c).label, describeMethod(c, cp.method).c_str(), why.c_str());
+            continue;
+        }
+        if (cp.state == ControlState::Ok && !driver_.begin(c, cp.method, why)) {
+            log::warn("playback: can't drive the %s with its profile method (%s): %s; using the defaults", controlSpec(c).label,
+                      describeMethod(c, cp.method).c_str(), why.c_str());
+            continue;
+        }
+        profileDrives_[i] = true;
+        controlChannels(c, owned);
+        if (c == Control::Throttle) throttleByProfile_ = true;
+        log::info("playback: %s %s (control profile)", controlSpec(c).label,
+                  cp.state == ControlState::Ok ? ("via " + describeMethod(c, cp.method)).c_str()
+                                               : "left to the aircraft: the setup found no way to replay it");
+    }
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (owned.test(static_cast<size_t>(c)) && kChannels[c].play == PlayMode::Set) playSkip_.set(static_cast<size_t>(c));
+    }
 
     // Input events this aircraft has and the clip recorded: replay them, and don't write the
     // simvars they drive.
@@ -741,7 +846,7 @@ void SimBridge::beginPlayback(const ChannelMask& present, const Frame& peak) {
     for (int c = 0; c < kChannelCount; ++c) {
         const ChannelDef& ch = kChannels[c];
         ieActive_[c] = ch.play == PlayMode::Input && present.test(static_cast<size_t>(c)) && ieHash_[c] != 0 &&
-                       ch.engine <= numEngines_;
+                       ch.engine <= numEngines_ && !owned.test(static_cast<size_t>(c));
         ieSinceSend_[c] = kInputResendFrames;
         ieSent_[c] = NAN;
         ieSettled_[c] = 0;
@@ -757,8 +862,11 @@ void SimBridge::beginPlayback(const ChannelMask& present, const Frame& peak) {
     }
     firstInputSet_ = true;
 
+    // The legacy throttle paths (simvars with masking, axis events) all depend on this.
     clipHasThrottle_ = false;
-    for (int e = 0; e < 4 && e < numEngines_; ++e) clipHasThrottle_ |= present.test(static_cast<size_t>(kThrottle1 + e));
+    for (int e = 0; e < 4 && e < numEngines_ && !throttleByProfile_; ++e) {
+        clipHasThrottle_ |= present.test(static_cast<size_t>(kThrottle1 + e));
+    }
     if (throttleViaEvents_ || throttleViaInput_) {
         for (int c = kThrottle1; c <= kThrottle4; ++c) playSkip_.set(static_cast<size_t>(c));
     }
@@ -784,7 +892,11 @@ void SimBridge::beginPlayback(const ChannelMask& present, const Frame& peak) {
     sendFreeze(true);
 
     const char* throttle;
-    if (throttleViaInput_) {
+    if (throttleByProfile_) {
+        setInputMasking(driver_.wantsThrottleMask());
+        throttle = driver_.wantsThrottleMask() ? "throttle via the control profile, hardware throttle input blocked"
+                                               : "throttle via the control profile";
+    } else if (throttleViaInput_) {
         setInputMasking(false);
         throttle = "throttle via the aircraft's input events";
     } else if (!clipHasThrottle_) {
@@ -856,6 +968,9 @@ void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
     if (jumped && !snapRejected_) snapFramesLeft_ = kSnapFrames;
     if (snapFramesLeft_ > 0) writeSnap(frame);
     sendInputEvents(frame, jumped);
+    for (int i = 0; i < kControlCount; ++i) {
+        if (profileDrives_[i]) driver_.apply(controlAt(i), frame, jumped);
+    }
     if (throttleViaEvents_ && clipHasThrottle_) sendThrottleEvents(frame, jumped);
     trackEventChannels(frame, jumped);
     if (playChannelCount_ == 0) return;
@@ -878,6 +993,7 @@ void SimBridge::sendChannelEvent(int channel, double value) {
     if (!h_ || channel < 0 || channel >= kChannelCount) return;
     const ChannelDef& ch = kChannels[channel];
     if (ch.engine > numEngines_) return;  // e.g. reverser 3/4 on a twin
+    if (channel == kGearHandle && profileDrives_[static_cast<int>(Control::Gear)]) return;  // the profile's method
     const DWORD state = value >= 0.5 ? 1 : 0;
     // Lights: parameter 0 on/off, parameter 1 circuit index (0 = all circuits).
     // GEAR_SET: parameter 0 is 1 = down, 0 = up; parameter 1 is ignored.
@@ -959,28 +1075,106 @@ void SimBridge::onInputEvents(const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS* list
         } else {
             log::debug("aircraft input event: %s (%s)", name, number ? "number" : "string");
         }
-        if (!number) continue;
-        // Match the input event channels; a channel lists alternative names separated by '|'.
-        for (int c = 0; c < kChannelCount; ++c) {
-            const ChannelDef& ch = kChannels[c];
-            if (ch.play != PlayMode::Input || ieHash_[c] != 0 || !ch.inputEvent) continue;
-            const char* alt = ch.inputEvent;
-            while (*alt) {
-                const char* end = std::strchr(alt, '|');
-                const size_t len = end ? static_cast<size_t>(end - alt) : std::strlen(alt);
-                if (len == std::strlen(upper) && std::strncmp(alt, upper, len) == 0) {
-                    ieHash_[c] = d.Hash;
-                    std::snprintf(ieName_[c], sizeof(ieName_[c]), "%s", name);
-                    break;
-                }
-                alt += len + (end ? 1 : 0);
-            }
-        }
+        if (number) inputEvents_.push_back({name, upper, d.Hash});
     }
     if (list->dwEntryNumber + 1 >= list->dwOutOf) {
         if (inputEventsLogged_ == 0) log::info("aircraft input events: none for gear, throttle, flaps or spoilers");
+        log::info("aircraft input events: %zu numeric in total", inputEvents_.size());
+        inputEventsListed_ = true;
+        matchInputChannels();
         resolveInputEvents();
+        resolveLVarChannels();
+        logLVars();
     }
+}
+
+// Each input event channel records the input event its control's profile names (if it chose
+// one), else the first of the channel's default names the aircraft has.
+void SimBridge::matchInputChannels() {
+    for (int c = 0; c < kChannelCount; ++c) {
+        const ChannelDef& ch = kChannels[c];
+        if (ch.play != PlayMode::Input) continue;
+        ieHash_[c] = 0;
+        ieName_[c][0] = '\0';
+        std::string wanted;
+        for (int i = 0; haveProfile_ && i < kControlCount; ++i) {
+            const Control control = controlAt(i);
+            const ControlSpec& spec = controlSpec(control);
+            const ControlProfile& cp = profile_[control];
+            const int e = c - spec.inputChannel;
+            if (cp.state != ControlState::Ok || e < 0 || e >= (spec.perEngine ? 4 : 1)) continue;
+            if (cp.method.kind != MethodKind::InputSet && cp.method.kind != MethodKind::InputValue) continue;
+            if (e > 0 && cp.method.var.find('#') == std::string::npos) continue;  // one variable for all engines
+            wanted = engineVar(cp.method.var, e + 1);
+            for (char& x : wanted) x = static_cast<char>(x >= 'a' && x <= 'z' ? x - 32 : x);
+        }
+        for (const InputEventInfo& ie : inputEvents_) {
+            bool match = false;
+            if (!wanted.empty()) {
+                match = ie.upper == wanted;
+            } else if (ch.inputEvent) {
+                const char* alt = ch.inputEvent;
+                while (*alt && !match) {
+                    const char* end = std::strchr(alt, '|');
+                    const size_t len = end ? static_cast<size_t>(end - alt) : std::strlen(alt);
+                    match = ie.upper.size() == len && ie.upper.compare(0, len, alt, len) == 0;
+                    alt += len + (end ? 1 : 0);
+                }
+            }
+            if (!match) continue;
+            ieHash_[c] = ie.hash;
+            std::snprintf(ieName_[c], sizeof(ieName_[c]), "%s", ie.name.c_str());
+            break;
+        }
+        engine_.setChannelVar(c, ieName_[c]);
+    }
+}
+
+// L:var channels record the L:vars the profile chose, if any.
+void SimBridge::resolveLVarChannels() {
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (kChannels[c].play != PlayMode::LVar) continue;
+        lvId_[c] = FS_VAR_INVALID_ID;
+        std::string name;
+        for (int i = 0; haveProfile_ && i < kControlCount; ++i) {
+            const Control control = controlAt(i);
+            const ControlSpec& spec = controlSpec(control);
+            const ControlProfile& cp = profile_[control];
+            const int e = c - spec.lvarChannel;
+            if (cp.state != ControlState::Ok || cp.method.kind != MethodKind::LVar) continue;
+            if (e < 0 || e >= (spec.perEngine ? 4 : 1)) continue;
+            if (e > 0 && cp.method.var.find('#') == std::string::npos) continue;
+            name = engineVar(cp.method.var, e + 1);
+        }
+        if (!name.empty()) {
+            lvId_[c] = fsVarsGetLVarId(name.c_str());
+            if (lvId_[c] == FS_VAR_INVALID_ID) {
+                log::warn("L:var %s (control profile) not found on this aircraft yet", name.c_str());
+            } else {
+                log::info("recording %s from L:%s (control profile)", kChannels[c].key, name.c_str());
+            }
+        }
+        engine_.setChannelVar(c, lvId_[c] != FS_VAR_INVALID_ID ? name : std::string());
+    }
+}
+
+void SimBridge::applyProfile(const AircraftProfile* profile) {
+    haveProfile_ = profile != nullptr;
+    profile_ = profile ? *profile : AircraftProfile();
+    if (playing_) {
+        profilePending_ = true;  // the playing clip keeps what it started with
+        return;
+    }
+    reresolveForProfile();
+}
+
+void SimBridge::reresolveForProfile() {
+    profilePending_ = false;
+    resolveLVarChannels();
+    if (!inputEventsListed_) return;  // done once the aircraft's input events are listed
+    resetInputEvents(true);
+    matchInputChannels();
+    resolveInputEvents();
 }
 
 void SimBridge::resetInputEvents(bool unsubscribe) {
@@ -1008,14 +1202,15 @@ void SimBridge::pollInputEvents() {
 // After the aircraft's input events are listed: subscribe to the ones we record, and read their
 // current values (the subscription only reports changes).
 void SimBridge::resolveInputEvents() {
-    char found[256] = {};
-    char missing[256] = {};
+    char found[512] = {};
+    char missing[512] = {};
     for (int c = 0; c < kChannelCount; ++c) {
         const ChannelDef& ch = kChannels[c];
         if (ch.play != PlayMode::Input || ch.engine > numEngines_) continue;
         char* list = ieHash_[c] ? found : missing;
         const size_t used = std::strlen(list);
-        std::snprintf(list + used, sizeof(found) - used, "%s%s", used ? ", " : "", ch.key);
+        std::snprintf(list + used, sizeof(found) - used, "%s%s%s%s", used ? ", " : "", ch.key, ieHash_[c] ? "=" : "",
+                      ieHash_[c] ? ieName_[c] : "");
         if (!ieHash_[c]) continue;
         track(SimConnect_SubscribeInputEvent(h_, ieHash_[c]), ieName_[c]);
         track(SimConnect_GetInputEvent(h_, REQ_INPUT_VALUE_FIRST + static_cast<DWORD>(c), ieHash_[c]), ieName_[c]);
@@ -1031,7 +1226,6 @@ void SimBridge::resolveInputEvents() {
     }
     log::info("input event channels: recording %s%s%s", found[0] ? found : "none", missing[0] ? "; not on this aircraft: " : "",
               missing);
-    logLVars();
 }
 
 // Research aid for aircraft that keep their controls in their own L:vars (the A320neo V2): list
@@ -1139,6 +1333,13 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     snapFramesLeft_ = 0;
     snapCheckFrames_ = 0;
     setInputMasking(false);
+    // Profile-driven controls back to where they were, the same way.
+    for (int i = 0; i < kControlCount; ++i) {
+        if (profileDrives_[i] && restore) driver_.apply(controlAt(i), snapshot, true);
+        profileDrives_[i] = false;
+    }
+    driver_.endAll();
+    throttleByProfile_ = false;
     if (!restore) {
         for (bool& a : ieActive_) a = false;
         sendFreeze(false);
@@ -1197,6 +1398,77 @@ void SimBridge::checkRestoreGear() {
     sendFreeze(false);
 }
 
+// ---------------------------------------------------------------------------- control setup
+
+void SimBridge::scanBegin(std::vector<ScanVar>& vars) {
+    vars.clear();
+    scanB_.clear();
+    scanL_.clear();
+    if (!inputEventsListed_) log::warn("setup scan: the aircraft's input events aren't listed yet");
+    int readable = 0;
+    for (const InputEventInfo& ie : inputEvents_) {
+        vars.push_back({ie.name, false});
+        scanB_.push_back(fsVarsGetBVarId(ie.name.c_str(), false));
+        double v = NAN;
+        if (scanB_.back() != FS_VAR_INVALID_ID && fsVarsBVarGet(scanB_.back(), numberUnit_, &v) == FS_VAR_ERROR_NONE) {
+            ++readable;
+        }
+    }
+    char name[128];
+    for (FsLVarId id = 0; id < 50000 && scanL_.size() < 8000; ++id) {
+        if (fsVarsGetLVarName(id, name, sizeof(name)) != FS_VAR_ERROR_NONE) break;
+        vars.push_back({name, true});
+        scanL_.push_back(id);
+    }
+    log::info("setup scan: %zu input event(s), %d of them readable, and %zu L:var(s)", scanB_.size(), readable,
+              scanL_.size());
+}
+
+void SimBridge::scanRead(std::vector<double>& values) {
+    values.resize(scanB_.size() + scanL_.size());
+    size_t i = 0;
+    for (const FsBVarId id : scanB_) {
+        double v = NAN;
+        if (id == FS_VAR_INVALID_ID || fsVarsBVarGet(id, numberUnit_, &v) != FS_VAR_ERROR_NONE) v = NAN;
+        values[i++] = v;
+    }
+    for (const FsLVarId id : scanL_) {
+        double v = NAN;
+        if (fsVarsLVarGet(id, numberUnit_, &v) != FS_VAR_ERROR_NONE) v = NAN;
+        values[i++] = v;
+    }
+}
+
+void SimBridge::scanEnd() {
+    std::vector<FsBVarId>().swap(scanB_);
+    std::vector<FsLVarId>().swap(scanL_);
+}
+
+bool SimBridge::beginControl(Control c, const ControlMethod& m, std::string& why) {
+    if (playing_) {
+        why = "a replay is playing";
+        return false;
+    }
+    if (!driver_.begin(c, m, why)) return false;
+    if (c == Control::Throttle && driver_.wantsThrottleMask()) {
+        setInputMasking(true);  // the simvars only hold with the hardware throttle blocked
+        setupMasking_ = true;
+    }
+    return true;
+}
+
+void SimBridge::applyControl(Control c, const Frame& f, bool force) {
+    if (!playing_) driver_.apply(c, f, force);
+}
+
+void SimBridge::endControl(Control c) {
+    driver_.end(c);
+    if (c == Control::Throttle && setupMasking_) {
+        setupMasking_ = false;
+        setInputMasking(false);
+    }
+}
+
 void SimBridge::onTitleData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size) {
     const size_t offset = payloadOffset(d);
     if (size <= offset) return;
@@ -1205,10 +1477,12 @@ void SimBridge::onTitleData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size)
     size_t len = 0;
     while (len < maxLen && s[len]) ++len;
     const size_t keep = len < sizeof(lastTitle_) - 1 ? len : sizeof(lastTitle_) - 1;
-    if (lastTitle_[0] && (std::strncmp(lastTitle_, s, keep) != 0 || lastTitle_[keep] != '\0')) onAircraftChanged();
+    const bool changed = std::strncmp(lastTitle_, s, keep) != 0 || lastTitle_[keep] != '\0';
+    if (lastTitle_[0] && changed) onAircraftChanged();
     std::memcpy(lastTitle_, s, keep);
     lastTitle_[keep] = '\0';
     engine_.setAircraftTitle(std::string(s, len));
+    if (changed && !aircraftPathRequested_) requestAircraftPath();  // a new aircraft: its profile key
 }
 
 }  // namespace br

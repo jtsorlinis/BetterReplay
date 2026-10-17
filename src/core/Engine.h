@@ -8,7 +8,9 @@
 #include <string>
 #include <vector>
 
+#include "AircraftProfile.h"
 #include "ClipIndex.h"
+#include "ControlSetup.h"
 #include "EventDetector.h"
 #include "PlaybackController.h"
 #include "RingBuffer.h"
@@ -19,9 +21,9 @@ namespace br {
 class ISimOutput {
 public:
     virtual ~ISimOutput() = default;
-    // Freeze lat/lon, altitude and attitude; `present` = channels the clip has, `peak` = each
-    // channel's largest |value| in the clip.
-    virtual void beginPlayback(const ChannelMask& present, const Frame& peak) = 0;
+    // Freeze lat/lon, altitude and attitude. `clip` is the loaded clip (its present channels and
+    // the variables they recorded), `peak` each channel's largest |value| in it.
+    virtual void beginPlayback(const Clip& clip, const Frame& peak) = 0;
     // Write every PlayMode::Set channel in `present` (NaN values: keep the live value). `jumped` is
     // true on the first frame after play or seek: PlayMode::Snap channels are written then too.
     virtual void writePlaybackFrame(const Frame& frame, bool jumped) = 0;
@@ -33,6 +35,9 @@ public:
     // True while the sim side is still settling the restored aircraft (e.g. waiting for the gear
     // to come back down before unfreezing on the ground). Recording stays suspended meanwhile.
     virtual bool restoring() const { return false; }
+    // The current aircraft's control profile changed (null: it has none). Recording and playback
+    // follow it from now on.
+    virtual void applyProfile(const AircraftProfile* profile) { (void)profile; }
 };
 
 // Persistent storage for clips and index.json (the module maps this onto \work).
@@ -61,6 +66,7 @@ struct FrameInput {
     double fallbackDtSec = 0.0;           // used when simTimeSec is unavailable
     double touchdownNormalVelFps = NAN;   // PLANE TOUCHDOWN NORMAL VELOCITY
     bool slewActive = false;              // IS SLEW ACTIVE
+    SetupFacts facts;                     // for the control setup
 };
 
 class Engine {
@@ -71,9 +77,10 @@ public:
 
     void setLogger(LogFn fn, void* ctx);
     void setSimOutput(ISimOutput* out) { out_ = out; }
+    void setControlSim(IControlSim* sim) { setup_.setSim(sim); }
 
     // Loads index.json (falling back to its .tmp copy, then to scanning *.rpl headers) and
-    // reconciles it with the files actually present.
+    // reconciles it with the files actually present, then aircraft.json (control profiles).
     void init();
 
     // ---- sim state (from SimConnect system/flow events)
@@ -85,6 +92,13 @@ public:
     void setSimReplayActive(bool active);  // the sim's own replay / cinematics
     void setRelocating(bool relocating);   // teleport / skip / back-on-track in progress
     void setAircraftTitle(const std::string& title);
+    // Identifies the aircraft for its control profile (the module uses its aircraft.cfg path).
+    void setAircraftKey(const std::string& key);
+    const std::string& aircraftKey() const { return aircraftKey_; }
+    const AircraftProfile* currentProfile() const;
+    // The aircraft variable an input event / L:var channel records from now on ("" = none);
+    // saved clips list them.
+    void setChannelVar(int channel, const std::string& var);
 
     // ---- per sim frame
     void onFrame(const FrameInput& in, int64_t utcNowMs);
@@ -103,6 +117,18 @@ public:
     bool stopPlayback(std::string& error);  // restores the snapshot and unfreezes
     bool playbackActive() const { return playbackActive_; }
     const PlaybackController& playback() const { return playback_; }
+
+    // Control setup (ControlSetup.h). Offered on the runway, with the engines running, for an
+    // aircraft without a profile; "later" hides the offer until the next flight, "never" for
+    // this aircraft; "reset" forgets its profile.
+    bool setupStart(std::string& error);
+    bool setupAnswer(const std::string& answer, std::string& error);
+    bool setupLater(std::string& error);
+    bool setupNever(std::string& error);
+    bool setupReset(std::string& error);
+    bool setupActive() const { return setup_.active(); }
+    const char* setupOffer() const;  // "new", "gear" or ""
+    const ProfileStore& profiles() const { return profiles_; }
 
     // ---- status
     bool recording() const { return suspendReason_ == nullptr; }
@@ -130,6 +156,11 @@ private:
     void saveIndex();
     void loadIndex();
     void reconcileWithDisk();
+    void loadProfiles();
+    void saveProfiles();
+    void storeSetupProfile();  // the setup's profile -> profiles_, aircraft.json and the sim
+    bool writeJsonFile(const char* name, const char* tmp, const std::string& json);
+    static void setupLog(void* ctx, int level, const char* msg);
     void logf(int level, const char* fmt, ...) const;
     static void detectorLog(void* ctx, const char* msg);
 
@@ -151,6 +182,15 @@ private:
     bool relocating_ = false;
     bool slewActive_ = false;
     std::string aircraft_;
+    std::string aircraftKey_;
+    SetupFacts facts_;
+    int64_t lastUtcMs_ = 0;
+
+    // control profiles and setup
+    ProfileStore profiles_;
+    SetupFlow setup_;
+    bool setupSnoozed_ = false;  // "later": no offer until the next flight
+    std::string channelVar_[kChannelCount];
 
     // playback
     ISimOutput* out_ = nullptr;

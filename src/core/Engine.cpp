@@ -16,6 +16,8 @@ namespace {
 
 constexpr const char* kIndexFile = "index.json";
 constexpr const char* kIndexTmp = "index.json.tmp";
+constexpr const char* kProfilesFile = "aircraft.json";
+constexpr const char* kProfilesTmp = "aircraft.json.tmp";
 constexpr const char* kReasonPaused = "paused";
 
 class RingSpan : public FrameSource {
@@ -59,6 +61,7 @@ Engine::Engine(IStorage& storage, const EngineConfig& config)
     ring_.reset(capacity);
     scratch_.reserve(capacity * 160 + 4096);
     detector_.setLogger(&Engine::detectorLog, this);
+    setup_.setLogger(&Engine::setupLog, this);
 }
 
 void Engine::setLogger(LogFn fn, void* ctx) {
@@ -78,6 +81,8 @@ void Engine::logf(int level, const char* fmt, ...) const {
 
 void Engine::detectorLog(void* ctx, const char* msg) { static_cast<Engine*>(ctx)->logf(0, "detector: %s", msg); }
 
+void Engine::setupLog(void* ctx, int level, const char* msg) { static_cast<Engine*>(ctx)->logf(level, "%s", msg); }
+
 // ---------------------------------------------------------------------------- index
 
 void Engine::init() {
@@ -92,6 +97,44 @@ void Engine::init() {
     if (!removed.empty()) saveIndex();
     ++clipsRev_;
     logf(0, "library: %zu clip(s)", index_.size());
+    loadProfiles();
+}
+
+void Engine::loadProfiles() {
+    std::vector<uint8_t> buf;
+    for (const char* name : {kProfilesFile, kProfilesTmp}) {
+        if (!storage_.readFile(name, buf)) continue;
+        std::string err;
+        if (profiles_.fromJson(reinterpret_cast<const char*>(buf.data()), buf.size(), &err)) {
+            logf(0, "loaded %s (%zu aircraft control profile(s))", name, profiles_.size());
+            return;
+        }
+        logf(1, "%s is unreadable (%s)", name, err.c_str());
+    }
+}
+
+void Engine::saveProfiles() {
+    std::string json;
+    profiles_.toJson(json);
+    writeJsonFile(kProfilesFile, kProfilesTmp, json);
+}
+
+bool Engine::writeJsonFile(const char* name, const char* tmp, const std::string& json) {
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(json.data());
+    if (!storage_.writeFile(tmp, data, json.size())) {
+        lastError_ = std::string("could not write ") + name;
+        logf(2, "could not write %s", tmp);
+        return false;
+    }
+    if (!storage_.replaceFile(tmp, name)) {
+        logf(1, "renaming %s failed; writing %s directly", tmp, name);
+        if (!storage_.writeFile(name, data, json.size())) {
+            lastError_ = std::string("could not write ") + name;
+            logf(2, "could not write %s", name);
+            return false;
+        }
+    }
+    return true;
 }
 
 void Engine::loadIndex() {
@@ -147,19 +190,7 @@ void Engine::reconcileWithDisk() {
 void Engine::saveIndex() {
     json_.clear();
     index_.toJson(json_);
-    const uint8_t* data = reinterpret_cast<const uint8_t*>(json_.data());
-    if (!storage_.writeFile(kIndexTmp, data, json_.size())) {
-        lastError_ = "could not write index";
-        logf(2, "could not write %s", kIndexTmp);
-        return;
-    }
-    if (!storage_.replaceFile(kIndexTmp, kIndexFile)) {
-        logf(1, "renaming %s failed; writing %s directly", kIndexTmp, kIndexFile);
-        if (!storage_.writeFile(kIndexFile, data, json_.size())) {
-            lastError_ = "could not write index";
-            logf(2, "could not write %s", kIndexFile);
-        }
-    }
+    writeJsonFile(kIndexFile, kIndexTmp, json_);
 }
 
 // ---------------------------------------------------------------------------- sim state
@@ -168,6 +199,8 @@ void Engine::onFlightLoaded(const char* what) {
     // Note: the sim also loads a default flight when returning to the menu, so this must not
     // clear atMainMenu_ (the flow events own that flag).
     endPlayback(false, "flight loaded");
+    setup_.cancel("flight loaded");
+    setupSnoozed_ = false;
     ring_.clear();
     prevSimTime_ = NAN;
     detector_.disarm(recTime_, what);
@@ -195,7 +228,10 @@ void Engine::setPauseFlags(uint32_t flags) {
 
 void Engine::setAtMainMenu(bool atMenu) {
     if (atMenu != atMainMenu_) logf(0, atMenu ? "back at the main menu" : "left the main menu");
-    if (atMenu) endPlayback(false, "main menu");
+    if (atMenu) {
+        endPlayback(false, "main menu");
+        setup_.cancel("main menu");
+    }
     atMainMenu_ = atMenu;
 }
 
@@ -212,6 +248,33 @@ void Engine::setRelocating(bool relocating) {
 void Engine::setAircraftTitle(const std::string& title) {
     if (title != aircraft_) logf(0, "aircraft: %s", title.c_str());
     aircraft_ = title;
+}
+
+void Engine::setAircraftKey(const std::string& key) {
+    if (key == aircraftKey_) return;
+    setup_.cancel("aircraft changed");
+    aircraftKey_ = key;
+    const AircraftProfile* p = currentProfile();
+    if (!p) {
+        logf(0, "aircraft key %s: no control profile yet", key.c_str());
+    } else {
+        std::string summary;
+        for (int i = 0; i < kControlCount; ++i) {
+            const Control c = controlAt(i);
+            summary += std::string(i ? ", " : "") + controlSpec(c).key + " " + stateKey((*p)[c].state);
+            if ((*p)[c].state == ControlState::Ok) summary += " (" + describeMethod(c, (*p)[c].method) + ")";
+        }
+        logf(0, "aircraft key %s: control profile %s%s", key.c_str(), p->declined ? "declined; " : "", summary.c_str());
+    }
+    if (out_) out_->applyProfile(p);
+}
+
+const AircraftProfile* Engine::currentProfile() const {
+    return aircraftKey_.empty() ? nullptr : profiles_.find(aircraftKey_);
+}
+
+void Engine::setChannelVar(int channel, const std::string& var) {
+    if (channel >= 0 && channel < kChannelCount) channelVar_[channel] = var;
 }
 
 // ---------------------------------------------------------------------------- recording
@@ -242,10 +305,18 @@ void Engine::onFrame(const FrameInput& in, int64_t utcNowMs) {
     }
     if (!(dt > 0.0)) dt = 0.0;
     if (dt > cfg_.maxFrameDtSec) dt = cfg_.maxFrameDtSec;
+    facts_ = in.facts;
+    lastUtcMs_ = utcNowMs;
 
     if (!playbackActive_ && !restoringAircraft()) {
         lastRaw_ = in.raw;
         haveLastRaw_ = true;
+    }
+    if (setup_.active()) {
+        // The setup's clock stops while the sim is paused or elsewhere, like the recording's.
+        const bool hold = atMainMenu_ || !simRunning_ || pauseFlags_ != 0 || in.slewActive || relocating_ || simReplay_;
+        setup_.onFrame(hold ? 0.0 : dt, in.raw, in.facts);
+        if (setup_.takeChanged()) storeSetupProfile();
     }
 
     const char* reason = computeSuspendReason(in.slewActive);
@@ -323,6 +394,9 @@ bool Engine::saveRange(EventType type, double startT, double endT, const Detecte
     meta.sampleRateHz = static_cast<float>(cfg_.sampleRateHz);
     meta.utcStartMs = utcNowMs - static_cast<int64_t>((recTime_ - first.t) * 1000.0);
     meta.aircraft = aircraft_;
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (!channelVar_[c].empty()) meta.vars.emplace_back(kChannels[c].key, channelVar_[c]);
+    }
     if (ev) {
         meta.eventOffsetSec = static_cast<float>(ev->eventT - first.t);
         meta.touchdownVsFpm = ev->touchdownVsFpm;
@@ -393,6 +467,10 @@ bool Engine::play(const std::string& file, std::string& error) {
         error = "unknown clip";
         return false;
     }
+    if (setup_.active()) {
+        error = "finish or cancel the control setup first";
+        return false;
+    }
     if (!playbackActive_) {
         if (atMainMenu_ || !simRunning_) {
             error = "not in a flight";
@@ -426,7 +504,7 @@ bool Engine::play(const std::string& file, std::string& error) {
         for (int c = 0; c < kChannelCount; ++c) lastEventValue_[c] = eventState(snapshot_.v[c]);
         playbackActive_ = true;
     }
-    out_->beginPlayback(playback_.present(), playback_.peak());
+    out_->beginPlayback(playback_.clip(), playback_.peak());
     playback_.play();
     jumpPending_ = true;
     logf(0, "playback %s %s (%.1f s, %zu frames, %zu/%d channels)%s", switching ? "switched to" : "of", file.c_str(),
@@ -522,6 +600,106 @@ void Engine::endPlayback(bool restore, const char* why) {
     logf(0, "playback ended (%s)%s", why, restore ? "; aircraft restored" : "");
 }
 
+// ---------------------------------------------------------------------------- control setup
+
+bool Engine::setupStart(std::string& error) {
+    if (aircraftKey_.empty()) {
+        error = "the aircraft isn't identified yet";
+        return false;
+    }
+    if (playbackActive_) {
+        error = "stop the replay first";
+        return false;
+    }
+    if (atMainMenu_ || !simRunning_ || !haveLastRaw_) {
+        error = "not in a flight";
+        return false;
+    }
+    AircraftProfile base;
+    if (const AircraftProfile* p = currentProfile()) base = *p;
+    base.key = aircraftKey_;
+    if (!setup_.start(base, lastRaw_, facts_, error)) return false;
+    setupSnoozed_ = false;
+    if (setup_.takeChanged()) storeSetupProfile();
+    return true;
+}
+
+bool Engine::setupAnswer(const std::string& answer, std::string& error) {
+    if (!setup_.answer(answer, error)) return false;
+    if (setup_.takeChanged()) storeSetupProfile();
+    if (answer == "later") setupSnoozed_ = true;
+    return true;
+}
+
+bool Engine::setupLater(std::string& error) {
+    (void)error;
+    setup_.cancel("finish later");
+    setupSnoozed_ = true;
+    return true;
+}
+
+bool Engine::setupNever(std::string& error) {
+    if (aircraftKey_.empty()) {
+        error = "the aircraft isn't identified yet";
+        return false;
+    }
+    setup_.cancel("declined");
+    AircraftProfile& p = profiles_.upsert(aircraftKey_);
+    p.declined = true;
+    p.title = aircraft_;
+    p.updatedUtcMs = lastUtcMs_;
+    saveProfiles();
+    logf(0, "control setup declined for %s", aircraftKey_.c_str());
+    if (out_) out_->applyProfile(currentProfile());
+    return true;
+}
+
+bool Engine::setupReset(std::string& error) {
+    if (aircraftKey_.empty()) {
+        error = "the aircraft isn't identified yet";
+        return false;
+    }
+    setup_.cancel("profile reset");
+    if (profiles_.remove(aircraftKey_)) {
+        saveProfiles();
+        logf(0, "control profile for %s removed", aircraftKey_.c_str());
+    }
+    setupSnoozed_ = false;
+    if (out_) out_->applyProfile(nullptr);
+    return true;
+}
+
+void Engine::storeSetupProfile() {
+    if (aircraftKey_.empty()) return;
+    AircraftProfile& p = profiles_.upsert(aircraftKey_);
+    p = setup_.profile();
+    p.key = aircraftKey_;
+    p.title = aircraft_;
+    p.updatedUtcMs = lastUtcMs_;
+    saveProfiles();
+    if (out_) out_->applyProfile(currentProfile());
+}
+
+const char* Engine::setupOffer() const {
+    if (setup_.active() || setupSnoozed_ || playbackActive_ || aircraftKey_.empty() || !haveLastRaw_ || atMainMenu_ ||
+        !simRunning_) {
+        return "";
+    }
+    const AircraftProfile* p = currentProfile();
+    if (p && p->declined) return "";
+    bool groundPending = !p;
+    for (int i = 0; p && i < kControlCount; ++i) {
+        if (controlAt(i) != Control::Gear && p->controls[i].state == ControlState::Pending) groundPending = true;
+    }
+    const bool onGround = lastRaw_.v[kOnGround] >= 0.5;
+    const double gs = lastRaw_.v[kGroundSpeed];
+    if (groundPending) {
+        return onGround && facts_.onRunway && facts_.engineRunning && gs < 2.0 ? "new" : "";
+    }
+    const bool gearPending = (*p)[Control::Gear].state == ControlState::Pending && facts_.gearRetractable;
+    return gearPending && !onGround ? "gear" : "";
+}
+
 // ---------------------------------------------------------------------------- status
 
 void Engine::statusJson(std::string& out) const {
@@ -548,6 +726,23 @@ void Engine::statusJson(std::string& out) const {
     w.kv("speed", playback_.speed());
     w.kv("playing", playback_.playing());
     w.kv("eventT", playback_.loaded() ? static_cast<double>(playback_.clip().meta.eventOffsetSec) : 0.0);
+    w.endObject();
+    w.key("setup").beginObject();
+    w.kv("offer", setupOffer());
+    const AircraftProfile* p = currentProfile();
+    w.kv("have", !p ? "none" : p->declined ? "declined" : p->anyPending() ? "partial" : "complete");
+    w.key("controls").beginArray();
+    for (int i = 0; p && i < kControlCount; ++i) {
+        const Control c = controlAt(i);
+        const ControlProfile& cp = (*p)[c];
+        w.beginObject();
+        w.kv("control", controlSpec(c).key);
+        w.kv("state", stateKey(cp.state));
+        w.kv("method", cp.state == ControlState::Ok ? describeMethod(c, cp.method) : std::string());
+        w.endObject();
+    }
+    w.endArray();
+    setup_.statusJson(w);
     w.endObject();
     w.endObject();
 }

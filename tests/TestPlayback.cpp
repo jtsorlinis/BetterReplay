@@ -233,9 +233,9 @@ struct FakeSim : ISimOutput {
     ChannelMask present;
     Frame peak;
 
-    void beginPlayback(const ChannelMask& p, const Frame& pk) override {
+    void beginPlayback(const Clip& clip, const Frame& pk) override {
         ++begins;
-        present = p;
+        present = clip.present;
         peak = pk;
     }
     void writePlaybackFrame(const Frame& f, bool jumped) override {

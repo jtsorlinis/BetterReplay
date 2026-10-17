@@ -8,6 +8,8 @@
 //         (new fields are appended; readers stop at the payload size)
 //   CHAN  u16 count, count x { u8 storage, u8 interp, u8 bytes, str key }
 //   SAMP  u32 frames, u32 stride, frames x { f32 t, channel values in CHAN order }
+//   VARS  u16 count, count x { str channelKey, str variable }   (optional: which aircraft
+//         variable each input event / L:var channel recorded)
 //
 //   str = u16 byteLength + UTF-8 bytes
 //

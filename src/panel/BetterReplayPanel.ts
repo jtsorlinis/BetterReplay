@@ -28,6 +28,27 @@ interface PlayState {
     playing: boolean;
     eventT: number;
 }
+interface SetupControl {
+    control: string;
+    state: string;
+    method: string;
+}
+// The control setup (src/core/ControlSetup.h); the step fields are there while it's active.
+interface SetupStatus {
+    offer: string;  // "new", "gear" or ""
+    have: string;   // the aircraft's profile: "none", "partial", "complete", "declined"
+    controls: SetupControl[];
+    active: boolean;
+    phase?: string;
+    step?: string;
+    title?: string;
+    stepNo?: number;
+    steps?: number;
+    prompt?: string;
+    detail?: string;
+    note?: string;
+    buttons?: string[];
+}
 interface Status {
     rec: boolean;
     why: string;
@@ -41,6 +62,7 @@ interface Status {
     lastSaved: string;
     error: string;
     play: PlayState;
+    setup?: SetupStatus;
 }
 interface ClipInfo {
     file: string;
@@ -87,6 +109,26 @@ const PHASES: { [phase: string]: string } = {
     "landing-touchdown": "touchdown detected",
     "landing-bounce": "bounce",
     "landing-rollout": "capturing landing",
+};
+const SETUP_BUTTONS: { [answer: string]: string } = {
+    start: "Start",
+    yes: "Yes",
+    no: "No",
+    again: "Watch again",
+    skip: "Skip",
+    retry: "Try again",
+    ready: "Continue anyway",
+    later: "Later",
+    never: "Never for this aircraft",
+    cancel: "Cancel",
+    close: "Close",
+};
+const SETUP_PRIMARY: { [answer: string]: boolean } = { start: true, yes: true, retry: true, close: true };
+const CONTROL_STATES: { [state: string]: string } = {
+    ok: "ok",
+    failed: "not replayable",
+    skipped: "skipped",
+    pending: "not set up",
 };
 
 // ---- helpers
@@ -138,6 +180,13 @@ function byId<T extends HTMLElement>(id: string): T {
     return document.getElementById(id) as T;
 }
 
+// Sets an element's text, hiding it when empty.
+function setText(id: string, text: string): void {
+    const el = byId(id);
+    el.textContent = text;
+    el.classList.toggle("hidden", !text);
+}
+
 // Walks up from an event target to the nearest element carrying `attr` (no Element.closest).
 function findWithAttr(start: EventTarget | null, attr: string, stop: HTMLElement): HTMLElement | null {
     let el = start as HTMLElement | null;
@@ -169,6 +218,9 @@ class BetterReplayPanel extends UIElement {
     declare confirmFile: string;
     declare confirmTimer: number;
     declare toastTimer: number;
+    declare setupButtons: string;
+    declare resetConfirm: boolean;
+    declare resetTimer: number;
     declare handleStatus: (payload: string) => void;
     declare handleClips: (payload: string) => void;
     declare handleReply: (payload: string) => void;
@@ -193,6 +245,9 @@ class BetterReplayPanel extends UIElement {
         this.confirmFile = "";
         this.confirmTimer = 0;
         this.toastTimer = 0;
+        this.setupButtons = "";
+        this.resetConfirm = false;
+        this.resetTimer = 0;
         this.handleStatus = (payload: string) => this.onStatus(payload);
         this.handleClips = (payload: string) => this.onClips(payload);
         this.handleReply = (payload: string) => this.onReply(payload);
@@ -287,6 +342,7 @@ class BetterReplayPanel extends UIElement {
         this.status = s;
         this.renderStatus(s);
         this.renderPlayer(s.play);
+        this.renderSetup(s);
         if (s.clipsRev !== this.clipsRev && s.clipsRev !== this.loadingRev) {
             this.loadingRev = s.clipsRev;
             this.pending = [];
@@ -320,6 +376,8 @@ class BetterReplayPanel extends UIElement {
             this.toast("Saved the last few minutes");
         } else if (r.op === "delete") {
             this.toast("Clip deleted");
+        } else if (r.op === "setupReset") {
+            this.toast("Control profile removed for this aircraft");
         }
         this.send({ op: "status" });
     }
@@ -363,6 +421,27 @@ class BetterReplayPanel extends UIElement {
             this.send({ op: "seek", t: this.seekFraction * dur });
         });
 
+        const setup = byId("br-setup");
+        setup.addEventListener("click", (e: Event) => {
+            const button = findWithAttr(e.target, "data-a", setup);
+            if (button) this.setupAction(button.getAttribute("data-a") || "");
+        });
+        byId("br-setup-run").addEventListener("click", () => this.send({ op: "setupStart" }));
+        byId("br-setup-reset").addEventListener("click", () => {
+            window.clearTimeout(this.resetTimer);
+            if (this.resetConfirm) {
+                this.resetConfirm = false;
+                this.send({ op: "setupReset" });
+            } else {
+                this.resetConfirm = true;
+                this.resetTimer = window.setTimeout(() => {
+                    this.resetConfirm = false;
+                    if (this.status) this.renderSetup(this.status);
+                }, 3000);
+            }
+            if (this.status) this.renderSetup(this.status);
+        });
+
         const list = byId("br-list");
         list.addEventListener("click", (e: Event) => {
             const button = findWithAttr(e.target, "data-act", list);
@@ -375,6 +454,19 @@ class BetterReplayPanel extends UIElement {
                 this.confirmDelete(file);
             }
         });
+    }
+
+    setupAction(a: string): void {
+        const active = !!(this.status && this.status.setup && this.status.setup.active);
+        if (a === "start") {
+            this.send({ op: "setupStart" });
+        } else if (a === "never") {
+            this.send({ op: "setupNever" });
+        } else if (a === "later" && !active) {
+            this.send({ op: "setupLater" });
+        } else {
+            this.send({ op: "setupAnswer", a: a });
+        }
     }
 
     confirmDelete(file: string): void {
@@ -443,6 +535,96 @@ class BetterReplayPanel extends UIElement {
         const error = byId("br-error");
         error.textContent = s.error;
         error.classList.toggle("hidden", !s.error);
+    }
+
+    // The setup card (an offer, or the step in progress) and the profile line under the status.
+    renderSetup(s: Status): void {
+        const setup = s.setup;
+        const card = byId("br-setup");
+        const line = byId("br-controls");
+        if (!setup) {
+            card.classList.add("hidden");
+            line.classList.add("hidden");
+            return;
+        }
+        let title = "";
+        let step = "";
+        let prompt = "";
+        let detail = "";
+        let note = "";
+        let buttons: string[] = [];
+        if (setup.active) {
+            title = "Control setup";
+            if (setup.phase !== "done" && setup.steps) {
+                step = "Step " + setup.stepNo + " of " + setup.steps + ": " + (setup.title || "");
+            }
+            prompt = setup.prompt || "";
+            detail = setup.detail || "";
+            note = setup.note || "";
+            buttons = setup.buttons || [];
+        } else if (setup.offer === "new") {
+            title = "Set up replay controls for this aircraft?";
+            prompt =
+                "BetterReplay learns how this aircraft's spoilers, flaps, throttle and gear respond, so replays can move them.";
+            detail = "About a minute here on the runway, then raise and lower the gear once after takeoff.";
+            buttons = ["start", "later", "never"];
+        } else if (setup.offer === "gear") {
+            title = "Finish the control setup";
+            prompt = "Raise and lower the gear once, so replays can move it.";
+            buttons = ["start", "later"];
+        }
+        card.classList.toggle("hidden", !title);
+        card.classList.toggle("asking", setup.phase === "ask" && setup.active);
+        if (title) {
+            byId("br-setup-title").textContent = title;
+            byId("br-setup-step").textContent = step;
+            byId("br-setup-prompt").textContent = prompt;
+            setText("br-setup-detail", detail);
+            setText("br-setup-note", note);
+            // Rebuilt only when the set changes, so a click isn't lost to a re-render.
+            const key = buttons.join(",");
+            if (key !== this.setupButtons) {
+                this.setupButtons = key;
+                let html = "";
+                for (let i = 0; i < buttons.length; ++i) {
+                    const a = buttons[i];
+                    html += '<button type="button" class="br-btn' + (SETUP_PRIMARY[a] ? " br-primary" : "") + '" data-a="' +
+                        escapeHtml(a) + '">' + escapeHtml(SETUP_BUTTONS[a] || a) + "</button>";
+                }
+                byId("br-setup-btns").innerHTML = html;
+            }
+        } else {
+            this.setupButtons = "";
+        }
+
+        line.classList.toggle("hidden", setup.active);
+        if (setup.active) return;
+        let text = "Replay controls: ";
+        if (setup.have === "none") {
+            text += "not set up for this aircraft";
+        } else if (setup.have === "declined") {
+            text += "setup declined for this aircraft";
+        } else {
+            const parts: string[] = [];
+            for (let i = 0; i < setup.controls.length; ++i) {
+                const c = setup.controls[i];
+                if (c.state === "absent") continue;
+                parts.push(c.control + " " + (CONTROL_STATES[c.state] || c.state));
+            }
+            text += parts.join(" · ");
+        }
+        byId("br-controls-text").textContent = text;
+        byId("br-controls-text").title = setup.controls
+            .filter((c: SetupControl) => !!c.method)
+            .map((c: SetupControl) => c.control + ": " + c.method)
+            .join("\n");
+        const run = byId<HTMLButtonElement>("br-setup-run");
+        run.textContent = setup.have === "none" ? "Set up" : "Redo";
+        run.disabled = s.play.active;
+        const reset = byId<HTMLButtonElement>("br-setup-reset");
+        reset.classList.toggle("hidden", setup.have === "none");
+        reset.classList.toggle("confirm", this.resetConfirm);
+        reset.textContent = this.resetConfirm ? "Sure?" : "Reset";
     }
 
     renderSeek(fraction: number): void {

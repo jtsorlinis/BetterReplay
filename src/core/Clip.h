@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "Channels.h"
@@ -24,6 +25,9 @@ struct ClipMeta {
     float peakG = NAN;            // landings only
     uint16_t bounces = 0;
     std::string aircraft;
+    // Channel key -> the aircraft variable it recorded, for input event and L:var channels
+    // (their names depend on the aircraft and its control profile).
+    std::vector<std::pair<std::string, std::string>> vars;
 };
 
 struct Clip {
