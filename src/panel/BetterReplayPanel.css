@@ -36,6 +36,9 @@ button {
   display: none !important;
 }
 
+/* Spacing between flex items is margins throughout: the sim's browser (Coherent GT) ignores
+   `gap`. */
+
 .br-root {
   display: flex;
   flex-direction: column;
@@ -242,7 +245,6 @@ button {
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  gap: 10px;
   margin-top: 18px;
   padding: 13px 18px;
   border-radius: 8px;
@@ -252,6 +254,7 @@ button {
 
 .br-save-icon {
   display: flex;
+  margin-right: 10px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
@@ -354,7 +357,6 @@ button {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 14px;
   margin-top: 10px;
   padding: 14px 16px;
   border: 1px solid var(--br-line);
@@ -364,6 +366,7 @@ button {
 
 .br-plane-icon {
   display: flex;
+  margin-right: 14px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
@@ -402,7 +405,6 @@ button {
   flex: 0 0 auto;
   align-items: center;
   margin-top: 7px;
-  gap: 7px;
   padding: 3px 11px 3px 9px;
   border-radius: 12px;
   font-size: 14px;
@@ -411,6 +413,7 @@ button {
 
 .br-pill::before {
   content: "";
+  margin-right: 7px;
   flex: 0 0 auto;
   width: 8px;
   height: 8px;
@@ -434,6 +437,7 @@ button {
 }
 
 .br-btn.br-setup-run {
+  margin-left: 14px;
   padding: 9px 16px;
   border-radius: 8px;
   font-size: 15px;
@@ -449,7 +453,6 @@ button {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 12px;
   margin-top: 10px;
   padding: 16px 18px;
   border-color: var(--br-blue);
@@ -471,11 +474,16 @@ button {
   height: 24px;
 }
 
+.br-btn.br-open-clips .br-open-icon {
+  margin-right: 12px;
+}
+
 .br-open-label {
   flex: 1 1 auto;
 }
 
 .br-open-count {
+  margin-left: 12px;
   padding: 2px 12px;
   border-radius: 12px;
   background: rgba(4, 18, 31, 0.22);
@@ -485,7 +493,7 @@ button {
 .br-btn.br-open-clips .br-chevron {
   width: 22px;
   height: 22px;
-  margin-left: -4px;
+  margin-left: 8px;
 }
 
 .br-error {
@@ -543,7 +551,6 @@ button {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
 }
 
 .br-setup-kicker {
@@ -557,6 +564,7 @@ button {
 
 .br-setup-aircraft {
   min-width: 0;
+  margin-left: 12px;
   overflow: hidden;
   color: var(--br-muted);
   font-size: 13px;
@@ -760,7 +768,6 @@ button {
 .br-attempt {
   display: flex;
   align-items: center;
-  gap: 12px;
   padding: 5px 0;
   color: var(--br-muted);
 }
@@ -776,6 +783,7 @@ button {
 }
 
 .br-attempt-mark {
+  margin-right: 12px;
   position: relative;
   flex: 0 0 auto;
   width: 22px;
@@ -908,8 +916,11 @@ button {
 
 .br-outline {
   display: flex;
-  gap: 14px;
   margin-bottom: 16px;
+}
+
+.br-outline .br-step-dot {
+  margin-right: 14px;
 }
 
 .br-outline-title {
@@ -931,7 +942,6 @@ button {
 .br-check {
   display: flex;
   align-items: center;
-  gap: 14px;
   margin-bottom: 14px;
   color: var(--br-muted);
   font-size: 18px;
@@ -942,6 +952,7 @@ button {
 }
 
 .br-check-box {
+  margin-right: 14px;
   position: relative;
   flex: 0 0 auto;
   width: 30px;
@@ -980,8 +991,11 @@ button {
 .br-result-head {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
   font-size: 17px;
+}
+
+.br-result-state {
+  margin-left: 12px;
 }
 
 .br-result-name {
@@ -1012,14 +1026,17 @@ button {
 .br-setup-btns {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 18px;
+  margin: 13px -5px -5px;
+}
+
+.br-setup-btns .br-btn {
+  margin: 5px;
 }
 
 /* During the steps the big buttons' row keeps its space even when there are none (while you move a
    control, while it replays), so the page above doesn't shift when Yes / No appear. */
 .br-setup.stepping .br-setup-btns {
-  min-height: 54px;
+  min-height: 64px;  /* a big button and its margins */
 }
 
 .br-setup.stepping .br-setup-btns.hidden {
@@ -1051,8 +1068,11 @@ button {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 22px;
-  margin-top: 12px;
+  margin-top: 10px;
+}
+
+.br-setup-minor .br-btn {
+  margin: 2px 11px;
 }
 
 .br-btn.br-link {
@@ -1243,13 +1263,13 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 30px;
   margin-top: 30px;
 }
 
 .br-round {
   display: flex;
   flex: 0 0 auto;
+  margin: 0 15px;
   align-items: center;
   justify-content: center;
   width: 84px;
@@ -1293,11 +1313,11 @@ button {
 .br-speeds {
   display: flex;
   justify-content: center;
-  gap: 8px;
   margin-top: 30px;
 }
 
 .br-speeds .br-btn {
+  margin: 0 4px;
   padding: 10px 14px;
   font-size: 16px;
 }
@@ -1307,12 +1327,16 @@ button {
 .br-clips-head {
   display: flex;
   align-items: center;
-  gap: 14px;
   margin-bottom: 10px;
   font-size: 22px;
 }
 
+.br-clips-head .br-icon-btn {
+  margin-right: 14px;
+}
+
 .br-clips-count {
+  margin-left: 14px;
   color: var(--br-muted);
   font-size: 18px;
 }
@@ -1333,7 +1357,6 @@ button {
 .br-clip {
   display: flex;
   align-items: center;
-  gap: 12px;
   margin-bottom: 8px;
   padding: 12px;
   border: 1px solid var(--br-line);
@@ -1347,6 +1370,7 @@ button {
 
 .br-badge {
   flex: 0 0 auto;
+  margin-right: 12px;
   width: 70px;
   padding: 5px 0;
   border-radius: 5px;
@@ -1396,7 +1420,12 @@ button {
 .br-clip-btns {
   display: flex;
   flex: 0 0 auto;
-  gap: 8px;
+  margin-left: 12px;
+}
+
+.br-clip-btns .br-delete,
+.br-clip-btns .br-confirm-delete {
+  margin-left: 8px;
 }
 
 .br-toast {
