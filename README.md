@@ -6,7 +6,7 @@ An in-sim auto replay recorder for Microsoft Flight Simulator 2024. It records y
 - **Auto clips:** takeoffs and landings, including touchdown vertical speed, peak G and bounce count. They're written to disk as soon as each event finishes.
 - **Toolbar panel:** shows recorder status and the clip list, and has play/pause, seek, speed (0.25x–4x), stop, keep, delete and "save last 5 min".
 
-> **Status: MVP, not yet flown.** The platform-independent core has 76 unit tests and the module builds and links against the MSFS 2024 SDK. Nothing has run inside the sim yet. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
+> **Status: MVP, early in-sim testing.** The platform-independent core has 76 unit tests and the module builds and links against the MSFS 2024 SDK. It has had one in-sim test run so far, which led to the playback fixes for airspeed and gear. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
 
 ## Requirements
 
