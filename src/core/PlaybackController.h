@@ -29,6 +29,9 @@ public:
     const std::string& file() const { return file_; }
     const Clip& clip() const { return clip_; }
     const ChannelMask& present() const { return clip_.present; }
+    // Largest |value| of each channel over the whole clip (0 where it has none), e.g. to tell
+    // whether an input event was recorded in percent or as a 0..1 fraction.
+    const Frame& peak() const { return peak_; }
 
     void play();  // restarts from the beginning if at the end
     void pause() { playing_ = false; }
@@ -48,6 +51,7 @@ public:
 
 private:
     Clip clip_;
+    Frame peak_;
     std::string file_;
     bool loaded_ = false;
     bool playing_ = false;

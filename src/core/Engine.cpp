@@ -426,7 +426,7 @@ bool Engine::play(const std::string& file, std::string& error) {
         for (int c = 0; c < kChannelCount; ++c) lastEventValue_[c] = eventState(snapshot_.v[c]);
         playbackActive_ = true;
     }
-    out_->beginPlayback(playback_.present());
+    out_->beginPlayback(playback_.present(), playback_.peak());
     playback_.play();
     jumpPending_ = true;
     logf(0, "playback %s %s (%.1f s, %zu frames, %zu/%d channels)%s", switching ? "switched to" : "of", file.c_str(),

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <MSFS/MSFS_WindowsTypes.h>
+#include <MSFS/MSFS_Vars.h>
 #include <SimConnect.h>
 
 #include <cmath>
@@ -22,7 +23,7 @@ public:
     bool connected() const { return h_ != 0; }
 
     // ISimOutput
-    void beginPlayback(const ChannelMask& present) override;
+    void beginPlayback(const ChannelMask& present, const Frame& peak) override;
     void writePlaybackFrame(const Frame& frame, bool jumped) override;
     void sendChannelEvent(int channel, double value) override;
     void endPlayback(const Frame& snapshot, bool restore) override;
@@ -97,7 +98,7 @@ private:
     void trackEventChannels(const Frame& frame, bool jumped);
     void checkEventChannels();
     // Input event channels: resolve them against the aircraft's list, replay and check them.
-    void resetInputEvents();
+    void resetInputEvents(bool unsubscribe);
     void resolveInputEvents();
     void pollInputEvents();
     void sendInputEvents(const Frame& frame, bool force);
@@ -137,8 +138,15 @@ private:
     uint64_t ieHash_[kChannelCount] = {};
     char ieName_[kChannelCount][64] = {};
     double ieValue_[kChannelCount] = {};
+    // Replay goes through the input event's "<NAME>_SET" preset (fsVarsBVarCall), the same path
+    // a cockpit click or hardware binding takes. Writing the value with SimConnect_SetInputEvent
+    // doesn't run the aircraft's code, so the A320neo V2 just recomputed it. The preset takes a
+    // 0..1 fraction; events reported in percent (e.g. throttle 16.7 = idle) are scaled by 0.01.
+    FsBVarId ieSetId_[kChannelCount] = {};
+    double ieScale_[kChannelCount] = {};
+    int ieSetErrors_ = 0;
     bool ieActive_[kChannelCount] = {};  // replayed in this playback
-    double ieSent_[kChannelCount] = {};
+    double ieSent_[kChannelCount] = {};  // last value sent, in the recorded (native) units
     int ieSinceSend_[kChannelCount] = {};
     int ieSettled_[kChannelCount] = {};  // frames since the sent value last changed
     int ieChecked_[kChannelCount] = {};

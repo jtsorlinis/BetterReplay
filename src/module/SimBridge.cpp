@@ -97,6 +97,7 @@ bool SimBridge::open() {
     for (int c = 0; c < kChannelCount; ++c) {
         const ChannelDef& ch = kChannels[c];
         ieValue_[c] = NAN;
+        ieSetId_[c] = FS_VAR_INVALID_ID;
         if (!ch.simvar) continue;
         recordChannels_[recordCount_++] = c;
         track(SimConnect_AddToDataDefinition(h_, DEF_RECORD, ch.simvar, ch.units, SIMCONNECT_DATATYPE_FLOAT64),
@@ -249,6 +250,7 @@ void SimBridge::dispatch(SIMCONNECT_RECV* p, DWORD size) {
                 log::info("FlightLoaded: %s", e->szFileName);
                 engine_.onFlightLoaded("FlightLoaded event");
                 onAircraftChanged();
+                resetInputEvents(false);  // the old aircraft's input events are gone; don't poll them
                 enumerateAtFrame_ = frameCount_ + 120;  // list the new aircraft's input events once it's settled
             }
             break;
@@ -416,7 +418,7 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     if (gearCheckFrames_ > 0 && --gearCheckFrames_ == 0) checkGearResponse();
     if (frameCount_ == enumerateAtFrame_) {
         inputEventsLogged_ = 0;
-        resetInputEvents();
+        resetInputEvents(true);
         track(SimConnect_EnumerateInputEvents(h_, REQ_INPUT_EVENTS), "EnumerateInputEvents");
     }
 
@@ -718,7 +720,7 @@ void SimBridge::checkEventChannels() {
     }
 }
 
-void SimBridge::beginPlayback(const ChannelMask& present) {
+void SimBridge::beginPlayback(const ChannelMask& present, const Frame& peak) {
     if (!h_) return;
     restoreWaitFrames_ = 0;  // a new clip started while still settling a restore: playback wins
     snapFramesLeft_ = 0;
@@ -741,6 +743,9 @@ void SimBridge::beginPlayback(const ChannelMask& present) {
         ieSettled_[c] = 0;
         ieChecked_[c] = 0;
         ieOff_[c] = 0;
+        // Recorded in percent (e.g. throttle: idle 16.7, TOGA 86) or already a 0..1 fraction
+        // (e.g. gear lever 0/1)? The _SET preset takes the fraction.
+        ieScale_[c] = peak.v[c] > 1.0001 || std::fabs(ieValue_[c]) > 1.0001 ? 0.01 : 1.0;
         if (!ieActive_[c]) continue;
         ++inputs;
         for (int k = 0; k < ch.coversCount; ++k) playSkip_.set(static_cast<size_t>(ch.coversFirst + k));
@@ -793,8 +798,14 @@ void SimBridge::beginPlayback(const ChannelMask& present) {
               "position/altitude/attitude; %s",
               playChannelCount_, inputs, numEngines_, throttle);
     for (int c = 0; c < kChannelCount; ++c) {
-        if (ieActive_[c]) log::debug("playback: replaying %s via input event %s", kChannels[c].key, ieName_[c]);
+        if (!ieActive_[c]) continue;
+        if (ieSetId_[c] != FS_VAR_INVALID_ID) {
+            log::debug("playback: replaying %s via %s_SET (x%g)", kChannels[c].key, ieName_[c], ieScale_[c]);
+        } else {
+            log::debug("playback: replaying %s via SetInputEvent %s", kChannels[c].key, ieName_[c]);
+        }
     }
+    ieSetErrors_ = 0;
 }
 
 void SimBridge::writeSnap(const Frame& frame) {
@@ -968,10 +979,11 @@ void SimBridge::onInputEvents(const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS* list
     }
 }
 
-void SimBridge::resetInputEvents() {
+void SimBridge::resetInputEvents(bool unsubscribe) {
     for (int c = 0; c < kChannelCount; ++c) {
-        if (ieHash_[c] != 0) SimConnect_UnsubscribeInputEvent(h_, ieHash_[c]);
+        if (unsubscribe && ieHash_[c] != 0) SimConnect_UnsubscribeInputEvent(h_, ieHash_[c]);
         ieHash_[c] = 0;
+        ieSetId_[c] = FS_VAR_INVALID_ID;
         ieName_[c][0] = '\0';
         ieValue_[c] = NAN;
         ieNotified_[c] = false;
@@ -1003,6 +1015,15 @@ void SimBridge::resolveInputEvents() {
         if (!ieHash_[c]) continue;
         track(SimConnect_SubscribeInputEvent(h_, ieHash_[c]), ieName_[c]);
         track(SimConnect_GetInputEvent(h_, REQ_INPUT_VALUE_FIRST + static_cast<DWORD>(c), ieHash_[c]), ieName_[c]);
+        char setName[80];
+        std::snprintf(setName, sizeof(setName), "%s_SET", ieName_[c]);
+        ieSetId_[c] = fsVarsGetBVarId(setName, true);
+        if (ieSetId_[c] == FS_VAR_INVALID_ID) {
+            log::warn("input event %s has no callable %s preset; replaying it with SimConnect_SetInputEvent instead",
+                      ieName_[c], setName);
+        } else {
+            log::debug("input event %s: replayed through %s", ieName_[c], setName);
+        }
     }
     log::info("input event channels: recording %s%s%s", found[0] ? found : "none", missing[0] ? "; not on this aircraft: " : "",
               missing);
@@ -1019,10 +1040,28 @@ void SimBridge::sendInputEvents(const Frame& frame, bool force) {
         if (!force && !changed && ++ieSinceSend_[c] < kInputResendFrames) continue;
         ieSent_[c] = v;
         ieSinceSend_[c] = 0;
-        const HRESULT hr = SimConnect_SetInputEvent(h_, ieHash_[c], sizeof(double), &v);
-        if (firstInputSet_) {
-            firstInputSet_ = false;
-            track(hr, "SetInputEvent");
+        if (ieSetId_[c] != FS_VAR_INVALID_ID) {
+            if (ieScale_[c] == 1.0 && std::fabs(v) > 1.0001) {
+                ieScale_[c] = 0.01;  // the clip turned out to be in percent after all
+                log::debug("playback: %s is in percent; scaling by 0.01 for %s_SET", kChannels[c].key, ieName_[c]);
+            }
+            FsVarParamVariant param;
+            param.type = FsVarParamTypeDouble;
+            param.doubleValue = v * ieScale_[c];
+            FsVarParamArray params;
+            params.size = 1;
+            params.array = &param;
+            const FsVarError err = fsVarsBVarCall(ieSetId_[c], params);
+            if (err != FS_VAR_ERROR_NONE && ieSetErrors_++ < 5) {
+                log::warn("playback: %s_SET(%.4f) failed (error 0x%x)", ieName_[c], param.doubleValue,
+                          static_cast<unsigned>(err));
+            }
+        } else {
+            const HRESULT hr = SimConnect_SetInputEvent(h_, ieHash_[c], sizeof(double), &v);
+            if (firstInputSet_) {
+                firstInputSet_ = false;
+                track(hr, "SetInputEvent");
+            }
         }
     }
 }

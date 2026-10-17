@@ -86,6 +86,13 @@ void PlaybackController::load(Clip&& clip, const std::string& file) {
     clip_ = std::move(clip);
     dropEmptyChannels(clip_);
     deriveGearCommand(clip_);
+    peak_ = Frame();
+    for (const Frame& f : clip_.frames) {
+        for (int c = 0; c < kChannelCount; ++c) {
+            const double a = std::fabs(f.v[c]);
+            if (a > peak_.v[c]) peak_.v[c] = a;  // NaN compares false: skipped
+        }
+    }
     file_ = file;
     loaded_ = !clip_.frames.empty();
     duration_ = clip_.duration();

@@ -19,8 +19,9 @@ namespace br {
 class ISimOutput {
 public:
     virtual ~ISimOutput() = default;
-    // Freeze lat/lon, altitude and attitude; `present` = channels the clip has.
-    virtual void beginPlayback(const ChannelMask& present) = 0;
+    // Freeze lat/lon, altitude and attitude; `present` = channels the clip has, `peak` = each
+    // channel's largest |value| in the clip.
+    virtual void beginPlayback(const ChannelMask& present, const Frame& peak) = 0;
     // Write every PlayMode::Set channel in `present` (NaN values: keep the live value). `jumped` is
     // true on the first frame after play or seek: PlayMode::Snap channels are written then too.
     virtual void writePlaybackFrame(const Frame& frame, bool jumped) = 0;

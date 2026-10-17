@@ -163,6 +163,21 @@ TEST(Playback_ChannelsWithoutValuesAreNotPlayed) {
     CHECK(p.present().test(kLat));
 }
 
+TEST(Playback_PeakPerChannel) {
+    // The A320neo V2's throttle input event in percent: full reverse ~0, idle 16.7, TOGA 86.
+    Clip c = makeClip(3.0);
+    for (Frame& f : c.frames) {
+        f.v[kInputThrottle1] = f.t < 1.0 ? 16.7 : (f.t < 2.0 ? 0.17 : 86.0);
+        f.v[kInputGear] = 1.0;
+    }
+    c.frames[3].v[kInputThrottle1] = NAN;
+    PlaybackController p;
+    p.load(std::move(c), "a.rpl");
+    CHECK_NEAR(p.peak().v[kInputThrottle1], 86.0, 1e-9);
+    CHECK_NEAR(p.peak().v[kInputGear], 1.0, 0);
+    CHECK_NEAR(p.peak().v[kLat], 13.0, 1e-9);  // 10 + t, t up to 3 s
+}
+
 TEST(Playback_InterpolatesHeadingThroughNorth) {
     PlaybackController p;
     p.load(makeClip(5.0), "a.rpl");
@@ -216,10 +231,12 @@ struct FakeSim : ISimOutput {
     std::vector<Frame> written;
     std::vector<std::pair<int, double>> events;
     ChannelMask present;
+    Frame peak;
 
-    void beginPlayback(const ChannelMask& p) override {
+    void beginPlayback(const ChannelMask& p, const Frame& pk) override {
         ++begins;
         present = p;
+        peak = pk;
     }
     void writePlaybackFrame(const Frame& f, bool jumped) override {
         written.push_back(f);
