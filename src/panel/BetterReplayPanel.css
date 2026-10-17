@@ -46,29 +46,50 @@ button {
   font-size: 14px;
 }
 
-/* ---- status bar */
+/* ---- screens: one at a time, filling the panel */
+
+.br-main,
+.br-clips,
+.br-player {
+  display: none;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.br-root.view-main .br-main,
+.br-root.view-clips .br-clips,
+.br-root.view-player .br-player {
+  display: flex;
+}
+
+/* ---- main: the recorder's status */
 
 .br-status {
   display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
+  justify-content: center;
+  min-height: 0;
+  padding: 24px;
   border: 1px solid var(--br-line);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--br-surface);
+  text-align: center;
 }
 
 .br-dot {
   flex: 0 0 auto;
-  width: 12px;
-  height: 12px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
   background: var(--br-grey);
 }
 
 .br-dot.recording {
   background: var(--br-green);
-  box-shadow: 0 0 8px rgba(79, 209, 127, 0.8);
+  box-shadow: 0 0 16px rgba(79, 209, 127, 0.8);
 }
 
 .br-dot.arming {
@@ -77,30 +98,78 @@ button {
 
 .br-dot.playback {
   background: var(--br-blue);
-  box-shadow: 0 0 8px rgba(74, 168, 255, 0.8);
+  box-shadow: 0 0 16px rgba(74, 168, 255, 0.8);
 }
 
 .br-dot.offline {
   background: var(--br-red);
 }
 
-.br-status-text {
+.br-state {
+  margin-top: 16px;
+  font-size: 34px;
+}
+
+.br-detail {
+  margin-top: 6px;
+  color: var(--br-muted);
+  font-size: 18px;
+}
+
+.br-facts {
   display: flex;
-  flex: 1 1 auto;
+  gap: 40px;
+  margin-top: 28px;
+}
+
+.br-fact {
+  display: flex;
   flex-direction: column;
-  min-width: 0;
+  align-items: center;
 }
 
-.br-status-text strong {
-  font-size: 15px;
-}
-
-.br-status-text span {
-  overflow: hidden;
+.br-fact-label {
   color: var(--br-muted);
   font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.br-fact-value {
+  margin-top: 4px;
+  font-size: 28px;
+  font-weight: bold;
+}
+
+.br-aircraft {
+  max-width: 100%;
+  margin-top: 20px;
+  overflow: hidden;
+  color: var(--br-muted);
+  font-size: 15px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.br-btn.br-wide {
+  margin-top: 26px;
+  padding: 11px 24px;
+  font-size: 16px;
+}
+
+.br-main .br-btn.br-open-clips {
+  display: flex;
+  flex: 0 0 auto;  /* not stretched like the setup's big buttons */
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+}
+
+.br-open-count {
+  padding: 2px 12px;
+  border-radius: 12px;
+  background: rgba(4, 18, 31, 0.3);
+  font-size: 16px;
 }
 
 .br-error {
@@ -138,12 +207,9 @@ button {
 }
 
 /* While the setup is offered or running it takes the whole panel. */
-.br-root.setup-mode .br-status,
-.br-root.setup-mode .br-error,
-.br-root.setup-mode .br-controls-line,
-.br-root.setup-mode .br-player,
-.br-root.setup-mode .br-list-header,
-.br-root.setup-mode .br-list {
+.br-root.setup-mode .br-main,
+.br-root.setup-mode .br-clips,
+.br-root.setup-mode .br-player {
   display: none !important;
 }
 
@@ -749,29 +815,107 @@ button {
   color: var(--br-red);
 }
 
-/* ---- player */
+/* ---- icon buttons (the icon is an inline SVG in the button's text colour) */
+
+.br-icon-btn {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  border: 1px solid var(--br-line);
+  border-radius: 8px;
+  background: var(--br-surface-2);
+  color: var(--br-text);
+  cursor: pointer;
+}
+
+.br-icon-btn:hover {
+  border-color: var(--br-blue);
+}
+
+.br-icon-btn svg,
+.br-round svg {
+  width: 24px;
+  height: 24px;
+  pointer-events: none;  /* clicks land on the button */
+}
+
+.br-icon-btn.br-play {
+  border-color: var(--br-blue);
+  background: var(--br-blue);
+  color: #04121f;
+}
+
+.br-icon-btn.br-delete {
+  color: var(--br-muted);
+}
+
+.br-icon-btn.br-delete:hover {
+  border-color: var(--br-red);
+  color: var(--br-red);
+}
+
+.br-btn.br-confirm-delete {
+  height: 46px;
+  padding: 0 14px;
+  border-color: var(--br-red);
+  border-radius: 8px;
+  background: rgba(255, 107, 107, 0.14);
+  color: var(--br-red);
+  font-size: 15px;
+  font-weight: bold;
+}
+
+/* ---- player: fills the panel while a clip plays */
 
 .br-player {
-  margin-top: 10px;
-  padding: 10px;
-  border: 1px solid rgba(74, 168, 255, 0.4);
-  border-radius: 6px;
+  padding: 22px 24px;
+  border: 1px solid rgba(74, 168, 255, 0.45);
+  border-radius: 8px;
   background: var(--br-surface);
 }
 
-.br-now {
-  overflow: hidden;
-  margin-bottom: 8px;
+.br-player-kicker {
   color: var(--br-blue);
   font-size: 13px;
+  font-weight: bold;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.br-now {
+  margin-top: 10px;
+  overflow: hidden;
+  font-size: 26px;
+  font-weight: bold;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.br-now-sub {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--br-muted);
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.br-player-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 0;
+}
+
 .br-seek {
   position: relative;
-  height: 14px;
-  border-radius: 7px;
+  height: 22px;
+  border-radius: 11px;
   background: var(--br-surface-2);
   cursor: pointer;
 }
@@ -782,54 +926,102 @@ button {
   bottom: 0;
   left: 0;
   width: 0;
-  border-radius: 7px;
+  border-radius: 11px;
   background: var(--br-blue);
 }
 
 .br-seek-marker {
   position: absolute;
-  top: -3px;
-  bottom: -3px;
-  width: 2px;
+  top: -5px;
+  bottom: -5px;
+  width: 3px;
   background: var(--br-amber);
 }
 
 .br-times {
   display: flex;
   justify-content: space-between;
-  margin-top: 4px;
+  margin-top: 8px;
   color: var(--br-muted);
-  font-size: 12px;
+  font-size: 16px;
 }
 
-.br-controls {
+.br-transport {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-top: 8px;
+  justify-content: center;
+  gap: 30px;
+  margin-top: 30px;
+}
+
+.br-round {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 84px;
+  height: 84px;
+  padding: 0;
+  border: 2px solid var(--br-line);
+  border-radius: 50%;
+  background: var(--br-surface-2);
+  color: var(--br-text);
+  cursor: pointer;
+}
+
+.br-round svg {
+  width: 40px;
+  height: 40px;
+}
+
+.br-round-main {
+  width: 108px;
+  height: 108px;
+  border-color: var(--br-blue);
+  background: var(--br-blue);
+  color: #04121f;
+}
+
+.br-round-main svg {
+  width: 54px;
+  height: 54px;
+}
+
+.br-round-main:hover {
+  border-color: #8cc8ff;
+  background: #6bb8ff;
+}
+
+.br-round-stop:hover {
+  border-color: var(--br-red);
+  color: var(--br-red);
 }
 
 .br-speeds {
   display: flex;
-  gap: 4px;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 30px;
 }
 
 .br-speeds .br-btn {
-  padding: 6px 7px;
-  font-size: 12px;
+  padding: 10px 14px;
+  font-size: 16px;
 }
 
-/* ---- clip list */
+/* ---- clips: the library */
 
-.br-list-header {
+.br-clips-head {
   display: flex;
-  justify-content: space-between;
-  margin: 12px 2px 6px;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+  font-size: 22px;
+}
+
+.br-clips-count {
   color: var(--br-muted);
-  font-size: 12px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: 18px;
 }
 
 .br-list {
@@ -839,19 +1031,20 @@ button {
 }
 
 .br-empty {
-  padding: 20px 10px;
+  padding: 40px 10px;
   color: var(--br-muted);
+  font-size: 16px;
   text-align: center;
 }
 
 .br-clip {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-  padding: 8px;
+  gap: 12px;
+  margin-bottom: 8px;
+  padding: 12px;
   border: 1px solid var(--br-line);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--br-surface);
 }
 
@@ -861,10 +1054,10 @@ button {
 
 .br-badge {
   flex: 0 0 auto;
-  width: 54px;
-  padding: 3px 0;
-  border-radius: 4px;
-  font-size: 11px;
+  width: 70px;
+  padding: 5px 0;
+  border-radius: 5px;
+  font-size: 13px;
   font-weight: bold;
   text-align: center;
 }
@@ -896,23 +1089,28 @@ button {
   white-space: nowrap;
 }
 
+.br-clip-title {
+  font-size: 17px;
+  font-weight: bold;
+}
+
 .br-clip-sub {
-  margin-top: 2px;
+  margin-top: 3px;
   color: var(--br-muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .br-clip-btns {
   display: flex;
   flex: 0 0 auto;
-  gap: 4px;
+  gap: 8px;
 }
 
 .br-toast {
-  margin-top: 6px;
-  padding: 6px 10px;
-  border-radius: 4px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 6px;
   background: var(--br-surface-2);
-  font-size: 12px;
+  font-size: 15px;
   text-align: center;
 }

@@ -52,11 +52,10 @@ You can also build the package in DevMode: **File → Open project…** → `bui
 2. Take off and land. Clips appear in the panel within a few seconds of the end of each event:
    - **Takeoff:** starts at the last moment you were below 10 kt on the ground. Ends at 1,000 ft AGL or 60 s after liftoff, whichever comes first.
    - **Landing:** starts 120 s before the first touchdown. Ends below 30 kt or when airborne again. Bounces count as one landing.
-3. Open **BetterReplay** from the toolbar. If the icon is hidden, enable it in the toolbar's settings.
-   - The dot shows the recorder state: green = recording and armed, amber = arming, grey = paused (the reason is shown), blue = replaying.
-   - **Save last 5 min** saves the whole buffer as a manual clip.
-   - **Play** freezes your aircraft and replays the clip on it. Use pause, seek (the amber mark is the touchdown) and speed while it plays. **Stop** puts the aircraft back exactly where it was, with its velocities, and recording resumes.
-   - **Delete** asks for a second click.
+3. Open **BetterReplay** from the toolbar. If the icon is hidden, enable it in the toolbar's settings. The panel shows one screen at a time:
+   - **Main:** the recorder's status, large. The dot shows the state: green = recording and armed, amber = arming, grey = paused (the reason is shown), blue = replaying. Below it are the buffer length, the clip count and **Save last 5 minutes**, which saves the whole buffer as a manual clip. **Saved clips** at the bottom opens the library.
+   - **Saved clips:** the library, newest first, with a back arrow. Each clip has a play button and a bin; the bin asks once more ("Delete?").
+   - **Player:** play freezes your aircraft and replays the clip on it, with the player filling the panel: a large seek bar (the amber mark is the touchdown), round play/pause and stop buttons, and the speeds. **Stop** puts the aircraft back exactly where it was, with its velocities, resumes recording and returns to the main screen.
 
 Recording pauses while the sim is paused, in slew, in the menus, during the sim's own replay, and during BetterReplay playback.
 

@@ -20,21 +20,32 @@
   <ingamepanel-betterreplay>
     <ingame-ui id="BetterReplayPanel" panel-id="PANEL_BETTERREPLAY" title="BETTERREPLAY" class="ingameUiFrame"
                content-fit="true" min-width="30" min-height="40">
-      <div class="br-root" id="br-root">
-        <header class="br-status">
-          <span class="br-dot" id="br-dot"></span>
-          <div class="br-status-text">
-            <strong id="br-state">Connecting...</strong>
-            <span id="br-detail"></span>
+      <!-- One screen at a time (.view-main / .view-clips / .view-player on the root); the control
+           setup takes over the whole panel while it's offered or running (.setup-mode). -->
+      <div class="br-root view-main" id="br-root">
+        <!-- main: the recorder's status -->
+        <section class="br-main" id="br-main">
+          <div class="br-status">
+            <span class="br-dot" id="br-dot"></span>
+            <strong class="br-state" id="br-state">Connecting...</strong>
+            <span class="br-detail" id="br-detail"></span>
+            <div class="br-facts">
+              <div class="br-fact"><span class="br-fact-label">Buffer</span><span class="br-fact-value" id="br-buffer">0:00</span></div>
+              <div class="br-fact"><span class="br-fact-label">Clips</span><span class="br-fact-value" id="br-count">0</span></div>
+            </div>
+            <span class="br-aircraft" id="br-aircraft"></span>
+            <button type="button" class="br-btn br-wide" id="br-save">Save last 5 minutes</button>
           </div>
-          <button type="button" class="br-btn" id="br-save">Save last 5 min</button>
-        </header>
-        <div class="br-error hidden" id="br-error"></div>
-        <div class="br-controls-line hidden" id="br-controls">
-          <span id="br-controls-text"></span>
-          <button type="button" class="br-btn br-small" id="br-setup-run">Set up</button>
-          <button type="button" class="br-btn br-small br-danger hidden" id="br-setup-reset">Reset</button>
-        </div>
+          <div class="br-error hidden" id="br-error"></div>
+          <div class="br-controls-line hidden" id="br-controls">
+            <span id="br-controls-text"></span>
+            <button type="button" class="br-btn br-small" id="br-setup-run">Set up</button>
+            <button type="button" class="br-btn br-small br-danger hidden" id="br-setup-reset">Reset</button>
+          </div>
+          <button type="button" class="br-btn br-big br-primary br-open-clips" id="br-open-clips">
+            <span>Saved clips</span><span class="br-open-count" id="br-open-count"></span>
+          </button>
+        </section>
 
         <!-- The control setup: fills the panel while it's offered or running (.setup-mode). -->
         <section class="br-setup hidden" id="br-setup">
@@ -61,15 +72,37 @@
           <div class="br-setup-minor hidden" id="br-setup-minor"></div>
         </section>
 
-        <section class="br-player hidden" id="br-player">
-          <div class="br-now" id="br-now"></div>
-          <div class="br-seek" id="br-seek">
-            <div class="br-seek-fill" id="br-seek-fill"></div>
-            <div class="br-seek-marker" id="br-seek-marker"></div>
+        <!-- clips: the library -->
+        <section class="br-clips" id="br-clips">
+          <div class="br-clips-head">
+            <button type="button" class="br-icon-btn" id="br-back" title="Back">
+              <svg viewBox="0 0 24 24"><path d="M15.4 5.4 14 4l-8 8 8 8 1.4-1.4L8.8 12z" fill="currentColor"/></svg>
+            </button>
+            <strong>Saved clips</strong>
+            <span class="br-clips-count" id="br-clips-count"></span>
           </div>
-          <div class="br-times"><span id="br-time">0:00</span><span id="br-dur">0:00</span></div>
-          <div class="br-controls">
-            <button type="button" class="br-btn br-primary" id="br-playpause">Pause</button>
+          <div class="br-list" id="br-list">
+            <div class="br-empty">No clips yet. Takeoffs and landings are saved automatically.</div>
+          </div>
+        </section>
+
+        <!-- player: while a clip plays; Stop brings back the main screen -->
+        <section class="br-player" id="br-player">
+          <span class="br-player-kicker">Replaying</span>
+          <div class="br-now" id="br-now"></div>
+          <div class="br-now-sub" id="br-now-sub"></div>
+          <div class="br-player-body">
+            <div class="br-seek" id="br-seek">
+              <div class="br-seek-fill" id="br-seek-fill"></div>
+              <div class="br-seek-marker" id="br-seek-marker"></div>
+            </div>
+            <div class="br-times"><span id="br-time">0:00</span><span id="br-dur">0:00</span></div>
+            <div class="br-transport">
+              <button type="button" class="br-round br-round-main" id="br-playpause" title="Pause"></button>
+              <button type="button" class="br-round br-round-stop" id="br-stop" title="Stop">
+                <svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor"/></svg>
+              </button>
+            </div>
             <div class="br-speeds" id="br-speeds">
               <button type="button" class="br-btn" data-speed="0.25">0.25x</button>
               <button type="button" class="br-btn" data-speed="0.5">0.5x</button>
@@ -77,17 +110,9 @@
               <button type="button" class="br-btn" data-speed="2">2x</button>
               <button type="button" class="br-btn" data-speed="4">4x</button>
             </div>
-            <button type="button" class="br-btn br-danger" id="br-stop">Stop</button>
           </div>
         </section>
 
-        <div class="br-list-header">
-          <span>Clips</span>
-          <span id="br-count"></span>
-        </div>
-        <div class="br-list" id="br-list">
-          <div class="br-empty">No clips yet. Takeoffs and landings are saved automatically.</div>
-        </div>
         <div class="br-toast hidden" id="br-toast"></div>
       </div>
     </ingame-ui>

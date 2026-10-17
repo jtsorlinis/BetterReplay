@@ -173,6 +173,14 @@ const RESULT_LABELS: { [state: string]: string } = {
     skipped: "Skipped",
     pending: "Not set up",
 };
+// Icons: inline SVG drawn in the button's text colour.
+const ICON_PLAY = '<svg viewBox="0 0 24 24"><path d="M8 5.6v12.8a1 1 0 0 0 1.53.85l10.1-6.4a1 1 0 0 0 0-1.7L9.53 4.75A1 1 0 0 0 8 5.6z" fill="currentColor"/></svg>';
+const ICON_PAUSE = '<svg viewBox="0 0 24 24"><rect x="6" y="5" width="4.4" height="14" rx="1.2" fill="currentColor"/>' +
+    '<rect x="13.6" y="5" width="4.4" height="14" rx="1.2" fill="currentColor"/></svg>';
+const ICON_REPLAY = '<svg viewBox="0 0 24 24"><path d="M12 5V2L7.5 6 12 10V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z" fill="currentColor"/></svg>';
+const ICON_TRASH = '<svg viewBox="0 0 24 24"><path d="M9 3h6l1 2h4v2H4V5h4l1-2zM6 9h12l-1 11a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L6 9z' +
+    'm4 2v8h1.6v-8H10zm3.4 0v8H15v-8h-1.6z" fill="currentColor"/></svg>';
+
 const CONTROL_STATES: { [state: string]: string } = {
     ok: "ok",
     failed: "not replayable",
@@ -227,6 +235,18 @@ function capitalize(s: string): string {
 
 function byId<T extends HTMLElement>(id: string): T {
     return document.getElementById(id) as T;
+}
+
+// A clip's one-line summary: aircraft, length, and for landings the touchdown figures.
+function clipFacts(c: ClipInfo): string[] {
+    const parts = [formatClock(c.durationSec)];
+    if (c.aircraft) parts.unshift(c.aircraft);
+    if (c.event === "landing") {
+        if (typeof c.touchdownVsFpm === "number") parts.push(Math.round(c.touchdownVsFpm) + " fpm");
+        if (typeof c.peakG === "number") parts.push(c.peakG.toFixed(2) + " G");
+        if (c.bounces > 0) parts.push(c.bounces + (c.bounces === 1 ? " bounce" : " bounces"));
+    }
+    return parts;
 }
 
 // Sets an element's text, hiding it when empty.
@@ -349,6 +369,7 @@ class BetterReplayPanel extends UIElement {
     declare confirmFile: string;
     declare confirmTimer: number;
     declare toastTimer: number;
+    declare view: string;  // "main" or "clips" (the player shows whenever a clip plays)
     declare setupButtons: string;
     declare shownPrompt: string;   // the setup's main text as shown, and the step and phase it was in
     declare shownStep: string;
@@ -382,6 +403,7 @@ class BetterReplayPanel extends UIElement {
         this.confirmFile = "";
         this.confirmTimer = 0;
         this.toastTimer = 0;
+        this.view = "main";
         this.setupButtons = "";
         this.shownPrompt = "";
         this.shownStep = "";
@@ -485,6 +507,7 @@ class BetterReplayPanel extends UIElement {
         this.status = s;
         this.renderStatus(s);
         this.renderPlayer(s.play);
+        this.renderView();
         this.renderSetup(s);
         if (s.clipsRev !== this.clipsRev && s.clipsRev !== this.loadingRev) {
             this.loadingRev = s.clipsRev;
@@ -529,7 +552,12 @@ class BetterReplayPanel extends UIElement {
 
     bindControls(): void {
         byId("br-save").addEventListener("click", () => this.send({ op: "saveLast" }));
-        byId("br-stop").addEventListener("click", () => this.send({ op: "stop" }));
+        byId("br-open-clips").addEventListener("click", () => this.showView("clips"));
+        byId("br-back").addEventListener("click", () => this.showView("main"));
+        byId("br-stop").addEventListener("click", () => {
+            this.send({ op: "stop" });
+            this.showView("main");  // stopping goes back to the main screen
+        });
         byId("br-playpause").addEventListener("click", () => {
             const playing = this.status && this.status.play.playing;
             this.send({ op: playing ? "pause" : "resume" });
@@ -599,6 +627,20 @@ class BetterReplayPanel extends UIElement {
         });
     }
 
+    showView(view: string): void {
+        this.view = view;
+        this.renderView();
+    }
+
+    // One screen at a time: the player while a clip plays, else the main screen or the clips.
+    renderView(): void {
+        const view = this.status && this.status.play.active ? "player" : this.view;
+        const root = byId("br-root");
+        root.classList.toggle("view-main", view === "main");
+        root.classList.toggle("view-clips", view === "clips");
+        root.classList.toggle("view-player", view === "player");
+    }
+
     setupAction(a: string): void {
         const active = !!(this.status && this.status.setup && this.status.setup.active);
         if (a === "start") {
@@ -661,19 +703,20 @@ class BetterReplayPanel extends UIElement {
         } else if (s.rec) {
             dot = s.armed ? "recording" : "arming";
             state = "Recording";
-            detail = s.armed ? PHASES[s.phase] || s.phase : "arming in " + Math.ceil(s.armIn) + " s";
+            detail = s.armed ? capitalize(PHASES[s.phase] || s.phase) : "Arming in " + Math.ceil(s.armIn) + " s";
         } else {
             state = "Recording paused";
             detail = capitalize(s.why);
         }
-        detail += " · buffer " + formatClock(s.bufferSec);
-        if (s.aircraft) detail += " · " + s.aircraft;
-
         byId("br-dot").className = "br-dot " + dot;
         byId("br-state").textContent = state;
         byId("br-detail").textContent = detail;
-        byId<HTMLButtonElement>("br-save").disabled = s.play.active || s.bufferSec < 1;
+        byId("br-buffer").textContent = formatClock(s.bufferSec);
         byId("br-count").textContent = String(s.clipCount);
+        byId("br-open-count").textContent = String(s.clipCount);
+        byId("br-clips-count").textContent = String(s.clipCount);
+        byId("br-aircraft").textContent = s.aircraft || "";
+        byId<HTMLButtonElement>("br-save").disabled = s.play.active || s.bufferSec < 1;
 
         const error = byId("br-error");
         error.textContent = s.error;
@@ -869,12 +912,11 @@ class BetterReplayPanel extends UIElement {
             const row = rows[i] as HTMLElement;
             row.classList.toggle("playing", p.active && row.getAttribute("data-file") === p.file);
         }
-        byId("br-player").classList.toggle("hidden", !p.active);
         if (!p.active) return;
 
         const clip = this.findClip(p.file);
-        byId("br-now").textContent =
-            "Playing: " + (clip ? eventLabel(clip.event) + " · " + formatLocalDate(clip.utcMs) : p.file);
+        byId("br-now").textContent = clip ? eventLabel(clip.event) + " · " + formatLocalDate(clip.utcMs) : p.file;
+        byId("br-now-sub").textContent = clip ? clipFacts(clip).join(" · ") : "";
         if (!this.seekDragging) this.renderSeek(p.dur > 0 ? p.t / p.dur : 0);
 
         const marker = byId("br-seek-marker");
@@ -883,8 +925,15 @@ class BetterReplayPanel extends UIElement {
 
         byId("br-time").textContent = formatClock(p.t);
         byId("br-dur").textContent = formatClock(p.dur);
+        // The big button: pause while playing, play when paused, replay at the end.
         const atEnd = p.dur > 0 && p.t >= p.dur - 0.05;
-        byId("br-playpause").textContent = p.playing ? "Pause" : atEnd ? "Replay" : "Play";
+        const mode = p.playing ? "pause" : atEnd ? "replay" : "play";
+        const button = byId("br-playpause");
+        if (button.getAttribute("data-mode") !== mode) {
+            button.setAttribute("data-mode", mode);
+            button.innerHTML = mode === "pause" ? ICON_PAUSE : mode === "replay" ? ICON_REPLAY : ICON_PLAY;
+            button.title = mode === "pause" ? "Pause" : mode === "replay" ? "Replay" : "Play";
+        }
 
         const buttons = byId("br-speeds").querySelectorAll("[data-speed]");
         for (let i = 0; i < buttons.length; ++i) {
@@ -905,13 +954,7 @@ class BetterReplayPanel extends UIElement {
         for (let i = 0; i < this.clips.length; ++i) {
             const c = this.clips[i];
             const file = escapeHtml(c.file);
-            const parts = [formatClock(c.durationSec)];
-            if (c.aircraft) parts.unshift(escapeHtml(c.aircraft));
-            if (c.event === "landing") {
-                if (typeof c.touchdownVsFpm === "number") parts.push(Math.round(c.touchdownVsFpm) + " fpm");
-                if (typeof c.peakG === "number") parts.push(c.peakG.toFixed(2) + " G");
-                if (c.bounces > 0) parts.push(c.bounces + (c.bounces === 1 ? " bounce" : " bounces"));
-            }
+            const parts = clipFacts(c).map(escapeHtml);
             const confirming = this.confirmFile === c.file;
             html +=
                 '<div class="br-clip' + (c.file === playing ? " playing" : "") + '" data-file="' + file + '">' +
@@ -921,9 +964,13 @@ class BetterReplayPanel extends UIElement {
                 '<div class="br-clip-sub">' + parts.join(" · ") + "</div>" +
                 "</div>" +
                 '<div class="br-clip-btns">' +
-                '<button type="button" class="br-btn br-primary" data-act="play" data-file="' + file + '">Play</button>' +
-                '<button type="button" class="br-btn br-danger' + (confirming ? " confirm" : "") + '" data-act="delete" data-file="' + file + '">' +
-                (confirming ? "Sure?" : "Delete") + "</button>" +
+                '<button type="button" class="br-icon-btn br-play" title="Play" data-act="play" data-file="' + file + '">' +
+                ICON_PLAY + "</button>" +
+                // Delete asks once more: the bin turns into a red "Delete?".
+                (confirming
+                    ? '<button type="button" class="br-btn br-confirm-delete" data-act="delete" data-file="' + file + '">Delete?</button>'
+                    : '<button type="button" class="br-icon-btn br-delete" title="Delete" data-act="delete" data-file="' + file + '">' +
+                      ICON_TRASH + "</button>") +
                 "</div></div>";
         }
         list.innerHTML = html;

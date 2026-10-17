@@ -63,7 +63,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 - [ ] The BetterReplay icon (circular arrow with a play triangle) is in the toolbar. If not, look in the toolbar settings list.
 - [ ] Open it:
   - The status dot is green, with **Recording · on ground · buffer m:ss · <aircraft>**.
-  - The buffer counts up, and the list says "No clips yet".
+  - The buffer counts up. **Saved clips** at the bottom opens the library ("No clips yet" at first); the back arrow returns.
 - [ ] Close and reopen the panel. The state is the same; the panel holds no state.
 - [ ] If the panel says *"No response from the recorder"*: note whether section 1's lines appeared. This means CommBus isn't reaching the module.
 
@@ -76,7 +76,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   detector: takeoff finished: N s clip (liftoff at +N s)
   saved YYYY-MM-DD_HHMM_takeoff.rpl: N s, N frames, N KB
   ```
-- [ ] The panel shows a green **Takeoff** tag and the local date/time, with the aircraft and duration.
+- [ ] Under **Saved clips**, a green **Takeoff** tag and the local date/time, with the aircraft and duration.
 - [ ] Check the clip: `node tools\rpl-dump.mjs "<work folder>\<file>.rpl"`.
   - It starts with ground speed under 10 kt.
   - `ongnd` goes 1 → 0 at the liftoff offset.
@@ -91,7 +91,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   detector: landing finished: N s clip, VS -N fpm, peak N.NN G, 0 bounce(s)
   saved YYYY-MM-DD_HHMM_landing.rpl: …
   ```
-- [ ] The panel shows a blue **Landing** tag, with VS, G and duration (about 120 s plus the rollout).
+- [ ] Under **Saved clips**, a blue **Landing** tag, with VS, G and duration (about 120 s plus the rollout).
 - [ ] **Compare the VS with another source** (a landing-rate tool, or the sim's own). The clip uses `PLANE TOUCHDOWN NORMAL VELOCITY`; note its sign and magnitude.
 
 ## 6. Bounce
@@ -130,14 +130,14 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 
 ## 10. Manual save
 
-- [ ] After at least 5 minutes of flight, click **Save last 5 min**.
+- [ ] After at least 5 minutes of flight, click **Save last 5 minutes**.
   - **Expect** `saved …_manual.rpl` and the toast "Saved the last few minutes".
   - The clip is about 5 minutes long.
 - [ ] The button is disabled while a clip is playing.
 
 ## 11. Playback
 
-- [ ] In flight (any phase), click **Play** on a landing clip. **Expect:**
+- [ ] In flight (any phase), open **Saved clips** and click the play button on a landing clip. **Expect:**
   ```
   playback of …_landing.rpl (N s, N frames, 41/41 channels); aircraft snapshot taken
   playback: writing 22 channels per frame (2 engine(s)); freezing position/altitude/attitude; throttle via simvars, hardware throttle input blocked
@@ -152,7 +152,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   - If you see `freeze still off after SET; sending TOGGLE`, note it. Note whether it then worked.
   - If you see `could not turn … freeze on`, playback will fight the sim.
 - [ ] The aircraft jumps to the clip start and flies the recorded path smoothly. Note any jitter, drift or stutter.
-- [ ] The panel shows **Replaying** (blue) and the player bar, with the amber touchdown mark at 2:00.
+- [ ] The panel switches to the player: the clip's name, a large seek bar with the amber touchdown mark at 2:00, round play/pause and stop buttons, and the speeds.
 - [ ] The PFD airspeed and vertical speed follow the clip (body velocities are written every frame), not the speed you had before pressing Play.
 - [ ] **Throttle** (clips recorded with throttle support): the thrust levers follow the clip.
   - Simvar mode: moving your hardware throttle has no effect while it plays. On Stop you'll see `playback: hardware throttle input released (N input event(s) were blocked)`.
@@ -175,7 +175,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 - [ ] **Seek:** click and drag on the bar. The aircraft jumps to the new point and the time label matches.
   - The gear jumps with it: seek from gear-up (after the takeoff) back to the takeoff roll and the gear is down straight away, not lowering.
   - If you see `playback: gear_c is 0.00 right after being set to 1.00; the aircraft moves it back itself`, this aircraft won't take gear positions. It animates the gear from the command instead.
-- [ ] **Pause/Play:** the aircraft holds position, then continues. At the end it pauses, and the button says "Replay". Replay starts over with the gear and lights as they are at the clip's start.
+- [ ] **Pause/Play:** the aircraft holds position, then continues. At the end it pauses, and the big button shows the replay icon. Replay starts over with the gear and lights as they are at the clip's start.
 - [ ] **Stop. Expect:**
   ```
   playback: restored aircraft to lat … lon … alt … ft
@@ -228,7 +228,7 @@ Use an aircraft without a profile; the A320neo V2 is the interesting one. Start 
 
 ## 13. Library management
 
-- [ ] **Delete** a clip: the first click shows "Sure?", the second deletes it, and the file disappears from the work folder.
+- [ ] **Delete** a clip: the bin turns into a red "Delete?"; clicking that deletes it, and the file disappears from the work folder.
 - [ ] Restart the sim. The library reloads (`loaded index.json (N clips)`).
 - [ ] *(Optional)* Delete `index.json` while the sim is closed, then restart.
   - **Expect** `adopted … from disk` for each clip.
