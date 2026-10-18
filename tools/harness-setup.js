@@ -42,7 +42,8 @@ window.harnessSetup = (function () {
     positions: ["", "The thrust this aircraft reports isn't where its levers are, so BetterReplay looks for the lever's own " +
       "position. Hold each position until it's ticked. On a lever with detents, the detent nearest halfway will do."],
     notice: ["Hands off the throttle", "BetterReplay now moves the throttle itself, from idle to full and back, to learn " +
-      "where the lever's positions are. The engines spool up against the parking brake for about 15 seconds."],
+      "where the lever's positions are, then tries reverse thrust if the aircraft has it. The engines spool up against " +
+      "the parking brake for about 20 seconds."],
     sweep: ["Moving the throttle", "Keep your hands off the throttle while BetterReplay learns where the lever's positions are."],
   };
   const SWEEP_SEC = 8;

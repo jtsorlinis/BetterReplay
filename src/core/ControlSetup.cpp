@@ -58,6 +58,13 @@ constexpr double kSweepSteadySec = 0.1;
 constexpr double kSweepMaxHoldSec = 1.0;
 constexpr double kSweepReverserSec = 1.5;
 constexpr double kSweepMaxSec = 150.0;
+// Reverse: the reverse events, the axis then stepping the amount; an aircraft they don't reverse
+// (the PMDG 737 moves its forward levers instead) is let off at half the axis. Then, if they
+// didn't work, "decrease throttle" held at idle until the reversers deploy (at most 4 s), and
+// let go: 6 s for them to stow.
+constexpr double kSweepGiveUpAxis = 0.5;
+constexpr double kSweepHoldSec = 4.0;
+constexpr double kSweepStowSec = 6.0;
 
 double meanOf(const Frame& f, int first, int count) {
     double sum = 0.0;
@@ -153,7 +160,8 @@ const char* const kPositionsDetail =
 const char* const kPositionsAgain = "Couldn't find the lever's own position in that movement. Once more, please.";
 const char* const kNoticeDetail =
     "BetterReplay now moves the throttle itself, from idle to full and back, to learn where the lever's positions "
-    "are. The engines spool up against the parking brake for about 15 seconds.";
+    "are, then tries reverse thrust if the aircraft has it. The engines spool up against the parking brake for "
+    "about 20 seconds.";
 const char* const kSweepDetail = "Keep your hands off the throttle while BetterReplay learns where the lever's positions are.";
 
 const char* question(Control c) {
@@ -1370,6 +1378,7 @@ void SetupFlow::beginSweep() {
     for (int i = 0; i <= kSweepSteps; ++i) sweep_.push_back({static_cast<double>(i) / kSweepSteps, 1, -1});
     sweepAt_ = 0;
     sweepExtended_ = false;
+    reverseZone_ = reverseSeen_ = holdTried_ = holdSeen_ = false;
     sweepForward_.clear();
     sweepReverse_.clear();
     reverserOn_ = false;
@@ -1403,15 +1412,47 @@ void SetupFlow::sweepFrame(double dt, const Frame& live) {
     const bool same = std::isfinite(v) && std::isfinite(sweepLast_) && std::fabs(v - sweepLast_) <= 1e-6 * std::max(1.0, std::fabs(v));
     sweepSteady_ = same ? sweepSteady_ + dt : 0.0;
     sweepLast_ = v;
-    const SweepMove& m = sweep_[sweepAt_];
-    const double minHold = m.reverser >= 0 ? kSweepReverserSec : kSweepMinHoldSec;
-    const double maxHold = m.reverser >= 0 ? kSweepReverserSec + 1.5 : kSweepMaxHoldSec;
-    if (!(sweepHeld_ >= minHold && sweepSteady_ >= kSweepSteadySec) && sweepHeld_ < maxHold) return;
-    if (m.record == 1) sweepForward_.push_back({m.axis, v});
-    if (m.record == 2) sweepReverse_.push_back({m.axis, v});
-    if (++sweepAt_ >= sweep_.size() && !sweepExtended_) {
-        // The forward pass is done. Unless the axis has its own reverse zone (the lever went below
-        // idle), the reversers get a pass of their own; then back to idle.
+    const SweepMove m = sweep_[sweepAt_];  // (a copy: the plan can grow below)
+    bool reversingNow = false;
+    for (int e = 0; e < engineCount(facts_); ++e) reversingNow |= reversing(live, e);
+    if (m.record == 2 && reversingNow) reverseSeen_ = true;
+    if (m.record == 3) {
+        // "Decrease throttle" held at idle: a held key sends it every frame.
+        holdSeen_ |= reversingNow;
+        if (!holdSeen_ && sweepHeld_ < kSweepHoldSec) {
+            sim_->throttleDecrease();
+            return;
+        }
+        logf(0, "control setup: holding THROTTLE_DECR at idle %s the reversers (%.1f s)",
+             holdSeen_ ? "deployed" : "didn't deploy", sweepHeld_);
+    } else if (m.record == 4) {
+        // Let go: they should come back to idle by themselves.
+        if (reversingNow && sweepHeld_ < kSweepStowSec) return;
+        if (reversingNow) logf(1, "control setup: the reversers were still out %.0f s after letting go", sweepHeld_);
+    } else {
+        const double minHold = m.reverser >= 0 ? kSweepReverserSec : kSweepMinHoldSec;
+        const double maxHold = m.reverser >= 0 ? kSweepReverserSec + 1.5 : kSweepMaxHoldSec;
+        if (!(sweepHeld_ >= minHold && sweepSteady_ >= kSweepSteadySec) && sweepHeld_ < maxHold) return;
+        if (m.record == 1) sweepForward_.push_back({m.axis, v});
+        if (m.record == 2) sweepReverse_.push_back({m.axis, v});
+    }
+    ++sweepAt_;
+    if (m.record == 2 && m.axis >= kSweepGiveUpAxis - 1e-9 && !reverseSeen_) {
+        // The reverse events and half the axis haven't deployed anything: they don't reverse this
+        // aircraft (the PMDG 737 moves its forward levers instead). Straight on to stowing.
+        while (sweepAt_ < sweep_.size() && sweep_[sweepAt_].record == 2) ++sweepAt_;
+        logf(0, "control setup: the reverse thrust events didn't deploy the reversers (axis up to %.2f)", m.axis);
+    }
+    if (m.reverser == 0 && !reverseSeen_ && !holdTried_) {
+        // Stowed after the reverse events, which didn't work: try "decrease throttle" held at idle.
+        holdTried_ = true;
+        const SweepMove hold[] = {{0.0, 3, -1}, {0.0, 4, -1}};
+        sweep_.insert(sweep_.begin() + static_cast<std::ptrdiff_t>(sweepAt_), hold, hold + 2);
+    }
+    if (sweepAt_ >= sweep_.size() && !sweepExtended_) {
+        // The forward pass is done. Unless the axis has its own reverse zone (the lever went
+        // beyond idle, the other way from full), the reversers get a test of their own; then back
+        // to idle.
         sweepExtended_ = true;
         const std::vector<LeverPoint> fwd = leverTable(sweepForward_);
         double lo = INFINITY, hi = -INFINITY;
@@ -1419,17 +1460,21 @@ void SetupFlow::sweepFrame(double dt, const Frame& live) {
             lo = p.lever < lo ? p.lever : lo;
             hi = p.lever > hi ? p.lever : hi;
         }
-        const bool reverseZone = std::isfinite(leverIdle_) && lo < leverIdle_ - std::max(0.01 * (hi - lo), 1e-9);
-        if (facts_.hasReverse && !reverseZone) {
+        const double idle = std::isfinite(leverIdle_) ? leverIdle_ : (fwd.empty() ? NAN : fwd.front().lever);
+        const double toFull = fwd.size() >= 2 && fwd.back().lever < fwd.front().lever ? -1.0 : 1.0;
+        double beyond = 0.0;
+        for (const LeverPoint& p : fwd) beyond = std::max(beyond, (idle - p.lever) * toFull);
+        reverseZone_ = std::isfinite(idle) && beyond > std::max(0.01 * (hi - lo), 1e-9);
+        if (facts_.hasReverse && !reverseZone_) {
             sweep_.push_back({0.0, 0, -1});
             sweep_.push_back({0.0, 2, 1});
             for (int i = 1; i <= kSweepReverseSteps; ++i) sweep_.push_back({static_cast<double>(i) / kSweepReverseSteps, 2, -1});
             sweep_.push_back({0.0, 0, -1});
             sweep_.push_back({0.0, 0, 0});
         }
-        sweep_.push_back({fwd.size() >= 2 ? invertLever(fwd, std::isfinite(leverIdle_) ? leverIdle_ : lo) : 0.0, 0, -1});
+        sweep_.push_back({fwd.size() >= 2 && std::isfinite(idle) ? invertLever(fwd, idle) : 0.0, 0, -1});
         logf(0, "control setup: forward pass done (L:var %s %.4g..%.4g)%s", lever_.var.c_str(), lo, hi,
-             facts_.hasReverse ? (reverseZone ? "; the axis has its own reverse zone" : "; now the reversers") : "");
+             facts_.hasReverse ? (reverseZone_ ? "; the axis has its own reverse zone" : "; now the reversers") : "");
     }
     if (sweepAt_ >= sweep_.size()) {
         finishSweep();
@@ -1460,16 +1505,31 @@ void SetupFlow::finishSweep() {
         stopSweep("The variable found for the throttle lever didn't follow the throttle.");
         return;
     }
+    // How reverse thrust is commanded here: the axis itself, the reverse events (with a table of
+    // the lever under them, if it moved), or "decrease throttle" held at idle.
+    ReverseBy by = ReverseBy::None;
+    if (facts_.hasReverse) by = reverseZone_ ? ReverseBy::Axis : reverseSeen_ ? ReverseBy::Events : holdSeen_ ? ReverseBy::Hold : ReverseBy::None;
     double rlo = 0.0, rhi = 0.0;
     for (size_t i = 0; i < rev.size(); ++i) {
         rlo = i == 0 || rev[i].lever < rlo ? rev[i].lever : rlo;
         rhi = i == 0 || rev[i].lever > rhi ? rev[i].lever : rhi;
     }
-    if (!rev.empty() && !(rhi - rlo > 0.02 * (hi - lo))) {
-        logf(0, "control setup: the reverse thrust events didn't move L:var %s; no reverse calibration", lever_.var.c_str());
+    if (by != ReverseBy::Events) {
+        rev.clear();
+    } else if (!rev.empty() && !(rhi - rlo > 0.02 * (hi - lo))) {
+        logf(0, "control setup: the reverse thrust events didn't move L:var %s; reverse amounts from the simvar",
+             lever_.var.c_str());
         rev.clear();
     }
     lever_.reverse = rev;
+    lever_.reverseBy = by;
+    if (facts_.hasReverse) {
+        logf(by == ReverseBy::None ? 1 : 0, "control setup: reverse thrust: %s",
+             by == ReverseBy::Axis     ? "on the throttle axis"
+             : by == ReverseBy::Events ? "with the reverse thrust events, the axis setting the amount"
+             : by == ReverseBy::Hold   ? "by holding THROTTLE_DECR (\"decrease throttle\") at idle"
+                                       : "nothing tried deployed the reversers; replays leave reverse out");
+    }
     // The detents: where the lever held one value over several steps.
     std::string detents;
     const double tol = 0.002 * (hi - lo);

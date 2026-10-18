@@ -932,6 +932,7 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
                 log::info("playback: the throttle levers follow %s: %s (recorded before the lever setup?)",
                           kChannels[kThrottle1].simvar, why.c_str());
             }
+            driver_.setReverseBy(cp.lever.reverseBy);  // from the clip's reversers either way
         }
     }
     for (int c = 0; c < kChannelCount; ++c) {
@@ -1780,6 +1781,10 @@ double SimBridge::readVar(const ScanVar& v) {
 
 void SimBridge::setReverser(bool on) {
     for (int e = 0; e < 4 && e < numEngines_; ++e) sendChannelEvent(kReverser1 + e, on ? 1.0 : 0.0);
+}
+
+void SimBridge::throttleDecrease() {
+    if (!playing_) driver_.throttleDecrease();
 }
 
 void SimBridge::onTitleData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size) {

@@ -68,6 +68,14 @@ struct FakeAircraft : IControlSim {
     bool reverseZone = false;    // the axis's bottom fifth is reverse instead
     bool reverser = false;
     int reverserCalls = 0;
+    // The PMDG 737 instead: the reverse events don't reverse it (its levers go forward with the
+    // axis), but "decrease throttle" held at idle does, without the reverse flag, and let go it
+    // comes back to idle. Its lever variable runs from 500 at idle down to 75 at full.
+    bool reverseByHold = false;
+    bool leverDown = false;
+    bool holdReverse = false;
+    double decreaseAt = -100.0;
+    int decreases = 0;
     bool axisRecorded = false;      // the key-event handler sees the pilot's axis (thr_axis_N)
     bool hideThrottleVars = false;  // nothing but the simvar moves with the throttle
 
@@ -88,6 +96,7 @@ struct FakeAircraft : IControlSim {
     // The lever (TLA, degrees) where the axis puts it: detents at idle (0), CL (25), FLX/MCT (35)
     // and TOGA (45); reverse down to -20.
     double tla(int e) const {
+        if (holdReverse) return -20.0;
         double a = axis[e];
         if (reverser) return -20.0 * a;
         if (reverseZone) {
@@ -103,10 +112,12 @@ struct FakeAircraft : IControlSim {
         return 45.0;
     }
     static constexpr double kLeverUnits = 51.9 / 45.0;  // INI_ENGn_THROTTLE_POS per degree
-    double leverVar(int e) const { return tla(e) * kLeverUnits; }
+    static constexpr double kLeverDownUnits = 425.0 / 45.0;
+    double leverVar(int e) const { return leverDown ? 500.0 - tla(e) * kLeverDownUnits : tla(e) * kLeverUnits; }
 
     void step(double dt) {
         t += dt;
+        if (holdReverse && t - decreaseAt > 0.2) holdReverse = false;  // let go
         spoilerSurface = approach(spoilerSurface, spoilerHandle, 2.0, dt);
         if (airbus) {
             for (int e = 0; e < 2; ++e) {
@@ -140,6 +151,7 @@ struct FakeAircraft : IControlSim {
             f.v[kEngineN1_1 + e] = n1[e];
             f.v[kInputThrottle1 + e] = ieThrottle(e);
             f.v[kReverser1 + e] = reverser ? 1.0 : 0.0;
+            f.v[kReverserNozzle1 + e] = airbus && (reverser || holdReverse) ? 100.0 : 0.0;
             f.v[kThrottleAxis1 + e] = airbus && axisRecorded ? axis[e] : NAN;
         }
         f.v[kGearCenter] = f.v[kGearLeft] = f.v[kGearRight] = gearPos;
@@ -189,6 +201,11 @@ struct FakeAircraft : IControlSim {
     void setReverser(bool on) override {
         ++reverserCalls;
         if (airbus && reversers) reverser = on;
+    }
+    void throttleDecrease() override {
+        ++decreases;
+        decreaseAt = t;
+        if (airbus && reverseByHold && axis[0] < 0.05) holdReverse = true;
     }
 
     bool beginControl(Control c, const ControlMethod& m, std::string& why) override {
@@ -643,7 +660,7 @@ TEST(Setup_ThrottleLeverFoundAndCalibratedWhenTheSimvarCreeps) {
                               "Did the engines spool up and back down?"}));
     const JsonValue notice = h.status();
     CHECK_EQ(notice.getString("prompt", ""), std::string("Hands off the throttle"));
-    CHECK(notice.getString("detail", "").find("15 seconds") != std::string::npos);
+    CHECK(notice.getString("detail", "").find("20 seconds") != std::string::npos);
     const JsonValue* buttons = notice.get("buttons");
     REQUIRE(buttons && buttons->isArray() && !buttons->array.empty());
     CHECK_EQ(buttons->array[0].string, std::string("begin"));
@@ -664,6 +681,8 @@ TEST(Setup_ThrottleLeverFoundAndCalibratedWhenTheSimvarCreeps) {
     REQUIRE(tp.lever.valid());
     CHECK(tp.lever.forward.size() >= 30);
     CHECK(tp.lever.reverse.size() >= 8);
+    CHECK(tp.lever.reverseBy == ReverseBy::Events);  // the reverse events deployed the reversers
+    CHECK_EQ(h.aircraft.decreases, 0);
     const double u = FakeAircraft::kLeverUnits;
     double a = NAN;
     // Detents come back as the middle of their stretch of the axis, the rest interpolated.
@@ -726,6 +745,7 @@ TEST(Setup_ThrottleLeverAxisWithItsOwnReverseZone) {
     const ControlProfile& tp = h.flow.profile()[Control::Throttle];
     REQUIRE(tp.lever.valid());
     CHECK(tp.lever.reverse.empty());  // the axis covers reverse itself
+    CHECK(tp.lever.reverseBy == ReverseBy::Axis);
     CHECK_EQ(h.aircraft.reverserCalls, 0);
     CHECK_NEAR(h.aircraft.axis[0], 0.22, 0.03);  // idle, not the bottom of the axis
     double a = NAN;
@@ -772,6 +792,51 @@ TEST(Setup_ThrottleLeverHeldAgainWhenTheMovementDidntShowIt) {
     REQUIRE(h.run(120.0, nullptr, "done"));
     CHECK_EQ(h.flow.profile()[Control::Throttle].lever.var, std::string("INI_ENG#_THROTTLE_POS"));
     CHECK(h.flow.profile()[Control::Throttle].lever.valid());
+}
+
+// The PMDG 737: its lever variable runs down from idle to full, and the reverse events don't
+// reverse it (its levers go forward with the axis), so the sweep lets them off at half the axis
+// and tries "decrease throttle" held at idle; that deploys the reversers, and let go they stow.
+// An aircraft that takes neither gets no reverse.
+TEST(Setup_ThrottleReverseByHoldingDecreaseOnALeverThatRunsDown) {
+    for (const bool holdWorks : {true, false}) {
+        SetupHarness h;
+        throttleOnly(h);
+        h.aircraft.airbus = true;
+        h.aircraft.leverDown = true;
+        h.aircraft.reversers = false;
+        h.aircraft.reverseByHold = holdWorks;
+        h.facts.hasReverse = true;
+        REQUIRE(h.start());
+        ThrottlePilot p = throttlePilot(h);
+        confirmKeyEvents(h, p);
+        REQUIRE(h.phase() == "notice");
+        REQUIRE(h.answer("begin"));
+        REQUIRE(h.run(150.0, nullptr, "done"));
+        CHECK(!h.aircraft.driving);
+        CHECK(!h.aircraft.holdReverse);
+        CHECK(h.aircraft.axis[0] < 0.05);  // left at idle
+        CHECK_EQ(h.aircraft.reverserCalls, 2);  // the reverse events: tried, and stowed
+        CHECK(h.aircraft.decreases > 0);
+        const LeverCalibration& cal = h.flow.profile()[Control::Throttle].lever;
+        REQUIRE(cal.valid());
+        CHECK_EQ(cal.var, std::string("INI_ENG#_THROTTLE_POS"));
+        CHECK(cal.reverseBy == (holdWorks ? ReverseBy::Hold : ReverseBy::None));
+        CHECK(cal.reverse.empty());  // what the reverse events did was the forward levers
+        CHECK_NEAR(cal.forward.front().lever, 500.0, 1.0);
+        CHECK(cal.forward.back().lever < 100.0);
+        double a = NAN;
+        CHECK(leverAxis(cal, 500.0, NAN, false, a));
+        CHECK(a < 0.06);
+        CHECK(leverAxis(cal, 500.0 - 25.0 * FakeAircraft::kLeverDownUnits, 0.0, false, a));  // CL
+        CHECK_NEAR(a, 0.5, 0.03);
+        CHECK(leverAxis(cal, 500.0 - 45.0 * FakeAircraft::kLeverDownUnits, 0.0, false, a));  // TOGA
+        CHECK_NEAR(a, 0.95, 0.03);
+        if (holdWorks) {
+            CHECK(describeControl(Control::Throttle, h.flow.profile()[Control::Throttle]).find("holding THROTTLE_DECR") !=
+                  std::string::npos);
+        }
+    }
 }
 
 TEST(Setup_ThrottleLeverSweepStopsWhenTheAircraftRolls) {
@@ -894,6 +959,40 @@ TEST(Profile_LeverCalibrationTables) {
     CHECK(leverAxis(cal, 25.0, 0.0, true, a));  // still engaged: reverse idle
     CHECK_NEAR(a, 0.0, 1e-9);
     CHECK(!LeverCalibration().valid());
+
+    // A lever variable that runs down from idle (500) to full (75): idle is still its lowest-axis
+    // reading, and reverse is beyond it the other way (above 500).
+    LeverCalibration down;
+    down.var = "switch_683_73X";
+    down.forward = leverTable({{0.0, 500.0}, {0.5, 264.0}, {0.875, 75.0}, {1.0, 75.0}});
+    down.reverse = leverTable({{0.0, 500.0}, {1.0, 700.0}});
+    CHECK(leverAxis(down, 300.0, 1.0, false, a));  // the clip reversing, the aircraft not yet: idle
+    CHECK_NEAR(a, 0.0, 1e-9);
+    CHECK(leverAxis(down, 600.0, NAN, true, a));  // beyond idle: reverse, by value
+    CHECK_NEAR(a, 0.5, 1e-9);
+    CHECK(leverAxis(down, 600.0, 0.0, true, a));  // the aircraft still reversed: reverse idle
+    CHECK_NEAR(a, 0.0, 1e-9);
+    CHECK(leverAxis(down, 264.0, 0.0, false, a));
+    CHECK_NEAR(a, 0.5, 1e-9);
+    down.reverse.clear();
+    CHECK(!leverAxis(down, 600.0, 1.0, false, a));  // reverse without a table: can't be placed
+    CHECK(leverAxis(down, 75.0, 1.0, false, a));     // full forward with the flag set: forward
+    CHECK_NEAR(a, 0.9375, 1e-9);
+
+    // Reversing, by what the reversers did rather than the flag.
+    Frame f;
+    for (double& v : f.v) v = 0.0;
+    CHECK(!reversing(f, 0));
+    f.v[kReverser1] = 1.0;  // the flag alone (the PMDG with "toggle reverse" and the throttle forward)
+    CHECK(!reversing(f, 0));
+    f.v[kThrottle1] = -3.2;  // the lever simvar below idle
+    CHECK(reversing(f, 0));
+    f.v[kThrottle1] = 0.0;
+    f.v[kReverserNozzle1 + 1] = 77.0;  // engine 2's nozzles out
+    CHECK(reversing(f, 1));
+    CHECK(!reversing(f, 0));
+    f.v[kReverserNozzle1] = NAN;  // not recorded
+    CHECK(!reversing(f, 0));
 }
 
 TEST(Setup_ThrottleReplayStopsWhenTheAircraftRolls) {
@@ -1014,6 +1113,7 @@ TEST(Profile_JsonRoundTrip) {
         v2[Control::Throttle].lever.var = "INI_ENG#_THROTTLE_POS";
         v2[Control::Throttle].lever.forward = {{0.0, 0.0}, {0.5, 28.83}, {0.525, 28.83}, {1.0, 51.9}};
         v2[Control::Throttle].lever.reverse = {{0.0, 0.0}, {1.0, -23.07}};
+        v2[Control::Throttle].lever.reverseBy = ReverseBy::Hold;
         v2[Control::Flaps] = {ControlState::Ok, ControlMethod{MethodKind::KeyEvent, kKeyFlapsNotches, 1.0}, true};
     }
     AircraftProfile& a = store.upsert("simobjects/airplanes/a320neo");
@@ -1039,6 +1139,8 @@ TEST(Profile_JsonRoundTrip) {
     CHECK_NEAR(lv.forward[3].lever, 51.9, 1e-9);
     CHECK((*b2)[Control::Flaps].method == (ControlMethod{MethodKind::KeyEvent, kKeyFlapsNotches, 1.0}));
     CHECK_NEAR(lv.reverse[1].lever, -23.07, 1e-9);
+    CHECK(lv.reverseBy == ReverseBy::Hold);
+    CHECK(json.find("\"reverseBy\":\"hold\"") != std::string::npos);
     CHECK(describeControl(Control::Throttle, (*b2)[Control::Throttle]).find("INI_ENG#_THROTTLE_POS") != std::string::npos);
     CHECK(json.find("\"lever\"") == json.rfind("\"lever\""));  // only the profile that has one
     const AircraftProfile* b = back.find("simobjects/airplanes/a320neo");

@@ -134,7 +134,16 @@ std::string describeMethod(Control c, const ControlMethod& m) {
 
 std::string describeControl(Control c, const ControlProfile& cp) {
     std::string s = describeMethod(c, cp.method);
-    if (c == Control::Throttle && cp.lever.valid()) s += ", lever from L:var " + cp.lever.var;
+    if (c == Control::Throttle && cp.lever.valid()) {
+        s += ", lever from L:var " + cp.lever.var;
+        switch (cp.lever.reverseBy) {
+            case ReverseBy::Events: s += ", reverse with SET_THROTTLEn_REVERSE_THRUST_ON"; break;
+            case ReverseBy::Hold: s += ", reverse by holding THROTTLE_DECR"; break;
+            case ReverseBy::Axis: s += ", reverse on the axis"; break;
+            case ReverseBy::None: s += ", no reverse"; break;
+            case ReverseBy::Unknown: break;
+        }
+    }
     return s;
 }
 
@@ -185,28 +194,59 @@ bool leverAxis(const LeverCalibration& cal, double lever, double clipReverser, b
     if (!std::isfinite(lever) || cal.forward.size() < 2) return false;
     double flo = 0.0, fhi = 0.0;
     const double tol = leverRange(cal.forward, flo, fhi);
+    const double idle = cal.forward.front().lever;
+    const double toFull = cal.forward.back().lever >= idle ? 1.0 : -1.0;
+    const bool beyondIdle = (lever - idle) * toFull < -tol;  // the other way from full
     const bool separate = cal.reverse.size() >= 2;
-    const bool clipReverse = std::isfinite(clipReverser) ? clipReverser >= 0.5 : separate && lever < flo - tol;
+    const bool clipReverse = std::isfinite(clipReverser) ? clipReverser >= 0.5 : separate && beyondIdle;
     if (separate) {
         if (clipReverse != liveReverse) {
             // The clip's reverser events switch the aircraft's over; until then, idle in whichever
             // mode it's in (the reverse table's end nearest the forward idle).
             if (!liveReverse) {
-                axis = invertLever(cal.forward, flo);
+                axis = invertLever(cal.forward, idle);
                 return true;
             }
             double rlo = 0.0, rhi = 0.0;
             leverRange(cal.reverse, rlo, rhi);
-            axis = invertLever(cal.reverse, std::fabs(rlo - flo) < std::fabs(rhi - flo) ? rlo : rhi);
+            axis = invertLever(cal.reverse, std::fabs(rlo - idle) < std::fabs(rhi - idle) ? rlo : rhi);
             return true;
         }
         axis = invertLever(clipReverse ? cal.reverse : cal.forward, lever);
         return true;
     }
-    // Without a separate table only an axis with its own reverse zone reaches below idle.
-    if (clipReverse && lever < flo - tol) return false;
+    // Without a separate table only an axis with its own reverse zone reaches beyond idle.
+    if (clipReverse && beyondIdle) return false;
     axis = invertLever(cal.forward, lever);
     return true;
+}
+
+bool reversing(const Frame& f, int engine) {
+    if (engine < 0 || engine > 3) return false;
+    const double nozzle = f.v[kReverserNozzle1 + engine];
+    const double lever = f.v[kThrottle1 + engine];
+    return (std::isfinite(nozzle) && nozzle >= 50.0) || (std::isfinite(lever) && lever < -1.0);
+}
+
+const char* reverseByKey(ReverseBy r) {
+    switch (r) {
+        case ReverseBy::None: return "none";
+        case ReverseBy::Axis: return "axis";
+        case ReverseBy::Events: return "events";
+        case ReverseBy::Hold: return "hold";
+        case ReverseBy::Unknown: break;
+    }
+    return "";
+}
+
+bool parseReverseByKey(const std::string& key, ReverseBy& out) {
+    for (const ReverseBy r : {ReverseBy::None, ReverseBy::Axis, ReverseBy::Events, ReverseBy::Hold}) {
+        if (key == reverseByKey(r)) {
+            out = r;
+            return true;
+        }
+    }
+    return false;
 }
 
 int methodSourceChannel(Control c, MethodKind k, int engine) {
@@ -289,6 +329,7 @@ void ProfileStore::toJson(std::string& out) const {
                 w.kv("var", c.lever.var);
                 writeLeverTable(w, "forward", c.lever.forward);
                 writeLeverTable(w, "reverse", c.lever.reverse);
+                if (c.lever.reverseBy != ReverseBy::Unknown) w.kv("reverseBy", reverseByKey(c.lever.reverseBy));
                 w.endObject();
             }
             w.endObject();
@@ -331,6 +372,7 @@ bool ProfileStore::fromJson(const char* text, size_t length, std::string* error)
                 cp.lever.var = lv->getString("var", "");
                 cp.lever.forward = readLeverTable(lv->get("forward"));
                 cp.lever.reverse = readLeverTable(lv->get("reverse"));
+                parseReverseByKey(lv->getString("reverseBy", ""), cp.lever.reverseBy);
                 if (!cp.lever.valid()) cp.lever = LeverCalibration();
             }
             // A profile that says "use this method" without one can't be followed.

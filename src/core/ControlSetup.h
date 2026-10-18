@@ -14,7 +14,9 @@
 // and at full before going back to idle. If the simvar kept moving during those holds and the key
 // events drive the throttle, the step goes on: the variable that held still with the lever is the
 // lever's own, and the setup steps the throttle axis through its range and records where the
-// lever went (LeverCalibration). Aircraft whose simvar held still skip all that.
+// lever went (LeverCalibration). With reversers it then finds how to command reverse thrust: the
+// reverse events (then the axis sets the amount), or "decrease throttle" held at idle (the PMDG
+// 737), checking that the reversers deployed. Aircraft whose simvar held still skip all that.
 #pragma once
 
 #include <cstddef>
@@ -62,10 +64,12 @@ public:
     virtual bool beginControl(Control c, const ControlMethod& m, std::string& why) = 0;
     virtual void applyControl(Control c, const Frame& f, bool force) = 0;
     virtual void endControl(Control c) = 0;
-    // For the throttle lever's calibration: one variable's value now (NaN if unreadable), and the
-    // thrust reversers (the reverse thrust on/off key events).
+    // For the throttle lever's calibration: one variable's value now (NaN if unreadable), the
+    // thrust reversers (the reverse thrust on/off key events), and one THROTTLE_DECR, what a held
+    // "decrease throttle" key sends every frame (the PMDG 737 goes into reverse while it's held).
     virtual double readVar(const ScanVar& v) = 0;
     virtual void setReverser(bool on) = 0;
+    virtual void throttleDecrease() = 0;
 };
 
 // Watches every scanned variable while the pilot moves a control and finds the ones that moved
@@ -320,12 +324,17 @@ private:
     double leverSpan_ = 0.0;   // and how far it moved there
     struct SweepMove {
         double axis;  // 0..1
-        int record;   // 0: just get there, 1: a forward reading, 2: a reverse one
+        int record;   // 0: just get there, 1: a forward reading, 2: a reverse one, 3: hold
+                      // "decrease throttle", 4: let go and wait for the reversers to stow
         int reverser; // -1 as it is, 0 stow, 1 engage (then a longer wait)
     };
     std::vector<SweepMove> sweep_;
     size_t sweepAt_ = 0;
-    bool sweepExtended_ = false;  // the reverse pass and the way back are planned
+    bool sweepExtended_ = false;  // the reverse test and the way back are planned
+    bool reverseZone_ = false;    // the axis has its own reverse zone
+    bool reverseSeen_ = false;    // the reverse events deployed the reversers
+    bool holdTried_ = false;      // "decrease throttle" held at idle: tried, and it deployed them
+    bool holdSeen_ = false;
     double sweepHeld_ = 0.0;      // time at this move
     double sweepLast_ = NAN;      // the lever's last reading, and how long it's been unchanged
     double sweepSteady_ = 0.0;

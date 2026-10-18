@@ -44,6 +44,7 @@ public:
     void endControl(Control c) override;
     double readVar(const ScanVar& v) override;
     void setReverser(bool on) override;
+    void throttleDecrease() override;
 
 private:
     enum DataDef : DWORD { DEF_RECORD = 1, DEF_TITLE = 2, DEF_PLAYBACK = 3, DEF_RESTORE = 4, DEF_SNAP = 5 };

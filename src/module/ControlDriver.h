@@ -42,6 +42,12 @@ public:
     // variable (lv_thr_N) is turned back into the axis value through the setup's calibration.
     // After begin(); the clip must have recorded that variable (clipHasLever).
     void setLever(const LeverCalibration& cal);
+    // How this aircraft's reverse thrust is commanded (the setup's sweep found it), for the
+    // key-event throttle: "hold" holds THROTTLE_DECR while the clip's reversers are out; "events"
+    // also puts the reverser in when the clip reversed without the reverse flag. After begin().
+    void setReverseBy(ReverseBy by);
+    // One THROTTLE_DECR, as a held "decrease throttle" key sends every frame (the setup's test).
+    void throttleDecrease();
     // Drives the control from the frame's channels (methodSourceChannel). Values are sent when
     // they change, and every few frames anyway; `force` sends them now.
     void apply(Control c, const Frame& f, bool force);
@@ -79,6 +85,11 @@ private:
         LeverCalibration lever;  // throttle key events: replayed from the lever variable
         bool useLever = false;
         int leverFrames = 0;  // per engine, driven from the lever variable
+        ReverseBy reverseBy = ReverseBy::Unknown;
+        bool holding = false;     // THROTTLE_DECR held for reverse
+        int holdFrames = 0;
+        bool engaged[4] = {};     // the reverser put in by us (the clip reversed without its flag)
+        int engageWait[4] = {};   // frames until it's put in again if the aircraft hasn't taken it
     };
     // Whether value v for output i is due (changed, forced or time to resend); records it.
     static bool due(Slot& s, int i, double v, bool force);

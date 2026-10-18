@@ -69,12 +69,24 @@ struct LeverPoint {
     double lever;  // the lever variable there
 };
 
+// How the aircraft's reverse thrust can be commanded, as the setup's sweep found by trying.
+enum class ReverseBy : uint8_t {
+    Unknown = 0,  // not tried (profiles from before the reverse test)
+    None,         // no reversers, or nothing tried deployed them
+    Axis,         // the throttle axis has its own reverse zone
+    Events,       // SET_THROTTLEn_REVERSE_THRUST_ON, then the axis sets the amount (the A350)
+    Hold,         // "decrease throttle" held at idle (the PMDG 737); let go, it comes back to idle
+};
+const char* reverseByKey(ReverseBy r);  // "none", "axis", "events", "hold"; "" for Unknown
+bool parseReverseByKey(const std::string& key, ReverseBy& out);
+
 struct LeverCalibration {
     std::string var;  // the L:var; '#' stands for the engine number. Empty: none
     std::vector<LeverPoint> forward;  // reverser stowed, by ascending axis
-    // With the reverser engaged (the axis then sets the reverse amount). Empty when the axis has
-    // its own reverse zone (the forward table reaches below idle) or the aircraft has none.
+    // With the reverser engaged (the axis then sets the reverse amount). Empty unless reverseBy
+    // is Events and the lever variable moved.
     std::vector<LeverPoint> reverse;
+    ReverseBy reverseBy = ReverseBy::Unknown;
 
     bool valid() const { return !var.empty() && forward.size() >= 2; }
 };
@@ -135,7 +147,14 @@ double invertLever(const std::vector<LeverPoint>& table, double lever);
 // NaN if it wasn't recorded; liveReverse: the aircraft's reverser now. With a separate reverse
 // table the clip's reverser events switch the aircraft's, and until it matches the lever is held
 // at idle. False if the calibration can't place the value (reverse without a reverse table).
+// Idle is the forward table's lowest axis reading; the lever variable may run either way from
+// there (the PMDG 737's goes from 500 at idle down to 75 at full).
 bool leverAxis(const LeverCalibration& cal, double lever, double clipReverser, bool liveReverse, double& axis);
+// Whether engine `engine` (0-based) is in reverse in this frame, by what the reversers did: the
+// reverse nozzles out, or the lever simvar below idle. Some aircraft reverse without setting
+// GENERAL ENG REVERSE THRUST ENGAGED (the PMDG 737 with "decrease throttle" held), or set it
+// without reversing.
+bool reversing(const Frame& f, int engine);
 // The channel a method takes its values from (engine is 0-based, throttle only), or -1.
 int methodSourceChannel(Control c, MethodKind k, int engine);
 // Every channel playback drives for this control when the profile drives it (any method):

@@ -13,6 +13,11 @@ namespace {
 
 const int kThrottleAxisKeys[4] = {KEY_THROTTLE1_AXIS_SET_EX1, KEY_THROTTLE2_AXIS_SET_EX1, KEY_THROTTLE3_AXIS_SET_EX1,
                                   KEY_THROTTLE4_AXIS_SET_EX1};
+const int kReverseOnKeys[4] = {KEY_SET_THROTTLE1_REVERSE_THRUST_ON, KEY_SET_THROTTLE2_REVERSE_THRUST_ON,
+                               KEY_SET_THROTTLE3_REVERSE_THRUST_ON, KEY_SET_THROTTLE4_REVERSE_THRUST_ON};
+const int kReverseOffKeys[4] = {KEY_SET_THROTTLE1_REVERSE_THRUST_OFF, KEY_SET_THROTTLE2_REVERSE_THRUST_OFF,
+                                KEY_SET_THROTTLE3_REVERSE_THRUST_OFF, KEY_SET_THROTTLE4_REVERSE_THRUST_OFF};
+constexpr int kEngageRetryFrames = 30;
 
 double clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -154,6 +159,16 @@ void ControlDriver::setLever(const LeverCalibration& cal) {
               cal.reverse.empty() ? "" : ", reverse too");
 }
 
+void ControlDriver::setReverseBy(ReverseBy by) {
+    Slot& s = slots_[static_cast<int>(Control::Throttle)];
+    if (!s.active || s.method.kind != MethodKind::KeyEvent) return;
+    s.reverseBy = by;
+    if (by == ReverseBy::Hold) log::info("controls: reverse thrust by holding THROTTLE_DECR while the clip's reversers are out");
+    if (by == ReverseBy::Events) log::info("controls: reverse thrust with the reverse thrust events");
+}
+
+void ControlDriver::throttleDecrease() { keyEvent(KEY_THROTTLE_DECR, 0); }
+
 void ControlDriver::apply(Control c, const Frame& f, bool force) {
     Slot& s = slots_[static_cast<int>(c)];
     if (!s.active) return;
@@ -231,10 +246,59 @@ void ControlDriver::keyEvent(int id, int32_t value) {
 
 void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force) {
     switch (c) {
-        case Control::Throttle:
+        case Control::Throttle: {
+            // Reverse thrust as the setup found this aircraft takes it. "Hold": THROTTLE_DECR every
+            // frame while the clip's reversers are out, as a held "decrease throttle" key does; the
+            // levers stay where the clip has them (idle), and let go the aircraft brings them back.
+            const ReverseBy by = s.reverseBy;
+            if (by == ReverseBy::Hold) {
+                bool out = false;
+                for (int e = 0; e < s.count; ++e) out |= reversing(f, e);
+                if (out) {
+                    keyEvent(KEY_THROTTLE_DECR, 0);
+                    ++s.holdFrames;
+                    if (!s.holding) log::info("controls: holding THROTTLE_DECR (the clip's reversers are out)");
+                } else if (s.holding) {
+                    force = true;  // let go: and the levers again, in case the aircraft stayed in reverse
+                    log::info("controls: let go of THROTTLE_DECR");
+                }
+                s.holding = out;
+            }
+            const double limit = ctx_.throttleLowerLimit ? *ctx_.throttleLowerLimit : NAN;
+            const double lower = std::isfinite(limit) && limit < -1.0 ? limit : 0.0;
             for (int e = 0; e < s.count; ++e) {
                 double fraction = NAN;
                 bool lever = true;  // the source is the lever itself
+                const double pct = f.v[kThrottle1 + e];
+                const double flag = f.v[kReverser1 + e];
+                const bool liveReverse = ctx_.live && ctx_.live->v[kReverser1 + e] >= 0.5;
+                // Whether the clip is in reverse here. Its reverse flag, except: on a "hold"
+                // aircraft the flag isn't its reverse (the hold above is); on an "events" one the
+                // reversers may be out without it ("decrease throttle" held), and then we put the
+                // reverser in ourselves, retrying until the aircraft has it, and take it out after.
+                double clipFlag = flag;
+                bool clipReverse = std::isfinite(flag) ? flag >= 0.5 : pct < 0.0;
+                if (by == ReverseBy::Hold) {
+                    clipFlag = NAN;
+                    clipReverse = false;
+                } else if (by == ReverseBy::Events) {
+                    const bool flagOn = std::isfinite(flag) && flag >= 0.5;
+                    const bool out = reversing(f, e);
+                    if (out && !flagOn) {
+                        if (!liveReverse && --s.engageWait[e] <= 0) {
+                            keyEvent(kReverseOnKeys[e], 0);
+                            s.engageWait[e] = kEngageRetryFrames;
+                            if (!s.engaged[e]) log::info("controls: engine %d reversing without the reverse flag: reverser in", e + 1);
+                        }
+                        s.engaged[e] = true;
+                    } else if (s.engaged[e] && !out) {
+                        keyEvent(kReverseOffKeys[e], 0);
+                        s.engaged[e] = false;
+                        s.engageWait[e] = 0;
+                    }
+                    clipReverse = flagOn || out;
+                    clipFlag = clipReverse ? 1.0 : 0.0;
+                }
                 const double hw = f.v[kThrottleAxis1 + e];
                 if (std::isfinite(hw)) {
                     // The pilot's own hardware axis: puts the lever exactly where it was, detents
@@ -249,8 +313,7 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                     const int ch = kLVarThrottle1 + (s.lever.var.find('#') != std::string::npos ? e : 0);
                     const double lv = f.v[ch];
                     if (!std::isfinite(lv)) continue;  // a gap in the clip: hold
-                    const bool liveReverse = ctx_.live && ctx_.live->v[kReverser1 + e] >= 0.5;
-                    if (leverAxis(s.lever, lv, f.v[kReverser1 + e], liveReverse, fraction)) {
+                    if (leverAxis(s.lever, lv, clipFlag, liveReverse, fraction)) {
                         ++s.leverFrames;
                     } else {
                         fraction = NAN;
@@ -261,19 +324,23 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                     // simvar. Idle..full out of reverse; with the
                     // reverser engaged (switched by the clip's reverser events), idle..full
                     // reverse. Hold idle until the aircraft's reverser matches the clip.
-                    const double pct = f.v[kThrottle1 + e];
                     if (!std::isfinite(pct)) continue;
                     lever = false;
-                    const double rev = f.v[kReverser1 + e];
-                    const bool clipReverse = std::isfinite(rev) ? rev >= 0.5 : pct < 0.0;
-                    const bool liveReverse = ctx_.live && ctx_.live->v[kReverser1 + e] >= 0.5;
-                    const double limit = ctx_.throttleLowerLimit ? *ctx_.throttleLowerLimit : NAN;
-                    const double lower = std::isfinite(limit) && limit < -1.0 ? limit : 0.0;
                     fraction = 0.0;
                     if (clipReverse && liveReverse && lower < 0.0) {
                         fraction = pct / lower;
                     } else if (!clipReverse && !liveReverse) {
                         fraction = pct / 100.0;
+                    }
+                }
+                if (by == ReverseBy::Events) {
+                    if (clipReverse != liveReverse) {
+                        fraction = 0.0;  // idle in whichever mode the aircraft is in, until it matches
+                    } else if (clipReverse && lower < 0.0 && std::isfinite(pct) && pct < 0.0) {
+                        // The reverse amount: the lever variable may not show it (with "decrease
+                        // throttle" held it stays at idle), the simvar does.
+                        const double amount = pct / lower;
+                        fraction = std::isfinite(fraction) && fraction > amount ? fraction : amount;
                     }
                 }
                 const double axis = static_cast<double>(std::lround(clamp(fraction, 0.0, 1.0) * 32768.0 - 16384.0));
@@ -286,6 +353,7 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                 if (send) keyEvent(kThrottleAxisKeys[e], static_cast<int32_t>(axis));
             }
             break;
+        }
         case Control::Flaps: {
             const double idx = f.v[kFlapsHandleIndex];
             if (!std::isfinite(idx)) break;
@@ -364,6 +432,10 @@ void ControlDriver::end(Control c) {
                                                   : "controls: %d value(s) sent to the %s with %s",
               s.sends, controlSpec(c).label, describeMethod(c, s.method).c_str());
     if (s.useLever) log::info("controls: %d engine frame(s) placed from L:var %s", s.leverFrames, s.lever.var.c_str());
+    if (s.holdFrames > 0) log::info("controls: THROTTLE_DECR held for reverse in %d frame(s)", s.holdFrames);
+    for (int e = 0; e < 4; ++e) {
+        if (s.engaged[e]) keyEvent(kReverseOffKeys[e], 0);  // the reverser we put in
+    }
     if (s.errors > 0) log::warn("controls: %d error(s) driving the %s", s.errors, controlSpec(c).label);
 }
 
