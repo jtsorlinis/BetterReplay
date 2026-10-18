@@ -51,11 +51,13 @@ interface SetupStatus {
     stepNo?: number;
     steps?: number;
     prompt?: string;  // one short instruction or question
-    detail?: string;  // what it's for (the throttle lever's phases)
+    detail?: string;  // what it's for (the throttle's holds and lever phases)
     progress?: number;  // the throttle sweep, 0..1
     task?: number;    // the pilot's instruction showing, of `tasks` in this step
     tasks?: number;
     taskDone?: boolean;  // the last one is done (things settling)
+    holdTask?: boolean;  // the instruction showing is a throttle hold
+    hold?: number;       // how far it is, 0..1
     method?: number;      // the method being tried (1-based), of `methods` in this step
     methods?: number;
     attempts?: string[];  // how each method before it ended: "failed", "rejected", "unavailable"
@@ -140,7 +142,6 @@ const SETUP_BUTTONS: { [answer: string]: string } = {
     skip: "Skip this step",
     retry: "Try again",
     ready: "Continue anyway",
-    done: "Done",
     begin: "Start",
     later: "Later",
     never: "Never for this aircraft",
@@ -158,7 +159,6 @@ const SETUP_KIND: { [answer: string]: string } = {
     no: "secondary",
     again: "secondary",
     ready: "secondary",
-    done: "secondary",
     later: "secondary",
 };
 const SETUP_PHASES: { [phase: string]: string } = {
@@ -350,6 +350,21 @@ function attemptsHtml(setup: SetupStatus): string {
         (phase === "ask" ? "Method " + n + " passed the check" : "Trying method " + n) + "</div>";
     for (let i = n; i < (setup.methods || 0); ++i) {
         html += '<div class="br-attempt reserved"><span class="br-attempt-mark"></span>Trying method ' + (i + 1) + "</div>";
+    }
+    return html;
+}
+
+// The phase label, and while the pilot is doing something one dot per instruction in this step,
+// lit up to the one showing.
+function phaseHtml(label: string, setup: SetupStatus | undefined): string {
+    if (!label) return "";
+    let html = escapeHtml(label);
+    const phase = setup && setup.active ? setup.phase || "" : "";
+    const tasks = setup && (phase === "user" || phase === "positions") ? setup.tasks || 0 : 0;
+    if (tasks > 1 && setup) {
+        let dots = "";
+        for (let i = 0; i < tasks; ++i) dots += '<span class="br-phase-dot' + (i <= (setup.task || 0) ? " lit" : "") + '"></span>';
+        html += '<span class="br-phase-dots">' + dots + "</span>";
     }
     return html;
 }
@@ -883,8 +898,9 @@ class BetterReplayPanel extends UIElement {
             byId("br-setup-kicker").textContent = kicker;
             byId("br-setup-aircraft").textContent = s.aircraft || "";
             setHtml("br-setup-steps", stepsHtml(plan));
-            setText("br-setup-phase", SETUP_PHASES[phase] || "");
+            setHtml("br-setup-phase", phaseHtml(SETUP_PHASES[phase] || "", setup));
             this.renderPrompt(prompt, !!(setup && setup.active && setup.taskDone));
+            this.renderHold(setup && setup.active && setup.holdTask ? setup.hold || 0 : -1);
             setText("br-setup-detail", detail);
             setHtml("br-setup-attempts", setup && setup.active ? attemptsHtml(setup) : "");
             setHtml("br-setup-list", list);
@@ -925,9 +941,18 @@ class BetterReplayPanel extends UIElement {
         const tick = byId("br-setup-tick");
         tick.classList.remove("on");
         if (on) {
+            tick.classList.remove("holding");
             void tick.offsetWidth;  // restart the animation
             tick.classList.add("on");
         }
+    }
+
+    // A throttle hold: the ring in the tick's place fills while the throttle is held (`fraction`
+    // 0..1; negative when the instruction isn't a hold).
+    renderHold(fraction: number): void {
+        const holding = fraction >= 0 && !this.tickOn;
+        byId("br-setup-tick").classList.toggle("holding", holding);
+        byId("br-setup-tick-fill").style.transform = "scale(" + (holding ? Math.min(1, fraction) : 0).toFixed(3) + ")";
     }
 
     // Big buttons for the main choices, small ones underneath for the rest. Rebuilt only when the

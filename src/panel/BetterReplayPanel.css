@@ -705,6 +705,26 @@ button {
   color: var(--br-red);
 }
 
+/* the pilot's instructions in this step: one dot each, lit up to the one showing */
+.br-phase-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.3;
+  vertical-align: middle;
+}
+
+.br-phase-dot:first-child {
+  margin-left: 10px;
+}
+
+.br-phase-dot.lit {
+  opacity: 1;
+}
+
 @keyframes br-pulse {
   0%,
   100% {
@@ -867,6 +887,45 @@ button {
 
 .br-tick.on::after {
   animation: br-tick-draw 0.3s 0.18s ease-out both;
+}
+
+/* A throttle hold: a ring in the tick's place that fills while the throttle is held, then the tick. */
+.br-setup.stepping .br-tick.holding {
+  visibility: visible;
+  background: transparent;
+  box-shadow: none;
+}
+
+.br-tick.holding::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  border: 3px solid rgba(79, 209, 127, 0.45);
+  border-radius: 50%;
+}
+
+.br-tick.holding::after {
+  display: none;
+}
+
+.br-tick-fill {
+  display: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgba(79, 209, 127, 0.55);
+  transform: scale(0);
+  transition: transform 0.25s linear;
+}
+
+.br-tick.holding .br-tick-fill {
+  display: block;
 }
 
 @keyframes br-tick-pop {

@@ -55,10 +55,15 @@ struct FakeAircraft : IControlSim {
 
     // An Airbus-like throttle instead (the A320neo V2): the pilot moves an axis (0..1), the lever
     // has detents (idle, CL, FLX/MCT, TOGA) and reads in INI_ENGn_THROTTLE_POS, and the lever
-    // simvar is the thrust demand, which follows the lever with a lag. Replayed, only the throttle
-    // key events move the lever (as THROTTLEn_AXIS_SET_EX1 would).
+    // simvar is the thrust demand, which follows the lever with a lag (a thrust output follows
+    // that). Replayed, only the throttle key events move the lever (as THROTTLEn_AXIS_SET_EX1 would).
     bool airbus = false;
+    double demandLagSec = 1.2;    // 0: the demand settles at once (no creep to see)
+    double demandCreepPct = 0.0;  // and it keeps creeping up this much a second while off idle
+    bool hideLeverVars = false;   // the INI_ L:vars don't move (the lever can't be found from them)
     double axis[2] = {0.0, 0.0};
+    double out[2] = {0.0, 0.0};
+    double creep[2] = {0.0, 0.0};
     bool reversers = true;       // the reverse thrust events engage them; the axis then sets the amount
     bool reverseZone = false;    // the axis's bottom fifth is reverse instead
     bool reverser = false;
@@ -106,8 +111,10 @@ struct FakeAircraft : IControlSim {
         if (airbus) {
             for (int e = 0; e < 2; ++e) {
                 const double l = tla(e);
-                const double demand = l >= 0.0 ? l / 45.0 * 85.0 : l;
-                thr[e] += (demand - thr[e]) * (dt / 1.2 < 1.0 ? dt / 1.2 : 1.0);
+                creep[e] = l > 0.0 ? creep[e] + demandCreepPct * dt : 0.0;
+                const double demand = (l >= 0.0 ? l / 45.0 * 85.0 : l) + creep[e];
+                thr[e] += (demand - thr[e]) * (dt < demandLagSec ? dt / demandLagSec : 1.0);
+                out[e] += (thr[e] - out[e]) * (dt / 0.6 < 1.0 ? dt / 0.6 : 1.0);
             }
         }
         for (int e = 0; e < 2; ++e) n1[e] = approach(n1[e], 20.0 + 0.75 * std::fabs(thr[e]), 10.0, dt);
@@ -158,7 +165,8 @@ struct FakeAircraft : IControlSim {
         std::vector<double> v = {spoilerHandle * 100.0, ieThrottle(0), ieThrottle(1), gearLever, 1.0, t * 1000.0, 42.0,
                                  spoilerSurface};
         if (hideThrottleVars) v[1] = v[2] = 16.7;
-        if (airbus) v.insert(v.end(), {leverVar(0), leverVar(1), tla(0) >= 44.9 ? 1.0 : 0.0, thr[0], thr[1]});
+        if (airbus && hideLeverVars) v.insert(v.end(), {0.0, 0.0, 0.0, 0.0, 0.0});
+        else if (airbus) v.insert(v.end(), {leverVar(0), leverVar(1), tla(0) >= 44.9 ? 1.0 : 0.0, out[0], out[1]});
         return v;
     }
     void scanBegin(std::vector<ScanVar>& vars) override {
@@ -340,6 +348,31 @@ std::function<void(double)> deploySpoilers(FakeAircraft& a, double t0) {
     };
 }
 
+// A pilot who follows the throttle's instructions from 1 s in: to `half`, then `full`, each held
+// until the setup ticks it, then back to `idle` (the lever simvar in percent, or on the Airbus the
+// axis), at full travel a second. Records when the throttle was back at idle.
+struct ThrottlePilot {
+    double idle, half, full;
+    double backAt = -1.0;
+    void operator()(SetupHarness& h, double s) {
+        double& v = h.aircraft.airbus ? h.aircraft.axis[0] : h.aircraft.thr[0];
+        if (s >= 1.0) {
+            const JsonValue st = h.status();
+            const std::string phase = st.getString("phase", "");
+            const int task = static_cast<int>(st.getNumber("task", 0));
+            const bool pilot = phase == "user" || phase == "positions";
+            const double target = !pilot || task >= 2 ? idle : (task == 0 ? half : full);
+            v = approach(v, target, (h.aircraft.airbus ? 1.0 : 100.0), kDt);
+            if (pilot && task >= 2 && v == idle && backAt < 0.0) backAt = h.t;
+        }
+        (h.aircraft.airbus ? h.aircraft.axis[1] : h.aircraft.thr[1]) = v;
+    }
+};
+
+std::function<void(double)> followThrottle(SetupHarness& h, ThrottlePilot& p) {
+    return [&h, &p](double s) { p(h, s); };
+}
+
 }  // namespace
 
 TEST(Setup_FindsTheSpoilerInputEventByItsMovementAndAsksOnce) {
@@ -476,18 +509,25 @@ TEST(Setup_ThrottleUsesOnePatternForBothEnginesAndWaitsForTheSpool) {
     h.facts.gearRetractable = false;
     REQUIRE(h.start());
     CHECK_EQ(h.status().getString("step", ""), std::string("throttle"));
+    // The holds: the detail says how long, and while one is showing it says how far it is.
+    double holdSeen = 0.0;
+    bool holdTask = false, detail = false;
+    ThrottlePilot p{0.0, 50.0, 100.0};
     auto pilot = [&](double s) {
-        const double x = s - 2.0;
-        double v = 0.0;
-        if (x >= 0.0 && x < 2.0) v = 50.0 * x;
-        else if (x >= 2.0 && x < 4.0) v = 100.0;
-        else if (x >= 4.0 && x < 5.0) v = 100.0 - 100.0 * (x - 4.0);
-        h.aircraft.thr[0] = h.aircraft.thr[1] = v;
+        p(h, s);
+        const JsonValue st = h.status();
+        if (st.getString("phase", "") != "user") return;
+        holdSeen = std::max(holdSeen, st.getNumber("hold", 0.0));
+        holdTask |= st.getBool("holdTask", false);
+        detail |= st.getString("detail", "").find("until it's ticked") != std::string::npos;
     };
     CHECK(h.run(90.0, pilot, "ask"));
-    // The lever is back at idle at 7 s, but the pilot's part only ends once N1 is back down (~13 s).
-    CHECK(h.firstReplayAt > 11.0);
-    CHECK(inOrder(h.prompts, {"Advance the throttle to full", "Bring the throttle back to idle",
+    CHECK(holdTask && detail);
+    CHECK(holdSeen > 0.9);
+    // The lever is back at idle well before the pilot's part ends: that waits for N1 to come down.
+    REQUIRE(p.backAt > 0.0);
+    CHECK(h.firstReplayAt > p.backAt + 5.0);
+    CHECK(inOrder(h.prompts, {"Move the throttle to about halfway and hold it", "Now to full and hold it", "Back to idle",
                               "Wait for the engines to spool down", "Listen to the engines"}));
     REQUIRE(!h.aircraft.tried.empty());
     CHECK(h.aircraft.tried[0] == h.aircraft.throttleWorks);
@@ -507,44 +547,16 @@ void throttleOnly(SetupHarness& h) {
     h.aircraft.throttleWorks = ControlMethod{MethodKind::KeyEvent, "", 1.0};
 }
 
-// Full at 2 s (over `rampSec`), held `holdSec`, back to idle over 1 s.
-std::function<void(double)> fullAndBack(SetupHarness& h, double holdSec, double rampSec = 1.0) {
-    return [&h, holdSec, rampSec](double s) {
-        const double x = s - 2.0;
-        double v = 0.0;
-        if (x >= 0.0 && x < rampSec) v = x / rampSec;
-        else if (x >= rampSec && x < rampSec + holdSec) v = 1.0;
-        else if (x >= rampSec + holdSec && x < rampSec + holdSec + 1.0) v = 1.0 - (x - rampSec - holdSec);
-        if (h.aircraft.airbus) {
-            h.aircraft.axis[0] = h.aircraft.axis[1] = 0.95 * v;  // into the TOGA detent
-        } else {
-            h.aircraft.thr[0] = h.aircraft.thr[1] = 100.0 * v;
-        }
-    };
-}
-
-// The pilot moves to CL, FLX/MCT and TOGA (half a second each way) and holds each for 4 s, then
-// back to idle.
-std::function<void(double)> airbusDetents(SetupHarness& h) {
-    return [&h](double s) {
-        static const double kAt[] = {0.0, 0.5, 0.75, 0.95, 0.0};
-        const double x = s - 1.0;
-        double a = 0.0;
-        if (x >= 0.0) {
-            const int i = static_cast<int>(x / 4.5);
-            const double into = x - 4.5 * i;
-            if (i < 4) {
-                const double from = kAt[i], to = kAt[i + 1];
-                a = into < 0.5 ? from + (to - from) * into / 0.5 : to;
-            }
-        }
-        h.aircraft.axis[0] = h.aircraft.axis[1] = a;
-    };
+// The pilot's throttle: halfway and full as the setup asks, on the Airbus the CL and TOGA
+// detents (idle at `idle` on the axis, the rest of it above).
+ThrottlePilot throttlePilot(SetupHarness& h, double idle = 0.0) {
+    if (!h.aircraft.airbus) return ThrottlePilot{0.0, 50.0, 100.0};
+    return ThrottlePilot{idle, idle + (1.0 - idle) * 0.5, idle + (1.0 - idle) * 0.95};
 }
 
 // Through the throttle's movement and its replays to the method's question, then "yes".
-void confirmKeyEvents(SetupHarness& h, double holdSec) {
-    REQUIRE(h.run(240.0, fullAndBack(h, holdSec), "ask"));
+void confirmKeyEvents(SetupHarness& h, ThrottlePilot& p) {
+    REQUIRE(h.run(240.0, followThrottle(h, p), "ask"));
     REQUIRE(!h.aircraft.tried.empty());
     CHECK(h.aircraft.tried.back().kind == MethodKind::KeyEvent);
     REQUIRE(h.answer("yes"));
@@ -556,29 +568,63 @@ TEST(Setup_ThrottleLeverStepSkippedWhenTheSimvarHoldsStill) {
     SetupHarness h;
     throttleOnly(h);
     REQUIRE(h.start());
-    confirmKeyEvents(h, 4.0);
+    ThrottlePilot p = throttlePilot(h);
+    confirmKeyEvents(h, p);
     // The simvar is the lever here: no further questions.
     CHECK_EQ(h.phase(), std::string("done"));
     const ControlProfile& tp = h.flow.profile()[Control::Throttle];
     CHECK(tp.state == ControlState::Ok);
     CHECK(tp.method.kind == MethodKind::KeyEvent);
     CHECK(tp.lever.var.empty());
-    for (const std::string& p : h.prompts) CHECK(p.find("positions") == std::string::npos);
+    for (const std::string& s : h.prompts) CHECK(s.find("Hands off") == std::string::npos);
 }
 
-TEST(Setup_ThrottleLeverAskedWhenTheMovementDoesntTell) {
+// Without the holds the movement doesn't count: the instruction stays up until the throttle is held.
+TEST(Setup_ThrottleMovementWaitsForTheHolds) {
     SetupHarness h;
     throttleOnly(h);
-    h.aircraft.hideThrottleVars = true;  // nothing lever-like to compare with
     REQUIRE(h.start());
-    confirmKeyEvents(h, 0.5);            // and no hold at full
-    CHECK_EQ(h.phase(), std::string("query"));
-    CHECK_EQ(h.status().getString("prompt", ""), std::string("Do the levers stay put under autothrust?"));
-    CHECK(!h.status().getString("detail", "").empty());
-    REQUIRE(h.answer("no"));
+    auto slam = [&](double s) { h.aircraft.thr[0] = h.aircraft.thr[1] = s > 2.0 && s < 3.0 ? 100.0 : 0.0; };
+    h.run(20.0, slam);
+    CHECK_EQ(h.phase(), std::string("user"));
+    CHECK_EQ(h.status().getString("prompt", ""), std::string("Move the throttle to about halfway and hold it"));
+    CHECK_EQ(h.status().getNumber("tasks", 0), 4.0);
+    // Full first, then halfway, also does it.
+    ThrottlePilot p{0.0, 100.0, 50.0};
+    REQUIRE(h.run(240.0, followThrottle(h, p), "ask"));
+    CHECK(inOrder(h.prompts, {"Now to full and hold it", "Back to idle", "Wait for the engines to spool down"}));
+    REQUIRE(h.answer("yes"));
     CHECK_EQ(h.phase(), std::string("done"));
-    CHECK(h.flow.profile()[Control::Throttle].state == ControlState::Ok);
     CHECK(h.flow.profile()[Control::Throttle].lever.var.empty());
+}
+
+// A thrust demand that settles at once holds still too, but short of 100% at full: asked.
+TEST(Setup_ThrottleLeverAskedWhenTheMovementDoesntTell) {
+    for (const bool yes : {false, true}) {
+        SetupHarness h;
+        throttleOnly(h);
+        h.aircraft.airbus = true;
+        h.aircraft.demandLagSec = 0.0;
+        REQUIRE(h.start());
+        ThrottlePilot p = throttlePilot(h);
+        confirmKeyEvents(h, p);
+        CHECK_EQ(h.phase(), std::string("query"));
+        CHECK_EQ(h.status().getString("prompt", ""), std::string("Do the levers stay put under autothrust?"));
+        CHECK(!h.status().getString("detail", "").empty());
+        REQUIRE(h.answer(yes ? "yes" : "no"));
+        if (!yes) {
+            CHECK_EQ(h.phase(), std::string("done"));
+            CHECK(h.flow.profile()[Control::Throttle].state == ControlState::Ok);
+            CHECK(h.flow.profile()[Control::Throttle].lever.var.empty());
+            continue;
+        }
+        // "Yes": the lever's variable from the holds already made.
+        CHECK_EQ(h.phase(), std::string("notice"));
+        REQUIRE(h.answer("begin"));
+        REQUIRE(h.run(120.0, nullptr, "done"));
+        CHECK_EQ(h.flow.profile()[Control::Throttle].lever.var, std::string("INI_ENG#_THROTTLE_POS"));
+        CHECK(h.flow.profile()[Control::Throttle].lever.valid());
+    }
 }
 
 TEST(Setup_ThrottleLeverFoundAndCalibratedWhenTheSimvarCreeps) {
@@ -587,16 +633,16 @@ TEST(Setup_ThrottleLeverFoundAndCalibratedWhenTheSimvarCreeps) {
     h.aircraft.airbus = true;
     h.facts.hasReverse = true;
     REQUIRE(h.start());
-    confirmKeyEvents(h, 4.0);
-    // The thrust demand kept moving while the lever sat in TOGA: find the lever.
-    CHECK_EQ(h.phase(), std::string("positions"));
-    CHECK_EQ(h.status().getString("prompt", ""), std::string("Hold the throttle at a few positions"));
-    CHECK(h.status().getString("detail", "").find("CL, FLX/MCT and TOGA") != std::string::npos);
-
-    REQUIRE(h.run(60.0, airbusDetents(h), "notice"));
-    CHECK(inOrder(h.prompts, {"Hold the throttle at a few positions", "Bring the throttle back to idle",
-                              "Hands off the throttle"}));
+    ThrottlePilot p = throttlePilot(h);
+    confirmKeyEvents(h, p);
+    // The thrust demand kept moving while the lever sat in CL and TOGA, and the lever's own
+    // variable held: straight on to its calibration, with no second pass of the throttle.
+    CHECK_EQ(h.phase(), std::string("notice"));
+    CHECK(inOrder(h.prompts, {"Move the throttle to about halfway and hold it", "Now to full and hold it", "Back to idle",
+                              "Wait for the engines to spool down", "Listen to the engines",
+                              "Did the engines spool up and back down?"}));
     const JsonValue notice = h.status();
+    CHECK_EQ(notice.getString("prompt", ""), std::string("Hands off the throttle"));
     CHECK(notice.getString("detail", "").find("15 seconds") != std::string::npos);
     const JsonValue* buttons = notice.get("buttons");
     REQUIRE(buttons && buttons->isArray() && !buttons->array.empty());
@@ -642,6 +688,24 @@ TEST(Setup_ThrottleLeverFoundAndCalibratedWhenTheSimvarCreeps) {
     CHECK(a < 0.05);
 }
 
+// A thrust demand that keeps creeping (1.5% a second) while the lever sits still: the holds still
+// tick, and the creep is what shows it isn't the lever.
+TEST(Setup_ThrottleHoldsTickWhileTheThrustDemandCreeps) {
+    SetupHarness h;
+    throttleOnly(h);
+    h.aircraft.airbus = true;
+    h.aircraft.demandLagSec = 0.3;
+    h.aircraft.demandCreepPct = 1.5;
+    REQUIRE(h.start());
+    ThrottlePilot p = throttlePilot(h);
+    confirmKeyEvents(h, p);
+    CHECK_EQ(h.phase(), std::string("notice"));
+    CHECK(inOrder(h.prompts, {"Move the throttle to about halfway and hold it", "Now to full and hold it", "Back to idle"}));
+    REQUIRE(h.answer("begin"));
+    REQUIRE(h.run(120.0, nullptr, "done"));
+    CHECK_EQ(h.flow.profile()[Control::Throttle].lever.var, std::string("INI_ENG#_THROTTLE_POS"));
+}
+
 TEST(Setup_ThrottleLeverAxisWithItsOwnReverseZone) {
     SetupHarness h;
     throttleOnly(h);
@@ -651,20 +715,12 @@ TEST(Setup_ThrottleLeverAxisWithItsOwnReverseZone) {
     // key events only pass the check with the pilot's own axis recorded.
     h.aircraft.axisRecorded = true;
     h.facts.hasReverse = true;
-    REQUIRE(h.start());
     // Idle is at axis 0.2 here.
-    auto pilot = [&](double s) {
-        fullAndBack(h, 4.0)(s);
-        h.aircraft.axis[0] = h.aircraft.axis[1] = 0.2 + 0.8 * h.aircraft.axis[0];
-    };
-    REQUIRE(h.run(240.0, pilot, "ask"));
-    REQUIRE(h.answer("yes"));
-    REQUIRE(h.phase() == "positions");
-    auto detents = [&](double s) {
-        airbusDetents(h)(s);
-        h.aircraft.axis[0] = h.aircraft.axis[1] = 0.2 + 0.8 * h.aircraft.axis[0];
-    };
-    REQUIRE(h.run(60.0, detents, "notice"));
+    h.aircraft.axis[0] = h.aircraft.axis[1] = 0.2;
+    REQUIRE(h.start());
+    ThrottlePilot p = throttlePilot(h, 0.2);
+    confirmKeyEvents(h, p);
+    REQUIRE(h.phase() == "notice");
     REQUIRE(h.answer("begin"));
     REQUIRE(h.run(120.0, nullptr, "done"));
     const ControlProfile& tp = h.flow.profile()[Control::Throttle];
@@ -681,13 +737,51 @@ TEST(Setup_ThrottleLeverAxisWithItsOwnReverseZone) {
     CHECK_NEAR(a, 0.6, 0.03);
 }
 
+// The movement showed the thrust demand creeping, but not the lever's own variable: the holds once
+// more, for it alone.
+TEST(Setup_ThrottleLeverHeldAgainWhenTheMovementDidntShowIt) {
+    SetupHarness h;
+    throttleOnly(h);
+    h.aircraft.airbus = true;
+    h.aircraft.hideLeverVars = true;
+    REQUIRE(h.start());
+    ThrottlePilot p = throttlePilot(h);
+    confirmKeyEvents(h, p);
+    // Nothing lever-like but the input events, which follow the demand: the movement can't tell.
+    REQUIRE(h.phase() == "query");
+    REQUIRE(h.answer("yes"));
+    CHECK_EQ(h.phase(), std::string("positions"));
+    const JsonValue st = h.status();
+    CHECK_EQ(st.getString("prompt", ""), std::string("Move the throttle to about halfway and hold it"));
+    CHECK_EQ(st.getNumber("tasks", 0), 3.0);
+    CHECK(st.getBool("holdTask", false));
+    CHECK(st.getString("note", "").find("Once more") != std::string::npos);
+    CHECK(st.getString("detail", "").find("until it's ticked") != std::string::npos);
+    const JsonValue* buttons = st.get("buttons");
+    REQUIRE(buttons && buttons->isArray() && !buttons->array.empty());
+    CHECK_EQ(buttons->array[0].string, std::string("skip"));
+
+    h.aircraft.hideLeverVars = false;
+    h.prompts.clear();
+    ThrottlePilot again = throttlePilot(h);
+    REQUIRE(h.run(90.0, followThrottle(h, again), "notice"));
+    CHECK(inOrder(h.prompts, {"Move the throttle to about halfway and hold it", "Now to full and hold it", "Back to idle",
+                              "Hands off the throttle"}));
+    CHECK(h.sawTaskDone);
+    REQUIRE(h.answer("begin"));
+    REQUIRE(h.run(120.0, nullptr, "done"));
+    CHECK_EQ(h.flow.profile()[Control::Throttle].lever.var, std::string("INI_ENG#_THROTTLE_POS"));
+    CHECK(h.flow.profile()[Control::Throttle].lever.valid());
+}
+
 TEST(Setup_ThrottleLeverSweepStopsWhenTheAircraftRolls) {
     SetupHarness h;
     throttleOnly(h);
     h.aircraft.airbus = true;
     REQUIRE(h.start());
-    confirmKeyEvents(h, 4.0);
-    REQUIRE(h.run(60.0, airbusDetents(h), "notice"));
+    ThrottlePilot p = throttlePilot(h);
+    confirmKeyEvents(h, p);
+    REQUIRE(h.phase() == "notice");
     REQUIRE(h.answer("begin"));
     h.run(3.0);
     h.aircraft.gs = 5.0;  // the parking brake isn't holding
@@ -785,11 +879,8 @@ TEST(Setup_ThrottleReplayStopsWhenTheAircraftRolls) {
     h.facts.gearRetractable = false;
     h.aircraft.rollWhenDriven = true;
     REQUIRE(h.start());
-    auto pilot = [&](double s) {
-        const double v = s > 2.0 && s < 6.0 ? 100.0 : 0.0;
-        if (h.phase() == "user" || h.phase() == "prepare") h.aircraft.thr[0] = h.aircraft.thr[1] = v;
-    };
-    CHECK(h.run(90.0, pilot, "ask"));
+    ThrottlePilot p{0.0, 50.0, 100.0};
+    CHECK(h.run(90.0, followThrottle(h, p), "ask"));
     CHECK(h.status().getString("note", "").find("roll") != std::string::npos);
     CHECK_NEAR(h.aircraft.thr[0], 0.0, 1e-6);  // put back to idle
     CHECK(!h.aircraft.driving);

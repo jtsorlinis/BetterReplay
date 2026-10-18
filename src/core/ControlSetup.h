@@ -10,11 +10,11 @@
 // down?"); a "no" tries the next. The result is the aircraft's ControlProfile.
 //
 // The throttle's lever simvar isn't the lever on every aircraft (on the A320neo V2 it's the
-// autothrust's thrust demand). If it kept moving while the pilot held the lever still and the
-// key events drive the throttle, the step goes on: the pilot holds the lever at a few positions
-// so the setup can find the variable that holds still with it, then the setup steps the throttle
-// axis through its range and records where the lever went (LeverCalibration). Aircraft whose
-// simvar held still skip all that.
+// autothrust's thrust demand). So the pilot's throttle movement holds the lever at about halfway
+// and at full before going back to idle. If the simvar kept moving during those holds and the key
+// events drive the throttle, the step goes on: the variable that held still with the lever is the
+// lever's own, and the setup steps the throttle axis through its range and records where the
+// lever went (LeverCalibration). Aircraft whose simvar held still skip all that.
 #pragma once
 
 #include <cstddef>
@@ -165,7 +165,7 @@ public:
     bool start(const AircraftProfile& profile, const Frame& live, const SetupFacts& facts, std::string& error);
     void cancel(const char* why);
     // The pilot's answer: yes, no, again, skip, retry, ready (continue despite a precondition),
-    // done (the throttle positions), begin (the throttle sweep), later, cancel, close.
+    // begin (the throttle sweep), later, cancel, close.
     bool answer(const std::string& a, std::string& error);
     bool active() const { return phase_ != Phase::Idle; }
 
@@ -177,8 +177,9 @@ public:
 
     // Writes the active setup's fields into the current JSON object: active, step, stepNo,
     // steps, phase, title, prompt (one short instruction or question), detail (what it's for,
-    // in the throttle lever's phases), task / tasks / taskDone (the pilot's instructions in this
-    // step), note, method, methods, attempts (how each method before the current one ended),
+    // in the throttle's holds and lever phases), task / tasks / taskDone (the pilot's instructions
+    // in this step), holdTask / hold (the instruction is a throttle hold; how far it is, 0..1),
+    // note, method, methods, attempts (how each method before the current one ended),
     // progress (the throttle sweep, 0..1), plan (each step's control and its result, "current"
     // or "next"), buttons.
     void statusJson(JsonWriter& w) const;
@@ -196,8 +197,9 @@ public:
 
 private:
     // After Done: the throttle lever's phases, for aircraft whose lever simvar isn't the lever.
-    // Query asks whether it is when the pilot's movement didn't tell; in Positions the pilot holds
-    // the lever at a few positions; Notice warns before the Sweep steps the axis through its range.
+    // Query asks whether it is when the pilot's movement didn't tell; Positions repeats the
+    // movement's holds when they didn't show the lever's variable; Notice warns before the Sweep
+    // steps the axis through its range.
     enum class Phase { Idle, Prepare, Takeoff, User, Retry, Replay, Hold, Ask, Done, Query, Positions, Notice, Sweep };
     enum class LeverVerdict { Steady, Creeps, Unclear };  // the lever simvar while the hand was still
 
@@ -206,12 +208,15 @@ private:
     void beginUser();
     void userFrame(double dt, const Frame& live);
     void scanFrame(double h, double o);  // a capture-clock scan, every kScanInterval
+    void resetHolds();
+    void trackHolds(double h, double dh, bool enough);  // the throttle's holds (task_ 0 and 1)
     void analyze();
     LeverVerdict checkLever();
     void confirmMethod();  // the pilot said yes to the method being tried
-    void beginPositions();
+    void leverFromMovement();
+    void beginPositions(const char* note);
     void positionsFrame(double dt, const Frame& live);
-    void pickLever();
+    bool findLever();
     void enterNotice();
     void beginSweep();
     void sweepFrame(double dt, const Frame& live);
@@ -276,6 +281,14 @@ private:
     double outcomeStillSince_ = 0.0;
     size_t task_ = 0;        // the pilot's instruction showing ("Deploy the spoilers", "Retract...")
     bool taskDone_ = false;  // the last one is done; waiting for things to settle
+    static constexpr size_t kHoldPast = 10;
+    double holdPast_[kHoldPast] = {};  // the throttle's holds: the simvar over the last second (a ring)
+    size_t holdSamples_ = 0;
+    double holdNext_ = 0.0;
+    double holdSince_ = 0.0;    // since when it's been moving slowly enough to be held
+    double holdLevel_ = NAN;    // where the last hold was, and when it was done
+    double holdDoneAt_ = 0.0;
+    double hold_ = 0.0;         // how far the hold showing is (0..1)
     bool moved_ = false;
     double movedAt_ = 0.0;
     double windowFrom_ = 0.0;
@@ -302,10 +315,8 @@ private:
     bool leverStage_ = false;  // the throttle's method is confirmed; now its lever
     ControlMethod chosen_;     // that method
     LeverCalibration lever_;   // what the lever stage found, stored with the step
-    double leverIdle_ = NAN;   // the lever variable at idle (the end of the positions)
+    double leverIdle_ = NAN;   // the lever variable at idle (the end of the holds)
     double leverSpan_ = 0.0;   // and how far it moved there
-    std::vector<double> holds_;  // the handle at each position held (Positions)
-    bool holdCounted_ = false;
     struct SweepMove {
         double axis;  // 0..1
         int record;   // 0: just get there, 1: a forward reading, 2: a reverse one
