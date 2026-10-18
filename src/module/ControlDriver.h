@@ -85,6 +85,8 @@ private:
         LeverCalibration lever;  // throttle key events: replayed from the lever variable
         bool useLever = false;
         int leverFrames = 0;  // per engine, driven from the lever variable
+        int leverGap[4] = {};  // frames in a row without it in the clip
+        int gapFrames = 0;     // per engine, from the simvar for want of it
         ReverseBy reverseBy = ReverseBy::Unknown;
         bool holding = false;     // THROTTLE_DECR held for reverse
         int holdFrames = 0;

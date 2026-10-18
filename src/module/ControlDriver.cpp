@@ -18,6 +18,7 @@ const int kReverseOnKeys[4] = {KEY_SET_THROTTLE1_REVERSE_THRUST_ON, KEY_SET_THRO
 const int kReverseOffKeys[4] = {KEY_SET_THROTTLE1_REVERSE_THRUST_OFF, KEY_SET_THROTTLE2_REVERSE_THRUST_OFF,
                                 KEY_SET_THROTTLE3_REVERSE_THRUST_OFF, KEY_SET_THROTTLE4_REVERSE_THRUST_OFF};
 constexpr int kEngageRetryFrames = 30;
+constexpr int kLeverGapFrames = 30;  // a clip without its lever value this long: from the simvar
 
 double clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -312,11 +313,19 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                     // calibration can't place reverse without a reverse table; then the simvar.
                     const int ch = kLVarThrottle1 + (s.lever.var.find('#') != std::string::npos ? e : 0);
                     const double lv = f.v[ch];
-                    if (!std::isfinite(lv)) continue;  // a gap in the clip: hold
-                    if (leverAxis(s.lever, lv, clipFlag, liveReverse, fraction)) {
-                        ++s.leverFrames;
+                    if (!std::isfinite(lv)) {
+                        // A gap in the clip: hold for a moment. A longer stretch without it (recorded
+                        // before the setup found the variable, or before the aircraft had it): from
+                        // the simvar below meanwhile.
+                        if (++s.leverGap[e] <= kLeverGapFrames) continue;
+                        ++s.gapFrames;
                     } else {
-                        fraction = NAN;
+                        s.leverGap[e] = 0;
+                        if (leverAxis(s.lever, lv, clipFlag, liveReverse, fraction)) {
+                            ++s.leverFrames;
+                        } else {
+                            fraction = NAN;
+                        }
                     }
                 }
                 if (!std::isfinite(fraction)) {
@@ -438,6 +447,10 @@ void ControlDriver::end(Control c) {
                                                   : "controls: %d value(s) sent to the %s with %s",
               s.sends, controlSpec(c).label, describeMethod(c, s.method).c_str());
     if (s.useLever) log::info("controls: %d engine frame(s) placed from L:var %s", s.leverFrames, s.lever.var.c_str());
+    if (s.gapFrames > 0) {
+        log::info("controls: %d engine frame(s) from the throttle simvar, where the clip has no %s value", s.gapFrames,
+                  s.lever.var.c_str());
+    }
     if (s.holdFrames > 0) log::info("controls: THROTTLE_DECR held for reverse in %d frame(s)", s.holdFrames);
     for (int e = 0; e < 4; ++e) {
         if (s.engaged[e]) keyEvent(kReverseOffKeys[e], 0);  // the reverser we put in
