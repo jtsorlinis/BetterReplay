@@ -31,7 +31,8 @@ public:
     void writePlaybackFrame(const Frame& frame, bool jumped) override;
     void sendChannelEvent(int channel, double value) override;
     void endPlayback(const Frame& snapshot, bool restore) override;
-    bool restoring() const override { return restoreWaitFrames_ > 0; }
+    bool restoring() const override { return restoreWaiting_; }
+    void finishRestore() override;
     bool prepareJump(const Frame& target) override;
     void applyProfile(const AircraftProfile* profile) override;
 
@@ -114,6 +115,7 @@ private:
     void sendFreeze(bool on);
     void verifyFreeze();
     void checkRestoreGear();
+    bool restoreGearDown() const;
     void checkGearResponse();
     // (Re)builds a SetData definition from the channels with play mode `mode`, limited to `present`
     // (if given) and to engines the current aircraft has. Returns the channel count.
@@ -329,9 +331,9 @@ private:
     int overrideFrames_[kChannelCount] = {};
     int checkedFrames_ = 0;
     bool firstPlaybackWrite_ = false;
-    // Restoring onto the ground: stay frozen until the gear is back where the snapshot had it.
-    static constexpr int kRestoreGearMaxFrames = 1200;  // ~20 s at 60 fps
-    int restoreWaitFrames_ = 0;
+    // Restoring onto the ground: stay frozen until the gear is back down, at most
+    // EngineConfig::restoreMaxSec (the Engine then calls finishRestore).
+    bool restoreWaiting_ = false;
     double restoreGear_[3] = {};
     // After a gear command during playback: did the aircraft's gear actually start moving?
     static constexpr int kGearResponseFrames = 180;  // ~3 s at 60 fps

@@ -562,7 +562,7 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     if (!playing_ && profilePending_) reresolveForProfile();  // the profile changed during a replay
     if (snapCheckFrames_ > 0 && --snapCheckFrames_ == 0) checkSnap();
     if (!playing_ && snapFramesLeft_ > 0) writeSnap(restoreSnap_);
-    if (restoreWaitFrames_ > 0) checkRestoreGear();
+    if (restoreWaiting_) checkRestoreGear();
     if (restoreFlapsPending_ && !restoreDeferred_) checkRestoreFlaps();
     if (restoreThrottleFrames_ > 0) checkRestoreThrottle();
     if (gearCheckFrames_ > 0 && --gearCheckFrames_ == 0) checkGearResponse();
@@ -873,7 +873,7 @@ void SimBridge::checkEventChannels() {
 void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     if (!h_) return;
     const ChannelMask& present = clip.present;
-    restoreWaitFrames_ = 0;  // a new clip started while still settling a restore: playback wins
+    restoreWaiting_ = false;  // a new clip started while still settling a restore: playback wins
     restoreDeferred_ = false;
     prepareGearSent_ = false;
     snapFramesLeft_ = 0;
@@ -1663,7 +1663,7 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
         // Going back onto the ground with the gear up: lower it here first (still frozen where the
         // clip left the aircraft), then put the aircraft back; see prepareJump.
         restoreDeferred_ = true;
-        restoreWaitFrames_ = kRestoreGearMaxFrames;
+        restoreWaiting_ = true;
         log::info("playback: lowering the gear before putting the aircraft back on the ground (gear at %.2f)", live);
         return;
     }
@@ -1673,8 +1673,9 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
         writeSnap(restoreSnap_);
     }
     if (ground) {
-        restoreWaitFrames_ = kRestoreGearMaxFrames;
+        restoreWaiting_ = true;
         checkRestoreGear();
+        if (restoreWaiting_) log::info("playback: waiting for the gear before unfreezing");
     } else {
         sendFreeze(false);
     }
@@ -1700,33 +1701,47 @@ void SimBridge::writeRestore(const Frame& snapshot) {
               snapshot.v[kAlt]);
 }
 
-void SimBridge::checkRestoreGear() {
+// Whether each gear is at least as far down as in the snapshot, or all the way down. The A350
+// can report its nose gear up for a while after a replay; a snapshot taken then must not hold
+// the next restore until the gear goes back up. While a snap is being written on an aircraft
+// that may move it straight back, the gear reads what was written, not where it is: not yet.
+bool SimBridge::restoreGearDown() const {
+    if (!snapAccepted_ && (snapFramesLeft_ > 0 || snapCheckFrames_ > 0)) return false;
     static const int kGear[3] = {kGearCenter, kGearLeft, kGearRight};
-    bool settled = true;
     for (int i = 0; i < 3; ++i) {
         const double target = restoreGear_[i];
         const double live = input_.raw.v[kGear[i]];
-        if (std::isfinite(target) && std::isfinite(live) && std::fabs(live - target) > 0.02) settled = false;
+        if (std::isfinite(target) && std::isfinite(live) && live < (target < 1.0 ? target : 1.0) - 0.02) return false;
     }
-    const bool timedOut = !settled && --restoreWaitFrames_ <= 0;
+    return true;
+}
+
+// Until the gear is down, or the Engine's limit (finishRestore).
+void SimBridge::checkRestoreGear() {
+    if (!restoreGearDown()) return;
     if (restoreDeferred_) {
-        // The gear was being lowered before putting the aircraft back on the ground (endPlayback).
-        if (!settled && !timedOut) return;
-        if (timedOut) log::warn("playback: the gear didn't come down within 20 s; putting the aircraft back anyway");
+        // The gear was lowered before putting the aircraft back on the ground (endPlayback). The
+        // next frame looks again, with the aircraft back.
         restoreDeferred_ = false;
         writeRestore(restoreSnap_);
-        restoreWaitFrames_ = 10;  // a few frames for the position to land before unfreezing
         return;
     }
-    if (settled) {
-        if (restoreWaitFrames_ < kRestoreGearMaxFrames) log::info("playback: gear back in place; unfreezing");
-    } else if (!timedOut) {
-        if (restoreWaitFrames_ == kRestoreGearMaxFrames - 1) log::info("playback: waiting for the gear before unfreezing");
-        return;
+    log::info("playback: gear down; unfreezing");
+    restoreWaiting_ = false;
+    sendFreeze(false);
+}
+
+void SimBridge::finishRestore() {
+    if (!restoreWaiting_) return;
+    if (restoreDeferred_) {
+        log::warn("playback: the gear is still coming down (at %.2f); putting the aircraft back and unfreezing anyway",
+                  liveGearExtension());
+        restoreDeferred_ = false;
+        writeRestore(restoreSnap_);
     } else {
-        log::warn("playback: gear did not return to its pre-playback position within 20 s; unfreezing anyway");
+        log::warn("playback: the gear isn't back down yet (at %.2f); unfreezing anyway", liveGearExtension());
     }
-    restoreWaitFrames_ = 0;
+    restoreWaiting_ = false;
     sendFreeze(false);
 }
 

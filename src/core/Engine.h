@@ -43,6 +43,8 @@ public:
     // True while the sim side is still settling the restored aircraft (e.g. waiting for the gear
     // to come back down before unfreezing on the ground). Recording stays suspended meanwhile.
     virtual bool restoring() const { return false; }
+    // Stop settling and unfreeze now: EngineConfig::restoreMaxSec after Stop, if still restoring.
+    virtual void finishRestore() {}
     // The current aircraft's control profile changed (null: it has none). Recording and playback
     // follow it from now on.
     virtual void applyProfile(const AircraftProfile* profile) { (void)profile; }
@@ -65,6 +67,7 @@ struct EngineConfig {
     double bufferSeconds = 600.0;  // about 12 MB of frames
     size_t maxAutoClips = 20;  // newest takeoff/landing clips kept; manual saves are never auto-deleted
     double maxFrameDtSec = 0.5;  // longer gaps (hitches, loading) are clamped
+    double restoreMaxSec = 5.0;  // after Stop, the longest the aircraft stays frozen settling (the panel counts it down)
 };
 
 // Everything the module reads from the sim once per frame.
@@ -126,6 +129,8 @@ public:
     bool setSpeed(double speed, std::string& error);
     bool stopPlayback(std::string& error);  // restores the snapshot and unfreezes
     bool playbackActive() const { return playbackActive_; }
+    // After Stop, how long the aircraft may still stay frozen while it settles (0: it isn't).
+    double restoreSecondsLeft() const;
     const PlaybackController& playback() const { return playback_; }
 
     // Control setup (ControlSetup.h). Offered for every aircraft without a profile: it can start
@@ -226,6 +231,7 @@ private:
     // After a restore the sim may report the old position for a frame or two; don't record those.
     static constexpr int kSettleFrames = 30;
     int settleFrames_ = 0;
+    int64_t restoreStartMs_ = 0;  // when playback last ended (wall clock), for restoreMaxSec
 
     // recording clock
     double recTime_ = 0.0;

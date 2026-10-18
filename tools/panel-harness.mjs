@@ -41,16 +41,20 @@ const commBusMock = `
       bounces: ev === 'landing' ? i % 3 : 0, auto: ev !== 'manual' });
   }
   const state = { rev: 1, rec: true, why: '', armed: false, armIn: 6, phase: 'disarmed', buffer: 0,
-    aircraft: 'Airbus A320neo',
+    aircraft: 'Airbus A320neo', restoreLeft: 0,
     play: { active: false, file: '', t: 0, dur: 0, speed: 1, playing: false, eventT: 0 } };
   const listeners = {};
-  // prepareSec: Play first holds that long, "lowering the gear"; fail: { op: 'error' } fails the
-  // next command of that op with that error.
-  window.harness = { state: state, clips: clips, log: [], setup: window.harnessSetup, prepareSec: 0, fail: {} };
+  // prepareSec: Play first holds that long, "lowering the gear"; restoreSec: Stop keeps the aircraft
+  // frozen that long, "waiting for the gear" (5 s at most, like EngineConfig::restoreMaxSec);
+  // fail: { op: 'error' } fails the next command of that op with that error.
+  window.harness = { state: state, clips: clips, log: [], setup: window.harnessSetup, prepareSec: 0, restoreSec: 5,
+    fail: {} };
 
   setInterval(() => {
     window.harnessSetup.tick(0.1);
-    if (!state.play.active) {
+    if (state.restoreLeft > 0) {
+      state.restoreLeft = Math.max(0, state.restoreLeft - 0.1);
+    } else if (!state.play.active) {
       state.buffer = Math.min(600, state.buffer + 0.1);
       state.armIn = Math.max(0, state.armIn - 0.1);
       if (state.armIn === 0) { state.armed = true; state.phase = 'airborne'; }
@@ -67,7 +71,10 @@ const commBusMock = `
     setTimeout(() => { (listeners[name] || []).forEach((fn) => fn(JSON.stringify(obj) + '\\u0000')); }, 15);
   }
   function status() {
-    return { v: 1, rec: state.rec && !state.play.active, why: state.play.active ? 'playback' : state.why,
+    const restoring = !state.play.active && state.restoreLeft > 0;
+    return { v: 1, rec: state.rec && !state.play.active && !restoring,
+      why: state.play.active ? 'playback' : restoring ? 'restoring aircraft' : state.why,
+      restoreIn: restoring ? state.restoreLeft : 0, restoreMax: 5,
       armed: state.armed, armIn: state.armIn, phase: state.phase, bufferSec: state.buffer, bufferMax: 600,
       aircraft: state.aircraft, clipsRev: state.rev, clipCount: clips.length, lastSaved: '', error: '',
       play: Object.assign({}, state.play), setup: window.harnessSetup.status() };
@@ -100,6 +107,7 @@ const commBusMock = `
         if (clips[i].aircraft !== state.aircraft) {
           return reply(cmd.id, cmd.op, false, 'recorded in the ' + clips[i].aircraft + ': switch to that aircraft to replay it');
         }
+        state.restoreLeft = 0;
         Object.assign(state.play, { active: true, file: cmd.file, t: 0, dur: clips[i].durationSec, playing: true,
           eventT: clips[i].event === 'landing' ? 120 : 0, preparing: window.harness.prepareSec > 0,
           prepareLeft: window.harness.prepareSec }); return reply(cmd.id, cmd.op, true); }
@@ -108,7 +116,7 @@ const commBusMock = `
       case 'seek': state.play.t = Math.max(0, Math.min(state.play.dur, cmd.t)); return reply(cmd.id, cmd.op, true);
       case 'speed': state.play.speed = Math.max(0.25, Math.min(4, cmd.x)); return reply(cmd.id, cmd.op, true);
       case 'stop': state.play.active = false; state.play.playing = false; state.play.preparing = false;
-        return reply(cmd.id, cmd.op, true);
+        state.restoreLeft = Math.min(5, window.harness.restoreSec); return reply(cmd.id, cmd.op, true);
       default: return reply(cmd.id, cmd.op, false, 'unknown command: ' + cmd.op);
     }
   }

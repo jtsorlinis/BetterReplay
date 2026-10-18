@@ -167,6 +167,32 @@ button {
   background: rgba(255, 107, 107, 0.14);
 }
 
+/* after Stop, frozen until the gear is down: a blue disc that drains away over the wait */
+.br-dot-drain {
+  display: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  background: rgba(74, 168, 255, 0.42);
+  transition: transform 0.25s linear;
+}
+
+.br-dot.restoring {
+  background: rgba(74, 168, 255, 0.14);
+}
+
+.br-dot.restoring .br-dot-drain {
+  display: block;
+}
+
+.br-dot.restoring::after {
+  background: var(--br-blue);
+  box-shadow: 0 0 14px rgba(74, 168, 255, 0.9);
+}
+
 .br-dot.offline::after {
   background: var(--br-red);
 }

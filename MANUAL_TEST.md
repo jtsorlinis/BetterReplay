@@ -195,8 +195,10 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   - The aircraft is back where it was, at the same attitude and speed. Lights and gear handle are back as they were.
   - The aircraft is unfrozen and flies normally.
 - [ ] **Stop on the ground after a clip that ends gear-up** (e.g. a takeoff clip, played while parked). The gear snaps back down at once.
-  - **Expect** `playback: waiting for the gear before unfreezing`, then `playback: gear back in place; unfreezing` within a fraction of a second.
-  - If the aircraft won't take the snap, the wait lasts until its gear has lowered by itself. It stays frozen meanwhile, so it doesn't drop onto its belly.
+  - **Expect** `playback: waiting for the gear before unfreezing`, then `playback: gear down; unfreezing` within a second or so.
+  - If the aircraft won't take the snap, the wait lasts until its gear has lowered by itself, 5 s at most. It stays frozen meanwhile, so it doesn't drop onto its belly. The main screen shows **Unfreezing in N s** (*Waiting for the gear to come down*), counting down, with the blue dot draining. At 5 s: `playback: the gear isn't back down yet (at …); unfreezing anyway`.
+  - Then **Recording** again, and the buffer counts up.
+- [ ] **Several replays in a row on the A350, parked** (a takeoff clip, Stop, another clip, Stop, and so on). Each Stop unfreezes within 5 s, and recording resumes in between (`recording resumed (was: restoring aircraft)`). Before, from the second Stop on, the aircraft stayed frozen for half a minute: the A350 reports its nose gear up for a while after a replay, and the next Stop waited for the gear to match that.
 - [ ] Play a clip, then play a **different** clip without stopping, then Stop. You're returned to the position from *before the first* clip.
 - [ ] While a clip plays, pause the sim. Playback holds, then continues when you unpause.
 - [ ] Note whether crash detection ever triggered during playback (e.g. near the ground).

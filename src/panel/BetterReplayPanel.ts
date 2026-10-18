@@ -68,6 +68,8 @@ interface SetupStatus {
 interface Status {
     rec: boolean;
     why: string;
+    restoreIn?: number;   // after Stop: seconds until the aircraft is unfrozen at the latest
+    restoreMax?: number;  // what that starts from
     armed: boolean;
     armIn: number;
     phase: string;
@@ -755,10 +757,16 @@ class BetterReplayPanel extends UIElement {
         let dot = "";
         let state = "";
         let detail = "";
+        const restoreIn = s.restoreIn || 0;
         if (s.play.active) {
             dot = "playback";
             state = "Replaying";
             detail = "Recording resumes when you stop";
+        } else if (restoreIn > 0) {
+            // After Stop, frozen until the gear is back down: counts down to when it's let go anyway.
+            dot = "restoring";
+            state = "Unfreezing in " + Math.ceil(restoreIn) + " s";
+            detail = "Waiting for the gear to come down";
         } else if (s.rec) {
             dot = s.armed ? "recording" : "arming";
             state = "Recording";
@@ -768,6 +776,9 @@ class BetterReplayPanel extends UIElement {
             detail = capitalize(s.why);
         }
         byId("br-dot").className = "br-dot " + dot;
+        const restoreMax = s.restoreMax || 0;
+        const left = dot === "restoring" && restoreMax > 0 ? Math.min(1, restoreIn / restoreMax) : 1;
+        byId("br-dot-drain").style.transform = "scale(" + left.toFixed(3) + ")";
         byId("br-main").className = "br-main " + (dot || "paused");  // colours the buffer meter
         byId("br-state").textContent = state;
         byId("br-detail").textContent = detail;

@@ -249,6 +249,11 @@ struct FakeSim : ISimOutput {
         restored = snapshot;
     }
     bool restoring() const override { return busyRestoring; }
+    int finishes = 0;
+    void finishRestore() override {
+        ++finishes;
+        busyRestoring = false;
+    }
     // prepareJump: not ready for this many more calls.
     int prepareFrames = 0;
     int prepareCalls = 0;
@@ -319,7 +324,7 @@ struct PlaybackHarness {
     void frames(int n, double lat) {
         for (int i = 0; i < n; ++i) {
             simTime += 1.0 / 60.0;
-            engine.onFrame(liveFrame(simTime, lat), 1792247525000);
+            engine.onFrame(liveFrame(simTime, lat), 1792247525000 + static_cast<int64_t>(simTime * 1000.0));
         }
     }
 };
@@ -617,6 +622,46 @@ TEST(EnginePlayback_RecordingWaitsWhileSimIsRestoring) {
     h.frames(30, -33.0);
     CHECK(h.engine.recording());
     CHECK(h.engine.bufferedFrames() > before);
+}
+
+TEST(EnginePlayback_RestoreWaitEndsAfterFiveSeconds) {
+    PlaybackHarness h;
+    std::string err;
+    REQUIRE(h.engine.play(h.clipFile, err));
+    h.frames(30, -33.0);
+    CHECK_NEAR(h.engine.restoreSecondsLeft(), 0.0, 0);  // not while playing
+    h.sim.busyRestoring = true;  // the gear never comes down
+    REQUIRE(h.engine.stopPlayback(err));
+    h.frames(60, -33.0);  // 1 s
+    CHECK_NEAR(h.engine.restoreSecondsLeft(), 4.0, 0.05);
+    std::string json;
+    h.engine.statusJson(json);
+    CHECK(json.find("\"restoreIn\":4") != std::string::npos);
+    CHECK(json.find("\"restoreMax\":5") != std::string::npos);
+    h.frames(60 * 3, -33.0);  // 4 s
+    CHECK_EQ(h.sim.finishes, 0);
+    CHECK_EQ(std::string(h.engine.suspendReason()), std::string("restoring aircraft"));
+    h.frames(60 + 2, -33.0);  // just past 5 s: let go
+    CHECK_EQ(h.sim.finishes, 1);
+    CHECK_NEAR(h.engine.restoreSecondsLeft(), 0.0, 0);
+    h.frames(60, -33.0);
+    CHECK_EQ(h.sim.finishes, 1);
+    CHECK(h.engine.recording());
+}
+
+TEST(EnginePlayback_PlayingAgainEndsTheRestoreCountdown) {
+    PlaybackHarness h;
+    std::string err;
+    REQUIRE(h.engine.play(h.clipFile, err));
+    h.frames(30, -33.0);
+    h.sim.busyRestoring = true;
+    REQUIRE(h.engine.stopPlayback(err));
+    h.frames(60, -33.0);
+    REQUIRE(h.engine.play(h.clipFile, err));
+    h.sim.busyRestoring = false;  // SimBridge::beginPlayback drops the wait
+    h.frames(60 * 6, -33.0);
+    CHECK_NEAR(h.engine.restoreSecondsLeft(), 0.0, 0);
+    CHECK_EQ(h.sim.finishes, 0);
 }
 
 TEST(EnginePlayback_DeletingThePlayingClipStopsIt) {

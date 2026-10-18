@@ -329,6 +329,12 @@ const char* Engine::computeSuspendReason(bool slewActive) const {
     return nullptr;
 }
 
+double Engine::restoreSecondsLeft() const {
+    if (playbackActive_ || !out_ || !out_->restoring()) return 0.0;
+    const double left = cfg_.restoreMaxSec - static_cast<double>(lastUtcMs_ - restoreStartMs_) / 1000.0;
+    return left > 0.0 ? left : 0.0;
+}
+
 double Engine::bufferedSeconds() const { return ring_.size() < 2 ? 0.0 : ring_.back().t - ring_.front().t; }
 
 void Engine::onFrame(const FrameInput& in, int64_t utcNowMs) {
@@ -345,6 +351,7 @@ void Engine::onFrame(const FrameInput& in, int64_t utcNowMs) {
     if (dt > cfg_.maxFrameDtSec) dt = cfg_.maxFrameDtSec;
     facts_ = in.facts;
     lastUtcMs_ = utcNowMs;
+    if (!playbackActive_ && restoreSecondsLeft() <= 0.0 && out_ && out_->restoring()) out_->finishRestore();
 
     if (!playbackActive_ && !restoringAircraft()) {
         lastRaw_ = in.raw;
@@ -675,6 +682,7 @@ void Engine::endPlayback(bool restore, const char* why) {
     playback_.unload();
     playbackActive_ = false;
     settleFrames_ = kSettleFrames;
+    restoreStartMs_ = lastUtcMs_;
     logf(0, "playback ended (%s)%s", why, restore ? "; aircraft restored" : "");
 }
 
@@ -789,6 +797,8 @@ void Engine::statusJson(std::string& out) const {
     w.kv("v", 1);
     w.kv("rec", recording());
     w.kv("why", suspendReason_ ? suspendReason_ : "");
+    w.kv("restoreIn", restoreSecondsLeft());  // after Stop: the aircraft is unfrozen by then at the latest
+    w.kv("restoreMax", cfg_.restoreMaxSec);
     w.kv("armed", detector_.armed());
     w.kv("armIn", detector_.armRemaining(recTime_));
     w.kv("phase", detector_.phase());
