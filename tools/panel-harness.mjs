@@ -45,9 +45,9 @@ const commBusMock = `
     play: { active: false, file: '', t: 0, dur: 0, speed: 1, playing: false, eventT: 0 } };
   const listeners = {};
   // prepareSec: Play first holds that long, "lowering the gear"; restoreSec: Stop keeps the aircraft
-  // frozen that long, "waiting for the gear" (5 s at most, like EngineConfig::restoreMaxSec);
+  // frozen that long, "waiting for the gear" (10 s at most, like EngineConfig::restoreMaxSec);
   // fail: { op: 'error' } fails the next command of that op with that error.
-  window.harness = { state: state, clips: clips, log: [], setup: window.harnessSetup, prepareSec: 0, restoreSec: 5,
+  window.harness = { state: state, clips: clips, log: [], setup: window.harnessSetup, prepareSec: 0, restoreSec: 10,
     fail: {} };
 
   setInterval(() => {
@@ -74,7 +74,7 @@ const commBusMock = `
     const restoring = !state.play.active && state.restoreLeft > 0;
     return { v: 1, rec: state.rec && !state.play.active && !restoring,
       why: state.play.active ? 'playback' : restoring ? 'restoring aircraft' : state.why,
-      restoreIn: restoring ? state.restoreLeft : 0, restoreMax: 5,
+      restoreIn: restoring ? state.restoreLeft : 0, restoreMax: 10,
       armed: state.armed, armIn: state.armIn, phase: state.phase, bufferSec: state.buffer, bufferMax: 600,
       aircraft: state.aircraft, clipsRev: state.rev, clipCount: clips.length, lastSaved: '', error: '',
       play: Object.assign({}, state.play), setup: window.harnessSetup.status() };
@@ -116,7 +116,7 @@ const commBusMock = `
       case 'seek': state.play.t = Math.max(0, Math.min(state.play.dur, cmd.t)); return reply(cmd.id, cmd.op, true);
       case 'speed': state.play.speed = Math.max(0.25, Math.min(4, cmd.x)); return reply(cmd.id, cmd.op, true);
       case 'stop': state.play.active = false; state.play.playing = false; state.play.preparing = false;
-        state.restoreLeft = Math.min(5, window.harness.restoreSec); return reply(cmd.id, cmd.op, true);
+        state.restoreLeft = Math.min(10, window.harness.restoreSec); return reply(cmd.id, cmd.op, true);
       default: return reply(cmd.id, cmd.op, false, 'unknown command: ' + cmd.op);
     }
   }

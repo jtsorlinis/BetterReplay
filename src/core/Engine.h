@@ -67,7 +67,7 @@ struct EngineConfig {
     double bufferSeconds = 600.0;  // about 12 MB of frames
     size_t maxAutoClips = 20;  // newest takeoff/landing clips kept; manual saves are never auto-deleted
     double maxFrameDtSec = 0.5;  // longer gaps (hitches, loading) are clamped
-    double restoreMaxSec = 5.0;  // after Stop, the longest the aircraft stays frozen settling (the panel counts it down)
+    double restoreMaxSec = 10.0;  // after Stop, the longest the aircraft stays frozen settling (the panel counts it down)
 };
 
 // Everything the module reads from the sim once per frame.
@@ -232,6 +232,9 @@ private:
     static constexpr int kSettleFrames = 30;
     int settleFrames_ = 0;
     int64_t restoreStartMs_ = 0;  // when playback last ended (wall clock), for restoreMaxSec
+    // How long the sim's time has stood still (wall clock); past kSimStillMs a replay holds too.
+    static constexpr int64_t kSimStillMs = 250;
+    int64_t simStillMs_ = 0;
 
     // recording clock
     double recTime_ = 0.0;

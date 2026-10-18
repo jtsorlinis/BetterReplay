@@ -38,6 +38,7 @@ struct App {
             br::log::openFile(files.dir() + "betterreplay.log", files.dir() + "betterreplay.prev.log");
             br::log::info("BetterReplay %s, debug logging %s", kVersion, br::log::g_debug ? "on" : "off");
         }
+        sim.setWorkDir(files.dir());
         engine.init();
         sim.open();
         comm.open();

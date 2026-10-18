@@ -225,6 +225,49 @@ private:
     int corrections_ = 0;
 };
 
+// Autothrust on an aircraft whose levers stay put under it (an Airbus): the lever sits in its
+// detent while the thrust demand (its lever simvar, see LeverCalibration) goes where the
+// autothrust puts it. Replayed from the lever, the engines give the detent's own thrust (climb
+// thrust all the way down an approach), so there playback follows the clip's thrust demand
+// instead (ThrustFollower), the levers no further forward than the clip's.
+struct AutothrustStretch {
+    double startT;  // clip time
+    double endT;
+};
+// The stretches of a clip where engine `engine` (0-based) had autothrust in control: its lever
+// held still (within kAutothrustHoldAxis on the axis), above idle, for longer than
+// kAutothrustSettleSec, while its thrust demand still moved more than kAutothrustRangePct after
+// that: more than the demand catching up with a lever move, or creeping with speed in a takeoff
+// detent, does. The whole hold counts, and the lever being pulled back from it towards idle
+// after (kAutothrustRetardSec at most), as the autothrust then follows the lever down.
+std::vector<AutothrustStretch> autothrustStretches(const LeverCalibration& cal, const std::vector<Frame>& frames,
+                                                   int engine);
+constexpr double kAutothrustHoldAxis = 0.01;
+constexpr double kAutothrustSettleSec = 10.0;
+constexpr double kAutothrustRangePct = 8.0;
+constexpr double kAutothrustRetardSec = 3.0;
+constexpr double kAutothrustGapSec = 1.0;  // a gap in the clip's lever this long ends a hold
+
+// Follows a clip's thrust demand with the throttle axis, by the demand the aircraft shows (its
+// lever simvar) against the clip's at the same moment: a first guess from the demand itself (the
+// simvar as a fraction of the axis above idle), corrected in proportion to the difference and by
+// the difference accumulated, which learns how far off the guess is on this aircraft. The demand
+// ramps up and settles after a lever move (on the A350 over 2 to 5 s, slower from ground idle),
+// and the correction holds back while the axis is at a limit, so it doesn't overshoot.
+class ThrustFollower {
+public:
+    void reset() { integral_ = 0.0; }
+    // One frame: the axis fraction for the clip's demand `clip` (percent), given the aircraft's
+    // `live`, within [lo, hi] (idle, and the clip's lever there). dt: seconds since the last.
+    double step(double clip, double live, double lo, double hi, double dt);
+
+    static constexpr double kGain = 0.01;       // axis per percent of demand off
+    static constexpr double kIntegral = 0.005;  // axis per percent-second
+
+private:
+    double integral_ = 0.0;
+};
+
 // The channel a method takes its values from (engine is 0-based, throttle only), or -1.
 int methodSourceChannel(Control c, MethodKind k, int engine);
 // Every channel playback drives for this control when the profile drives it (any method):

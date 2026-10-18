@@ -8,6 +8,7 @@
 #include <SimConnect.h>
 
 #include <cmath>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,7 @@ public:
     void update(float dTime);  // from a module update callback
 
     bool connected() const { return h_ != 0; }
+    void setWorkDir(const std::string& dir) { workDir_ = dir; }  // for the playback trace
 
     // ISimOutput
     void beginPlayback(const Clip& clip, const Frame& peak) override;
@@ -99,6 +101,11 @@ private:
         kExGearRetractable,
         kExSpoilerAvailable,
         kExFlapPositions,
+        // for the playback trace
+        kExAirspeedTrue,
+        kExAirspeedIndicated,
+        kExJetThrust1,
+        kExJetThrust2,
         kExtraCount
     };
 
@@ -141,6 +148,25 @@ private:
     void onSystemState(const SIMCONNECT_RECV_SYSTEM_STATE* s);
     void logLVars();       // lists the aircraft's L:vars for gear/throttle/flaps/spoilers (research)
     void tracePlayback();  // debug: once a second, what playback sent vs what the aircraft reports
+    // Diagnostics, off unless switched on here: a CSV row per replay frame in the work folder
+    // (trace_<clip>.csv, about 1 MB a minute), what was written against what the aircraft shows,
+    // with airspeed, engine thrust, N1/N2 and the throttle sent. It found the uneven replay clock
+    // behind the A350's engine sound fluttering in the cabin. The aircraft's values are read
+    // before this frame's writes, so a velocity's "_w" is what the previous frame wrote and
+    // "_live" what the aircraft made of it.
+    static constexpr bool kPlaybackTrace = false;
+    void traceOpen();
+    void traceRow(const Frame& frame, bool jumped);
+    void traceClose();
+    std::string workDir_;
+    FILE* trace_ = nullptr;
+    std::string traceName_;
+    int traceRows_ = 0;
+    int64_t traceStartMs_ = 0;
+    int traceSends_ = 0;
+    double liveTas_ = NAN;
+    double liveIas_ = NAN;
+    double liveThrust_[2] = {NAN, NAN};
     void resolveInputEvents();
     void pollInputEvents();
     void sendInputEvents(const Frame& frame, bool force);

@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #include "Log.h"
@@ -141,6 +142,10 @@ bool SimBridge::open() {
         {"IS GEAR RETRACTABLE", "bool"},
         {"SPOILER AVAILABLE", "bool"},
         {"FLAPS NUM HANDLE POSITIONS", "number"},
+        {"AIRSPEED TRUE", "knots"},
+        {"AIRSPEED INDICATED", "knots"},
+        {"TURB ENG JET THRUST:1", "pounds"},
+        {"TURB ENG JET THRUST:2", "pounds"},
     };
     for (const auto& e : kExtras) {
         track(SimConnect_AddToDataDefinition(h_, DEF_RECORD, e.simvar, e.units, SIMCONNECT_DATATYPE_FLOAT64), e.simvar);
@@ -536,6 +541,10 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     const double engines = ex[kExNumEngines];
     if (std::isfinite(engines) && engines >= 0.0 && engines <= 16.0) numEngines_ = static_cast<int>(engines);
     throttleLowerLimit_ = ex[kExThrottleLowerLimit];
+    liveTas_ = ex[kExAirspeedTrue];
+    liveIas_ = ex[kExAirspeedIndicated];
+    liveThrust_[0] = ex[kExJetThrust1];
+    liveThrust_[1] = ex[kExJetThrust2];
     const double flaps = ex[kExFlapPositions];
     flapPositions_ = std::isfinite(flaps) && flaps >= 0.0 && flaps < 64.0 ? static_cast<int>(flaps) : 0;
     SetupFacts& facts = input_.facts;
@@ -930,6 +939,7 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
             // The lever simvar isn't the lever on this aircraft: replay the lever's own variable.
             if (clipHasLever(cp.lever, clip, numEngines_, &why)) {
                 driver_.setLever(cp.lever);
+                driver_.findAutothrust(clip.frames);
             } else {
                 log::info("playback: the throttle levers follow %s: %s (recorded before the lever setup?)",
                           kChannels[kThrottle1].simvar, why.c_str());
@@ -1016,6 +1026,7 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     log::info("playback: writing %d channels per frame and %d input event(s) (%d engine(s)); freezing "
               "position/altitude/attitude; %s",
               playChannelCount_, inputs, numEngines_, throttle);
+    traceOpen();
     for (int c = 0; c < kChannelCount; ++c) {
         if (!ieActive_[c]) continue;
         if (ieSetId_[c] != FS_VAR_INVALID_ID) {
@@ -1222,6 +1233,7 @@ void SimBridge::logEngines() {
 
 void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
     if (!h_ || !playing_) return;
+    if (trace_) traceRow(frame, jumped);
     if (jumped && !snapRejected_) snapFramesLeft_ = kSnapFrames;
     if (snapFramesLeft_ > 0) writeSnap(frame);
     if (jumped) holdFlaps();
@@ -1541,6 +1553,53 @@ void SimBridge::tracePlayback() {
     log::debug("%s", line);
 }
 
+namespace {
+const int kTraceWritten[] = {kVelBodyX, kVelBodyY, kVelBodyZ, kRotVelBodyX, kRotVelBodyY, kRotVelBodyZ, kAlt, kPitch};
+}  // namespace
+
+void SimBridge::traceOpen() {
+    traceClose();
+    if (!kPlaybackTrace || workDir_.empty()) return;
+    std::string clip = engine_.playback().file();
+    if (clip.size() > 4 && clip.compare(clip.size() - 4, 4, ".rpl") == 0) clip.resize(clip.size() - 4);
+    traceName_ = "trace_" + (clip.empty() ? std::string("playback") : clip) + ".csv";
+    trace_ = std::fopen((workDir_ + traceName_).c_str(), "wb");
+    if (!trace_) {
+        log::warn("playback: couldn't open %s for the trace", traceName_.c_str());
+        return;
+    }
+    std::fputs("ms,clip_t,playing,jumped", trace_);
+    for (int c : kTraceWritten) std::fprintf(trace_, ",%s_w,%s_live", kChannels[c].key, kChannels[c].key);
+    std::fputs(",tas_live,ias_live,ongnd_live,n1_1_clip,n1_1_live,n2_1_clip,n2_1_live,n1_2_live,n2_2_live,"
+               "thrust_1_live,thrust_2_live,thr_1_clip,thr_1_live,thr_2_live,axis_1_sent,axis_2_sent,sent_now\n",
+               trace_);
+    traceRows_ = 0;
+    traceStartMs_ = utcNowMs();
+    traceSends_ = driver_.sends(Control::Throttle);
+}
+
+void SimBridge::traceRow(const Frame& frame, bool jumped) {
+    const double* live = input_.raw.v;
+    const int sends = driver_.sends(Control::Throttle);
+    std::fprintf(trace_, "%lld,%.3f,%d,%d", static_cast<long long>(utcNowMs() - traceStartMs_), frame.t,
+                 engine_.playback().playing() ? 1 : 0, jumped ? 1 : 0);
+    for (int c : kTraceWritten) std::fprintf(trace_, ",%.4f,%.4f", written_[c], live[c]);
+    std::fprintf(trace_, ",%.2f,%.2f,%.0f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.1f,%.3f,%.3f,%.3f,%.0f,%.0f,%d\n",
+                 liveTas_, liveIas_, live[kOnGround], frame.v[kEngineN1_1], live[kEngineN1_1], frame.v[kEngineN2_1],
+                 live[kEngineN2_1], live[kEngineN1_2], live[kEngineN2_2], liveThrust_[0], liveThrust_[1],
+                 frame.v[kThrottle1], live[kThrottle1], live[kThrottle2], driver_.lastSent(Control::Throttle, 0),
+                 driver_.lastSent(Control::Throttle, 1), sends - traceSends_);
+    traceSends_ = sends;
+    ++traceRows_;
+}
+
+void SimBridge::traceClose() {
+    if (!trace_) return;
+    std::fclose(trace_);
+    trace_ = nullptr;
+    log::info("playback: per-frame trace written to %s (%d frames)", traceName_.c_str(), traceRows_);
+}
+
 void SimBridge::sendInputEvents(const Frame& frame, bool force) {
     for (int c = 0; c < kChannelCount; ++c) {
         if (!ieActive_[c] || (flapsHold_ && c == kInputFlaps)) continue;
@@ -1606,10 +1665,12 @@ void SimBridge::onAircraftChanged() {
 
 void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     if (!h_) return;
+    traceClose();
     logOverrides();
     logEngines();
     playing_ = false;
     playChannelCount_ = 0;
+    driver_.clearAutothrust();  // the snapshot below isn't the clip
     snapFramesLeft_ = 0;
     snapCheckFrames_ = 0;
     flapsHold_ = false;

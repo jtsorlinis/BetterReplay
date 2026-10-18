@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "Log.h"
+#include "Platform.h"
 
 namespace br {
 
@@ -48,13 +49,19 @@ bool ControlDriver::dueOnChange(Slot& s, int i, double v, bool force, double min
     return true;
 }
 
-bool ControlDriver::dueWhenLasting(Slot& s, int i, double v, bool force, double minStep, double nowStep, int frames) {
-    if (force || !std::isfinite(s.sent[i]) || std::fabs(v - s.sent[i]) >= nowStep) return dueOnChange(s, i, v, true, 0.0);
+bool ControlDriver::dueWhenLasting(Slot& s, int i, double v, bool force, double minStep, double nowStep,
+                                   int64_t lastingMs, int64_t nowMs) {
+    if (force || !std::isfinite(s.sent[i]) || std::fabs(v - s.sent[i]) >= nowStep) {
+        s.lastingFromMs[i] = 0;
+        return dueOnChange(s, i, v, true, 0.0);
+    }
     if (std::fabs(v - s.sent[i]) < minStep) {
-        s.since[i] = 0;
+        s.lastingFromMs[i] = 0;
         return false;
     }
-    if (++s.since[i] < frames) return false;
+    if (s.lastingFromMs[i] == 0) s.lastingFromMs[i] = nowMs;
+    if (nowMs - s.lastingFromMs[i] < lastingMs) return false;
+    s.lastingFromMs[i] = 0;
     return dueOnChange(s, i, v, true, 0.0);
 }
 
@@ -158,6 +165,43 @@ void ControlDriver::setLever(const LeverCalibration& cal) {
     s.useLever = true;
     log::info("controls: throttle levers from L:var %s (%zu calibration point(s)%s)", cal.var.c_str(), cal.forward.size(),
               cal.reverse.empty() ? "" : ", reverse too");
+}
+
+void ControlDriver::findAutothrust(const std::vector<Frame>& clipFrames) {
+    Slot& s = slots_[static_cast<int>(Control::Throttle)];
+    clearAutothrust();
+    if (!s.active || !s.useLever) return;
+    size_t stretches = 0;
+    double seconds = 0.0;
+    for (int e = 0; e < s.count; ++e) {
+        s.autothrust[e] = autothrustStretches(s.lever, clipFrames, e);
+        if (e > 0) continue;
+        for (const AutothrustStretch& a : s.autothrust[e]) {
+            ++stretches;
+            seconds += a.endT - a.startT;
+        }
+    }
+    if (stretches > 0) {
+        log::info("controls: autothrust in %zu stretch(es) of the clip (%.0f s): the throttle follows its thrust demand "
+                  "there, the levers no further forward than the clip's",
+                  stretches, seconds);
+    }
+}
+
+void ControlDriver::clearAutothrust() {
+    Slot& s = slots_[static_cast<int>(Control::Throttle)];
+    for (int e = 0; e < 4; ++e) {
+        s.autothrust[e].clear();
+        s.follower[e].reset();
+    }
+    s.followMs = 0;
+}
+
+bool ControlDriver::inAutothrust(const Slot& s, int e, double t) {
+    for (const AutothrustStretch& a : s.autothrust[e]) {
+        if (t >= a.startT && t <= a.endT) return true;
+    }
+    return false;
 }
 
 void ControlDriver::setReverseBy(ReverseBy by) {
@@ -297,9 +341,13 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
             }
             const double limit = ctx_.throttleLowerLimit ? *ctx_.throttleLowerLimit : NAN;
             const double lower = std::isfinite(limit) && limit < -1.0 ? limit : 0.0;
+            const int64_t nowMs = utcNowMs();
+            const double followDt = s.followMs > 0 ? clamp((nowMs - s.followMs) / 1000.0, 0.0, 0.1) : 0.0;
+            s.followMs = nowMs;
             for (int e = 0; e < s.count; ++e) {
                 double fraction = NAN;
                 bool lever = true;  // the source is the lever itself
+                bool following = false;  // the clip's thrust demand (autothrust)
                 const double pct = f.v[kThrottle1 + e];
                 const double flag = f.v[kReverser1 + e];
                 if (by == ReverseBy::Toggle && toggled.drive != ReverseToggle::Drive::Forward) {
@@ -379,6 +427,16 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                         }
                     }
                 }
+                if (std::isfinite(fraction) && !clipReverse && !liveReverse && inAutothrust(s, e, f.t)) {
+                    // Autothrust in the clip: its thrust demand, the levers no further forward than
+                    // the clip's (as the autothrust can't go beyond them either).
+                    const double demand = ctx_.live ? ctx_.live->v[kThrottle1 + e] : NAN;
+                    if (std::isfinite(pct) && std::isfinite(demand)) {
+                        fraction = s.follower[e].step(pct, demand, s.lever.forward.front().axis, fraction, followDt);
+                        following = true;
+                        ++s.followFrames;
+                    }
+                }
                 if (!std::isfinite(fraction)) {
                     // Older clips (and reverse the calibration can't place): from the lever
                     // simvar. Idle..full out of reverse; with the
@@ -413,9 +471,16 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                 // The simvar isn't always the lever: on the A320neo V2 under autothrust it's the
                 // thrust demand, which creeps with speed. Every event makes the aircraft re-evaluate
                 // its lever (and the engine sound follows), so from the simvar a change of 2% goes
-                // at once and a smaller one only once it has lasted.
-                const bool send = lever ? dueOnChange(s, e, axis, force, 48.0)
-                                        : dueWhenLasting(s, e, axis, force, 48.0, 655.0, kLastingFrames);
+                // at once and a smaller one only once it has lasted. The thrust demand follower
+                // corrects a little every frame: from it 3% at once, 0.5% once it has lasted (an
+                // event almost every frame, about 20 a second, likely distorted the A350's sound).
+                bool send = false;
+                if (following) {
+                    send = dueWhenLasting(s, e, axis, force, 164.0, 983.0, kLastingMs, nowMs);
+                } else {
+                    send = lever ? dueOnChange(s, e, axis, force, 48.0)
+                                 : dueWhenLasting(s, e, axis, force, 48.0, 655.0, kLastingMs, nowMs);
+                }
                 if (send) keyEvent(kThrottleAxisKeys[e], static_cast<int32_t>(axis));
             }
             if (toggled.toggle) {
@@ -504,6 +569,9 @@ void ControlDriver::end(Control c) {
                                                   : "controls: %d value(s) sent to the %s with %s",
               s.sends, controlSpec(c).label, describeMethod(c, s.method).c_str());
     if (s.useLever) log::info("controls: %d engine frame(s) placed from L:var %s", s.leverFrames, s.lever.var.c_str());
+    if (s.followFrames > 0) {
+        log::info("controls: %d engine frame(s) followed the clip's thrust demand (autothrust)", s.followFrames);
+    }
     if (s.gapFrames > 0) {
         log::info("controls: %d engine frame(s) from the throttle simvar, where the clip has no %s value", s.gapFrames,
                   s.lever.var.c_str());

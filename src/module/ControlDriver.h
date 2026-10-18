@@ -42,6 +42,11 @@ public:
     // variable (lv_thr_N) is turned back into the axis value through the setup's calibration.
     // After begin(); the clip must have recorded that variable (clipHasLever).
     void setLever(const LeverCalibration& cal);
+    // After setLever, for the clip about to play: where its autothrust was in control
+    // (autothrustStretches), the throttle follows the clip's thrust demand there (ThrustFollower),
+    // no further forward than its lever. clearAutothrust() when it stops playing.
+    void findAutothrust(const std::vector<Frame>& clipFrames);
+    void clearAutothrust();
     // How this aircraft's reverse thrust is commanded (the setup's sweep found it), for the
     // key-event throttle: "hold" holds THROTTLE_DECR while the clip's reversers are out; "events"
     // also puts the reverser in when the clip reversed without the reverse flag; "toggle" toggles
@@ -67,6 +72,9 @@ public:
     void end(Control c);
     void endAll();
     bool active(Control c) const { return slots_[static_cast<int>(c)].active; }
+    // What was last sent for output i of control c (a key event's value), and how many sends so far.
+    double lastSent(Control c, int i) const { return slots_[static_cast<int>(c)].sent[i]; }
+    int sends(Control c) const { return slots_[static_cast<int>(c)].sends; }
     // The throttle is driven through its simvars, so the hardware throttle has to be blocked.
     bool wantsThrottleMask() const;
 
@@ -90,6 +98,7 @@ private:
         int simvarCount = 0;
         double sent[4] = {NAN, NAN, NAN, NAN};
         int since[4] = {};
+        int64_t lastingFromMs[4] = {};  // dueWhenLasting: since when the value has been off what was sent
         int errors = 0;
         int sends = 0;  // values sent, logged at the end (key events should be rare)
         LeverCalibration lever;  // throttle key events: replayed from the lever variable
@@ -104,7 +113,13 @@ private:
         int engageWait[4] = {};   // frames until it's put in again if the aircraft hasn't taken it
         ReverseToggle toggle;     // "toggle": the aircraft's reverse
         int toggleFrames = 0;     // per engine, a reverse amount sent
+        std::vector<AutothrustStretch> autothrust[4];  // the playing clip's, per engine
+        ThrustFollower follower[4];
+        int64_t followMs = 0;   // when the throttle was last applied, for the follower's time step
+        int followFrames = 0;   // per engine, following the clip's thrust demand
     };
+    // Whether clip time t is in one of engine e's autothrust stretches.
+    static bool inAutothrust(const Slot& s, int e, double t);
     // Whether value v for output i is due (changed, forced or time to resend); records it.
     static bool due(Slot& s, int i, double v, bool force);
     // For key events, which act like moving the hardware: due only when forced or when v moved at
@@ -112,9 +127,10 @@ private:
     // every event makes the aircraft re-evaluate its lever.
     static bool dueOnChange(Slot& s, int i, double v, bool force, double minStep);
     // Like dueOnChange, for a value that isn't quite the lever: a change of nowStep or more is due
-    // at once, one of minStep or more once it has lasted `frames` frames.
-    static bool dueWhenLasting(Slot& s, int i, double v, bool force, double minStep, double nowStep, int frames);
-    static constexpr int kLastingFrames = 30;
+    // at once, one of minStep or more once it has lasted lastingMs.
+    static bool dueWhenLasting(Slot& s, int i, double v, bool force, double minStep, double nowStep, int64_t lastingMs,
+                               int64_t nowMs);
+    static constexpr int64_t kLastingMs = 500;
     void applyKeyEvent(Control c, Slot& s, const Frame& f, bool force);
     static constexpr int kNotchFrames = 8;       // FLAPS_INCR/DECR: at least this far apart
     static constexpr int kNotchWaitFrames = 60;  // and waiting this long for the handle to show it

@@ -1273,6 +1273,138 @@ TEST(Playback_ToggleReverseSeekAndGiveUp) {
     }
 }
 
+namespace {
+
+// An A350-like lever: CL and FLX detents, the lever variable 0..100.
+LeverCalibration airbusLever() {
+    LeverCalibration cal;
+    cal.var = "LEVER_#";
+    cal.forward = leverTable({{0.0, 0.0}, {0.6, 58.4}, {0.65, 58.4}, {0.8, 78.0}, {0.85, 78.0}, {1.0, 100.0}});
+    return cal;
+}
+
+double piecewise(const std::vector<std::pair<double, double>>& pts, double t) {
+    if (t <= pts.front().first) return pts.front().second;
+    for (size_t i = 1; i < pts.size(); ++i) {
+        if (t <= pts[i].first) {
+            const double f = (t - pts[i - 1].first) / (pts[i].first - pts[i - 1].first);
+            return pts[i - 1].second + f * (pts[i].second - pts[i - 1].second);
+        }
+    }
+    return pts.back().second;
+}
+
+// A flight's lever and thrust demand at 30 Hz: a FLX takeoff (the demand creeping 3% with
+// speed), the thrust reduction to CL, climb thrust, then the autothrust taking the demand down
+// and up while the lever stays in CL, the retard to idle, and a manual hold part way up.
+std::vector<Frame> autothrustFlight(double gapStart, double gapLen) {
+    const std::vector<std::pair<double, double>> lever = {
+        {0, 0}, {5, 78}, {55, 78}, {56, 58.4}, {200, 58.4}, {201, 0}, {210, 0}, {213, 30}, {240, 30}};
+    const std::vector<std::pair<double, double>> demand = {
+        {0, 1.6}, {5, 84}, {55, 87}, {56, 77}, {116, 77}, {163, 30}, {180, 45}, {200, 12}, {201, 1.6}, {210, 1.6},
+        {215, 40}, {240, 40}};
+    std::vector<Frame> frames;
+    for (int i = 0; i <= 240 * 30; ++i) {
+        Frame f;
+        for (double& v : f.v) v = NAN;
+        f.t = i / 30.0;
+        const bool gap = f.t >= gapStart && f.t < gapStart + gapLen;
+        f.v[kLVarThrottle1] = gap ? NAN : piecewise(lever, f.t);
+        f.v[kThrottle1] = piecewise(demand, f.t);
+        frames.push_back(f);
+    }
+    return frames;
+}
+
+// The A350's thrust demand as the aircraft shows it: heading for where the axis puts it with a
+// lag, rate limited (slowly from ground idle), and seen a few frames late.
+struct DemandAircraft {
+    double scale = 1.0;
+    double offset = 0.0;
+    double tau = 0.8;
+    size_t delay = 2;
+    double d = 1.6;
+    std::vector<double> history;
+    double steady(double axis) const {
+        static const std::vector<std::pair<double, double>> g = {{0, 1.6}, {0.258, 36}, {0.633, 77.5}, {0.8, 86.5}, {1, 95}};
+        return offset + scale * piecewise(g, axis);
+    }
+    void step(double axis, double dt) {
+        double rate = (steady(axis) - d) / tau;
+        const double up = d < 4.0 ? 1.65 : 11.0;
+        rate = rate > up ? up : (rate < -11.0 ? -11.0 : rate);
+        d += rate * dt;
+        history.push_back(d);
+    }
+    double live() const { return history.size() > delay ? history[history.size() - 1 - delay] : 1.6; }
+};
+
+}  // namespace
+
+// Autothrust shows as the lever held while the demand keeps moving: the CL stretch counts, with
+// the retard to idle after it; the FLX takeoff, whose demand only creeps, and a manual hold part
+// way up don't. A short gap in the lever doesn't split a hold, a long one does.
+TEST(Playback_AutothrustStretchesFromTheClip) {
+    const LeverCalibration cal = airbusLever();
+    std::vector<AutothrustStretch> a = autothrustStretches(cal, autothrustFlight(150.0, 0.5), 0);
+    REQUIRE(a.size() == 1);
+    CHECK_NEAR(a[0].startT, 56.0, 0.1);
+    CHECK(a[0].endT > 200.5 && a[0].endT < 201.0);  // the retard, not idle after it
+    CHECK(autothrustStretches(cal, autothrustFlight(150.0, 0.5), 1).empty());  // engine 2 wasn't recorded
+
+    a = autothrustStretches(cal, autothrustFlight(150.0, 2.0), 0);
+    REQUIRE(a.size() == 2);
+    CHECK(a[0].endT < 150.0);
+    CHECK(a[1].startT >= 152.0);
+
+    CHECK(autothrustStretches(LeverCalibration(), autothrustFlight(0.0, 0.0), 0).empty());
+}
+
+// Following an approach's thrust demand on aircraft whose demand responds faster or slower,
+// higher or lower than the first guess, and seen late: within a couple of percent, where the CL
+// detent's own thrust is 30 to 70% off. Never beyond the clip's lever, nor below idle.
+TEST(Playback_ThrustFollowerTracksAnApproach) {
+    const std::vector<std::pair<double, double>> clip = {{0, 7}, {10, 12}, {30, 12}, {35, 40}, {45, 40}, {52, 18},
+                                                         {60, 30}, {70, 25}, {80, 47}, {90, 30}, {100, 12}, {120, 20}};
+    struct Variant {
+        double scale, offset, tau;
+        size_t delay;
+    };
+    for (const Variant v : {Variant{1.0, 0.0, 0.8, 2}, Variant{0.75, 5.0, 1.5, 6}, Variant{1.3, 0.0, 0.3, 3}}) {
+        DemandAircraft ac;
+        ac.scale = v.scale;
+        ac.offset = v.offset;
+        ac.tau = v.tau;
+        ac.delay = v.delay;
+        ThrustFollower follower;
+        const double cl = 0.625;
+        double sent = 0.0, lowest = 1.0, highest = 0.0, off = 0.0;
+        int n = 0;
+        for (int i = 0; i < 120 * 60; ++i) {
+            const double t = i * kDt;
+            const double target = piecewise(clip, t);
+            const double axis = follower.step(target, ac.live(), 0.0, cl, kDt);
+            lowest = std::fmin(lowest, axis);
+            highest = std::fmax(highest, axis);
+            if (std::fabs(axis - sent) >= 48.0 / 32768.0) sent = axis;  // as the key events go
+            ac.step(sent, kDt);
+            if (t < 8.0) continue;
+            off += std::fabs(ac.d - target);
+            ++n;
+        }
+        CHECK(off / n < 2.5);
+        CHECK(lowest >= 0.0);
+        CHECK(highest <= cl);
+    }
+    // The lever pulled back to idle: idle, whatever the demand.
+    ThrustFollower follower;
+    CHECK_NEAR(follower.step(30.0, 10.0, 0.0, 0.0, kDt), 0.0, 0);
+    // An idle above the axis's bottom (a reverse zone below it): the guess starts there.
+    follower.reset();
+    CHECK_NEAR(follower.step(0.0, 0.0, 0.3, 1.0, 0.0), 0.3, 1e-12);
+    CHECK_NEAR(follower.step(100.0, 100.0, 0.3, 1.0, 0.0), 1.0, 1e-12);
+}
+
 TEST(Setup_ThrottleReplayStopsWhenTheAircraftRolls) {
     SetupHarness h;
     h.facts.hasSpoilers = false;

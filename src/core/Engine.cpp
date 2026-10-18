@@ -349,6 +349,18 @@ void Engine::onFrame(const FrameInput& in, int64_t utcNowMs) {
     }
     if (!(dt > 0.0)) dt = 0.0;
     if (dt > cfg_.maxFrameDtSec) dt = cfg_.maxFrameDtSec;
+    // A replay moves by the real time between frames, as they're shown. The sim's time steps
+    // unevenly from frame to frame: on the A350 at 36 fps by 18, 27 or 37 ms, and in one or two
+    // frames a second not at all, though every frame took 27 to 28 ms. Stepped by that, a replay
+    // at 140 kt moved the aircraft about a metre unevenly every frame, and the engine sounds
+    // around it (heard in the cabin) fluttered. It holds while the sim is paused, or its time has
+    // stood still for longer than a frame or two.
+    const int64_t wallMs = lastUtcMs_ > 0 && utcNowMs > lastUtcMs_ ? utcNowMs - lastUtcMs_ : 0;
+    simStillMs_ = dt > 0.0 ? 0 : simStillMs_ + wallMs;
+    double playDt = dt;
+    const double wallDt = static_cast<double>(wallMs) / 1000.0;
+    if (lastUtcMs_ > 0 && wallDt <= cfg_.maxFrameDtSec) playDt = wallDt;
+    if (pauseFlags_ != 0 || simStillMs_ > kSimStillMs) playDt = 0.0;
     facts_ = in.facts;
     lastUtcMs_ = utcNowMs;
     if (!playbackActive_ && restoreSecondsLeft() <= 0.0 && out_ && out_->restoring()) out_->finishRestore();
@@ -374,7 +386,7 @@ void Engine::onFrame(const FrameInput& in, int64_t utcNowMs) {
         const ResumeKind kind = std::strcmp(reason, kReasonPaused) == 0 ? ResumeKind::Pause : ResumeKind::Relocate;
         if (kind == ResumeKind::Relocate || pendingResume_ == ResumeKind::None) pendingResume_ = kind;
         suspendReason_ = reason;
-        if (playbackActive_) playbackFrame(dt);
+        if (playbackActive_) playbackFrame(playDt);
         return;
     }
     if (suspendReason_ != nullptr) {

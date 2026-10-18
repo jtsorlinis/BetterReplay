@@ -304,6 +304,78 @@ bool parseReverseByKey(const std::string& key, ReverseBy& out) {
     return false;
 }
 
+std::vector<AutothrustStretch> autothrustStretches(const LeverCalibration& cal, const std::vector<Frame>& frames,
+                                                   int engine) {
+    std::vector<AutothrustStretch> out;
+    if (!cal.valid() || engine < 0 || engine > 3) return out;
+    const int leverCh = kLVarThrottle1 + (cal.var.find('#') != std::string::npos ? engine : 0);
+    const int demandCh = kThrottle1 + engine;
+    const double idle = cal.forward.front().axis;
+    const size_t n = frames.size();
+    auto axisAt = [&](size_t i) {
+        const double lv = frames[i].v[leverCh];
+        return std::isfinite(lv) ? invertLever(cal.forward, lv) : NAN;
+    };
+    size_t i = 0;
+    while (i < n) {
+        const double held = axisAt(i);
+        if (!std::isfinite(held)) {
+            ++i;
+            continue;
+        }
+        // The hold: as long as the lever stays there, through short gaps in the clip.
+        size_t last = i;
+        size_t j = i + 1;
+        for (; j < n; ++j) {
+            const double a = axisAt(j);
+            if (!std::isfinite(a)) {
+                if (frames[j].t - frames[last].t > kAutothrustGapSec) break;
+                continue;
+            }
+            if (std::fabs(a - held) > kAutothrustHoldAxis) break;
+            last = j;
+        }
+        const double startT = frames[i].t;
+        const double holdEnd = frames[last].t;
+        if (held > idle + 2.0 * kAutothrustHoldAxis && holdEnd - startT > kAutothrustSettleSec) {
+            double lo = INFINITY, hi = -INFINITY;
+            for (size_t k = i; k <= last; ++k) {
+                const double d = frames[k].v[demandCh];
+                if (frames[k].t < startT + kAutothrustSettleSec || !std::isfinite(d)) continue;
+                lo = d < lo ? d : lo;
+                hi = d > hi ? d : hi;
+            }
+            if (hi - lo > kAutothrustRangePct) {
+                // And the lever coming back from the hold towards idle, if it does next.
+                double endT = holdEnd;
+                for (size_t k = last + 1; k < n && frames[k].t - holdEnd <= kAutothrustRetardSec; ++k) {
+                    const double a = axisAt(k);
+                    if (!std::isfinite(a) || a > held || a <= idle + kAutothrustHoldAxis) break;
+                    endT = frames[k].t;
+                }
+                out.push_back({startT, endT});
+            }
+        }
+        i = last + 1;
+    }
+    return out;
+}
+
+double ThrustFollower::step(double clip, double live, double lo, double hi, double dt) {
+    if (hi < lo) hi = lo;
+    const double target = clip < 0.0 ? 0.0 : (clip > 100.0 ? 100.0 : clip);
+    const double guess = lo + target / 100.0 * (1.0 - lo);
+    const double off = target - live;
+    const double want = guess + kGain * off + integral_;
+    const bool atLimit = (want >= hi && off > 0.0) || (want <= lo && off < 0.0);
+    if (!atLimit && dt > 0.0) {
+        integral_ += kIntegral * off * dt;
+        integral_ = integral_ < -1.0 ? -1.0 : (integral_ > 1.0 ? 1.0 : integral_);
+    }
+    const double axis = guess + kGain * off + integral_;
+    return axis < lo ? lo : (axis > hi ? hi : axis);
+}
+
 int methodSourceChannel(Control c, MethodKind k, int engine) {
     const ControlSpec& s = controlSpec(c);
     const int e = s.perEngine ? engine : 0;

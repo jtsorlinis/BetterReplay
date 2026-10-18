@@ -324,7 +324,7 @@ struct PlaybackHarness {
     void frames(int n, double lat) {
         for (int i = 0; i < n; ++i) {
             simTime += 1.0 / 60.0;
-            engine.onFrame(liveFrame(simTime, lat), 1792247525000 + static_cast<int64_t>(simTime * 1000.0));
+            engine.onFrame(liveFrame(simTime, lat), 1792247525000 + std::llround(simTime * 1000.0));  // a ms clock, as the sim's
         }
     }
 };
@@ -558,7 +558,7 @@ TEST(EnginePlayback_HoldsBeforeAJumpUntilTheSimIsReady) {
     h.engine.statusJson(status);
     CHECK(status.find("\"preparing\":false") != std::string::npos);
     h.frames(60, -33.0);
-    CHECK_NEAR(h.engine.playback().time(), 1.0 + 1.0 / 60.0, 1e-6);
+    CHECK_NEAR(h.engine.playback().time(), 1.0 + 1.0 / 60.0, 1e-3);  // the clock is in ms
 
     // A seek asks again, for the new target; frames in between don't.
     const int calls = h.sim.prepareCalls;
@@ -624,7 +624,7 @@ TEST(EnginePlayback_RecordingWaitsWhileSimIsRestoring) {
     CHECK(h.engine.bufferedFrames() > before);
 }
 
-TEST(EnginePlayback_RestoreWaitEndsAfterFiveSeconds) {
+TEST(EnginePlayback_RestoreWaitEndsAfterTenSeconds) {
     PlaybackHarness h;
     std::string err;
     REQUIRE(h.engine.play(h.clipFile, err));
@@ -633,15 +633,15 @@ TEST(EnginePlayback_RestoreWaitEndsAfterFiveSeconds) {
     h.sim.busyRestoring = true;  // the gear never comes down
     REQUIRE(h.engine.stopPlayback(err));
     h.frames(60, -33.0);  // 1 s
-    CHECK_NEAR(h.engine.restoreSecondsLeft(), 4.0, 0.05);
+    CHECK_NEAR(h.engine.restoreSecondsLeft(), 9.0, 0.05);
     std::string json;
     h.engine.statusJson(json);
-    CHECK(json.find("\"restoreIn\":4") != std::string::npos);
-    CHECK(json.find("\"restoreMax\":5") != std::string::npos);
-    h.frames(60 * 3, -33.0);  // 4 s
+    CHECK(json.find("\"restoreIn\":8.9") != std::string::npos || json.find("\"restoreIn\":9") != std::string::npos);
+    CHECK(json.find("\"restoreMax\":10") != std::string::npos);
+    h.frames(60 * 8, -33.0);  // 9 s
     CHECK_EQ(h.sim.finishes, 0);
     CHECK_EQ(std::string(h.engine.suspendReason()), std::string("restoring aircraft"));
-    h.frames(60 + 2, -33.0);  // just past 5 s: let go
+    h.frames(60 + 2, -33.0);  // just past 10 s: let go
     CHECK_EQ(h.sim.finishes, 1);
     CHECK_NEAR(h.engine.restoreSecondsLeft(), 0.0, 0);
     h.frames(60, -33.0);
@@ -662,6 +662,47 @@ TEST(EnginePlayback_PlayingAgainEndsTheRestoreCountdown) {
     h.frames(60 * 6, -33.0);
     CHECK_NEAR(h.engine.restoreSecondsLeft(), 0.0, 0);
     CHECK_EQ(h.sim.finishes, 0);
+}
+
+// The sim's time can step unevenly while frames come evenly (on the A350: 18, 37, 28 ms a frame,
+// sometimes 0, each frame 27 to 28 ms apart): the replay moves by the real time between frames.
+// It holds while the sim is paused, or its time stands still for longer than a frame or two.
+TEST(EnginePlayback_StepsByRealTimeBetweenFrames) {
+    PlaybackHarness h;
+    std::string err;
+    REQUIRE(h.engine.play(h.clipFile, err));
+    int64_t utc = 1792247600000;
+    h.engine.onFrame(liveFrame(h.simTime, -33.0), utc);
+    const double steps[] = {0.018, 0.037, 0.0, 0.045, 0.037, 0.027};
+    double last = h.engine.playback().time();
+    for (int i = 0; i < 60; ++i) {
+        h.simTime += steps[i % 6];
+        utc += 27;
+        h.engine.onFrame(liveFrame(h.simTime, -33.0), utc);
+        const double t = h.engine.playback().time();
+        CHECK_NEAR(t - last, 0.027, 1e-6);
+        last = t;
+    }
+    h.engine.setPauseFlags(1);  // paused
+    for (int i = 0; i < 30; ++i) {
+        utc += 27;
+        h.engine.onFrame(liveFrame(h.simTime, -33.0), utc);
+    }
+    CHECK_NEAR(h.engine.playback().time(), last, 1e-9);
+    h.engine.setPauseFlags(0);
+    for (int i = 0; i < 30; ++i) {  // the sim's time standing still without a pause: a little, then held
+        utc += 27;
+        h.engine.onFrame(liveFrame(h.simTime, -33.0), utc);
+    }
+    const double held = h.engine.playback().time();
+    CHECK(held - last <= 0.3);
+    utc += 27;
+    h.engine.onFrame(liveFrame(h.simTime, -33.0), utc);
+    CHECK_NEAR(h.engine.playback().time(), held, 1e-9);
+    h.simTime += 0.027;  // and on again with it
+    utc += 27;
+    h.engine.onFrame(liveFrame(h.simTime, -33.0), utc);
+    CHECK_NEAR(h.engine.playback().time(), held + 0.027, 1e-6);
 }
 
 TEST(EnginePlayback_DeletingThePlayingClipStopsIt) {
