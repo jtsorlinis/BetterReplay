@@ -166,9 +166,19 @@ void ControlDriver::setReverseBy(ReverseBy by) {
     s.reverseBy = by;
     if (by == ReverseBy::Hold) log::info("controls: reverse thrust by holding THROTTLE_DECR while the clip's reversers are out");
     if (by == ReverseBy::Events) log::info("controls: reverse thrust with the reverse thrust events");
+    if (by == ReverseBy::Toggle) log::info("controls: reverse thrust with toggle reverse while the clip's reversers are out");
 }
 
 void ControlDriver::throttleDecrease() { keyEvent(KEY_THROTTLE_DECR, 0); }
+
+void ControlDriver::toggleReverse() { keyEvent(KEY_THROTTLE_REVERSE_THRUST_TOGGLE, 0); }
+
+bool ControlDriver::reverseToggled() const {
+    const Slot& s = slots_[static_cast<int>(Control::Throttle)];
+    return s.active && s.reverseBy == ReverseBy::Toggle && s.toggle.busy();
+}
+
+void ControlDriver::forgetReverse() { slots_[static_cast<int>(Control::Throttle)].toggle.forget(); }
 
 void ControlDriver::apply(Control c, const Frame& f, bool force) {
     Slot& s = slots_[static_cast<int>(c)];
@@ -265,6 +275,26 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                 }
                 s.holding = out;
             }
+            // "Toggle": toggle reverse with the levers at idle when the clip's reversers come out,
+            // its reverse amount once the aircraft is in reverse, and back out at idle when they go
+            // in. Neither the clip nor the aircraft may have the reverse flag (the A350 doesn't set
+            // it), so both go by what the reversers did; ReverseToggle keeps track of the rest.
+            ReverseToggle::Step toggled;
+            if (by == ReverseBy::Toggle) {
+                bool clipOut = false, liveOut = false;
+                double liveThrottle = NAN;
+                for (int e = 0; e < s.count; ++e) {
+                    clipOut |= reversing(f, e);
+                    if (!ctx_.live) continue;
+                    liveOut |= reversing(*ctx_.live, e);
+                    const double t = ctx_.live->v[kThrottle1 + e];
+                    if (std::isfinite(t) && !(t <= liveThrottle)) liveThrottle = t;
+                }
+                toggled = s.toggle.step(clipOut, liveOut, liveThrottle);
+                if (toggled.corrected) {
+                    log::info("controls: the aircraft %s in reverse after all", s.toggle.on() ? "is" : "isn't");
+                }
+            }
             const double limit = ctx_.throttleLowerLimit ? *ctx_.throttleLowerLimit : NAN;
             const double lower = std::isfinite(limit) && limit < -1.0 ? limit : 0.0;
             for (int e = 0; e < s.count; ++e) {
@@ -272,7 +302,20 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                 bool lever = true;  // the source is the lever itself
                 const double pct = f.v[kThrottle1 + e];
                 const double flag = f.v[kReverser1 + e];
-                const bool liveReverse = ctx_.live && ctx_.live->v[kReverser1 + e] >= 0.5;
+                if (by == ReverseBy::Toggle && toggled.drive != ReverseToggle::Drive::Forward) {
+                    // Around a toggle the levers at idle; in reverse the clip's amount from the
+                    // throttle simvar (the lever variable doesn't show it).
+                    fraction = 0.0;
+                    if (toggled.drive == ReverseToggle::Drive::Reverse) {
+                        if (!std::isfinite(pct)) continue;
+                        if (lower < 0.0 && pct < 0.0) fraction = std::fmin(pct / lower, toggled.cap);
+                        ++s.toggleFrames;
+                    }
+                    const double axis = static_cast<double>(std::lround(clamp(fraction, 0.0, 1.0) * 32768.0 - 16384.0));
+                    if (dueOnChange(s, e, axis, force, 48.0)) keyEvent(kThrottleAxisKeys[e], static_cast<int32_t>(axis));
+                    continue;
+                }
+                bool liveReverse = ctx_.live && ctx_.live->v[kReverser1 + e] >= 0.5;
                 // Whether the clip is in reverse here. Its reverse flag, except: on a "hold"
                 // aircraft the flag isn't its reverse (the hold above is); on an "events" one the
                 // reversers may be out without it ("decrease throttle" held), and then we put the
@@ -299,9 +342,17 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                     }
                     clipReverse = flagOn || out;
                     clipFlag = clipReverse ? 1.0 : 0.0;
+                } else if (by == ReverseBy::Toggle) {
+                    // Out of reverse (above): forward, whatever the flags say.
+                    clipFlag = 0.0;
+                    clipReverse = liveReverse = false;
                 }
                 const double hw = f.v[kThrottleAxis1 + e];
-                if (std::isfinite(hw)) {
+                if (by == ReverseBy::Toggle && std::isfinite(pct) && pct < 0.0) {
+                    // Below idle without reversing yet (going in or out of reverse): idle, not the
+                    // pilot's axis, which set the reverse amount there.
+                    fraction = 0.0;
+                } else if (std::isfinite(hw)) {
                     // The pilot's own hardware axis: puts the lever exactly where it was, detents
                     // and any reverse zone on the axis included.
                     fraction = hw;
@@ -366,6 +417,12 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                 const bool send = lever ? dueOnChange(s, e, axis, force, 48.0)
                                         : dueWhenLasting(s, e, axis, force, 48.0, 655.0, kLastingFrames);
                 if (send) keyEvent(kThrottleAxisKeys[e], static_cast<int32_t>(axis));
+            }
+            if (toggled.toggle) {
+                // After the levers' idle (sent a frame or more before).
+                keyEvent(KEY_THROTTLE_REVERSE_THRUST_TOGGLE, 0);
+                log::info("controls: toggle reverse (THROTTLE_REVERSE_THRUST_TOGGLE) %s",
+                          s.toggle.on() ? "in: the clip's reversers are out" : "back out: the clip's reversers are in");
             }
             break;
         }
@@ -454,6 +511,19 @@ void ControlDriver::end(Control c) {
     if (s.holdFrames > 0) log::info("controls: THROTTLE_DECR held for reverse in %d frame(s)", s.holdFrames);
     for (int e = 0; e < 4; ++e) {
         if (s.engaged[e]) keyEvent(kReverseOffKeys[e], 0);  // the reverser we put in
+    }
+    if (s.reverseBy == ReverseBy::Toggle) {
+        if (s.toggle.on()) {
+            // Still toggled into reverse: back out, the levers at idle first. (At the end of a
+            // replay SimBridge waits for that before ending, so this is the last resort.)
+            for (int e = 0; e < s.count; ++e) keyEvent(kThrottleAxisKeys[e], -16384);
+            keyEvent(KEY_THROTTLE_REVERSE_THRUST_TOGGLE, 0);
+            log::info("controls: toggle reverse back out at the end");
+        }
+        if (s.toggle.toggles() > 0 || s.toggle.corrections() > 0) {
+            log::info("controls: toggle reverse sent %d time(s) (%d correction(s)); a reverse amount in %d engine frame(s)",
+                      s.toggle.toggles(), s.toggle.corrections(), s.toggleFrames);
+        }
     }
     if (s.errors > 0) log::warn("controls: %d error(s) driving the %s", s.errors, controlSpec(c).label);
 }

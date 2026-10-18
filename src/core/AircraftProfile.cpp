@@ -139,6 +139,7 @@ std::string describeControl(Control c, const ControlProfile& cp) {
     switch (cp.reverseBy) {
         case ReverseBy::Events: s += ", reverse with SET_THROTTLEn_REVERSE_THRUST_ON"; break;
         case ReverseBy::Hold: s += ", reverse by holding THROTTLE_DECR"; break;
+        case ReverseBy::Toggle: s += ", reverse with toggle reverse (THROTTLE_REVERSE_THRUST_TOGGLE)"; break;
         case ReverseBy::Axis: s += ", reverse on the axis"; break;
         case ReverseBy::None: s += ", no reverse"; break;
         case ReverseBy::Unknown: break;
@@ -227,19 +228,74 @@ bool reversing(const Frame& f, int engine) {
     return (std::isfinite(nozzle) && nozzle >= 50.0) || (std::isfinite(lever) && lever < -1.0);
 }
 
+ReverseToggle::Step ReverseToggle::step(bool clipReverse, bool liveReverse, double liveThrottle) {
+    Step out;
+    const bool liveForward = liveThrottle > kForwardPct;
+    const bool liveIdle = !liveReverse && !liveForward;
+    const double moved = std::isfinite(liveThrottle) && std::isfinite(lastThrottle_) ? liveThrottle - lastThrottle_ : 0.0;
+    lastThrottle_ = liveThrottle;
+    if (clipReverse != want_) {
+        want_ = clipReverse;
+        tries_ = 0;
+    }
+    if (wait_ > 0) {
+        // A toggle settling: the levers stay at idle, unless the aircraft already shows reverse.
+        --wait_;
+        if (!(on_ && liveReverse)) {
+            out.drive = last_ = Drive::Idle;
+            return out;
+        }
+        wait_ = 0;
+    }
+    // In reverse a reverse amount can't make forward thrust; out of it nothing reverses. Unless
+    // that's the throttle simvar still heading back to idle from before the toggle.
+    const bool otherwise = on_ ? liveForward && last_ == Drive::Reverse : liveReverse;
+    const bool heading = on_ ? moved < -kHeadingPct : moved > kHeadingPct;
+    if (!otherwise) evidence_ = 0;
+    else if (!heading) ++evidence_;
+    if (evidence_ >= kEvidenceFrames) {
+        on_ = !on_;
+        evidence_ = 0;
+        ++corrections_;
+        out.corrected = true;
+    }
+    confirmed_ = on_ && (confirmed_ || liveReverse);
+    if (clipReverse == on_) {
+        idle_ = 0;
+        out.drive = last_ = on_ ? Drive::Reverse : Drive::Forward;
+        out.cap = confirmed_ ? 1.0 : kProbeAmount;
+        return out;
+    }
+    // Into or out of reverse: the levers to idle, then the toggle. After kTries it gives up until
+    // the clip changes, idle meanwhile in whichever mode the aircraft is in.
+    out.drive = last_ = Drive::Idle;
+    ++idle_;
+    if (tries_ >= kTries || (!(liveIdle && idle_ > 1) && idle_ < kIdleFrames)) return out;
+    idle_ = 0;
+    on_ = !on_;
+    confirmed_ = false;
+    evidence_ = 0;
+    wait_ = kSettleFrames;
+    ++tries_;
+    ++toggles_;
+    out.toggle = true;
+    return out;
+}
+
 const char* reverseByKey(ReverseBy r) {
     switch (r) {
         case ReverseBy::None: return "none";
         case ReverseBy::Axis: return "axis";
         case ReverseBy::Events: return "events";
         case ReverseBy::Hold: return "hold";
+        case ReverseBy::Toggle: return "toggle";
         case ReverseBy::Unknown: break;
     }
     return "";
 }
 
 bool parseReverseByKey(const std::string& key, ReverseBy& out) {
-    for (const ReverseBy r : {ReverseBy::None, ReverseBy::Axis, ReverseBy::Events, ReverseBy::Hold}) {
+    for (const ReverseBy r : {ReverseBy::None, ReverseBy::Axis, ReverseBy::Events, ReverseBy::Hold, ReverseBy::Toggle}) {
         if (key == reverseByKey(r)) {
             out = r;
             return true;

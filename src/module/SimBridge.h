@@ -45,6 +45,7 @@ public:
     double readVar(const ScanVar& v) override;
     void setReverser(bool on) override;
     void throttleDecrease() override;
+    void toggleReverse() override;
 
 private:
     enum DataDef : DWORD { DEF_RECORD = 1, DEF_TITLE = 2, DEF_PLAYBACK = 3, DEF_RESTORE = 4, DEF_SNAP = 5 };
@@ -292,6 +293,13 @@ private:
     bool flapsSettled(const Frame& target);
     void checkRestoreFlaps();
     void cancelRestoreFlaps();
+    // Stop on a "toggle reverse" aircraft still in reverse: the throttle is driven to where it was
+    // for a few more frames, so the levers come back to idle and reverse is toggled back out
+    // before it's let go (ControlDriver::reverseToggled), 10 s at most.
+    static constexpr int kRestoreThrottleMaxFrames = 600;
+    int restoreThrottleFrames_ = 0;
+    void checkRestoreThrottle();
+    void finishRestoreThrottle();
     // Diagnostics for the engine sound: does each engine's N1 follow the clip, or hunt? (N1 itself
     // can't be replayed: written every frame, the A350, the CJ4 and the PMDG 737 all kept their own.)
     int64_t engineStartMs_ = 0;

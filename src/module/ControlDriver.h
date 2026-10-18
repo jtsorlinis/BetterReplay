@@ -44,10 +44,20 @@ public:
     void setLever(const LeverCalibration& cal);
     // How this aircraft's reverse thrust is commanded (the setup's sweep found it), for the
     // key-event throttle: "hold" holds THROTTLE_DECR while the clip's reversers are out; "events"
-    // also puts the reverser in when the clip reversed without the reverse flag. After begin().
+    // also puts the reverser in when the clip reversed without the reverse flag; "toggle" toggles
+    // reverse at idle when the clip's reversers come out and again when they go in (ReverseToggle).
+    // After begin().
     void setReverseBy(ReverseBy by);
-    // One THROTTLE_DECR, as a held "decrease throttle" key sends every frame (the setup's test).
+    // One THROTTLE_DECR, as a held "decrease throttle" key sends every frame, and one
+    // THROTTLE_REVERSE_THRUST_TOGGLE (the setup's tests).
     void throttleDecrease();
+    void toggleReverse();
+    // The "toggle" throttle has the aircraft in reverse, or a toggle is still settling: ending it
+    // now would toggle it back out at once, whether the levers are at idle or not.
+    bool reverseToggled() const;
+    // The aircraft was reset (flight loaded, main menu, another aircraft): it's out of any reverse
+    // we toggled, so end() mustn't toggle it.
+    void forgetReverse();
     // Drives the control from the frame's channels (methodSourceChannel). Values are sent when
     // they change, and every few frames anyway; `force` sends them now.
     void apply(Control c, const Frame& f, bool force);
@@ -92,6 +102,8 @@ private:
         int holdFrames = 0;
         bool engaged[4] = {};     // the reverser put in by us (the clip reversed without its flag)
         int engageWait[4] = {};   // frames until it's put in again if the aircraft hasn't taken it
+        ReverseToggle toggle;     // "toggle": the aircraft's reverse
+        int toggleFrames = 0;     // per engine, a reverse amount sent
     };
     // Whether value v for output i is due (changed, forced or time to resend); records it.
     static bool due(Slot& s, int i, double v, bool force);

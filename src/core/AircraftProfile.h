@@ -4,6 +4,7 @@
 // They're kept in aircraft.json in the work folder.
 #pragma once
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -74,10 +75,12 @@ enum class ReverseBy : uint8_t {
     Unknown = 0,  // not tried (profiles from before the reverse test)
     None,         // no reversers, or nothing tried deployed them
     Axis,         // the throttle axis has its own reverse zone
-    Events,       // SET_THROTTLEn_REVERSE_THRUST_ON, then the axis sets the amount (the A350)
+    Events,       // SET_THROTTLEn_REVERSE_THRUST_ON, then the axis sets the amount
     Hold,         // "decrease throttle" held at idle (the PMDG 737); let go, it comes back to idle
+    Toggle,       // "toggle reverse" (THROTTLE_REVERSE_THRUST_TOGGLE) at idle, then the axis sets the
+                  // amount; toggled again at idle to come out (the A350, which ignores the events)
 };
-const char* reverseByKey(ReverseBy r);  // "none", "axis", "events", "hold"; "" for Unknown
+const char* reverseByKey(ReverseBy r);  // "none", "axis", "events", "hold", "toggle"; "" for Unknown
 bool parseReverseByKey(const std::string& key, ReverseBy& out);
 
 struct LeverCalibration {
@@ -155,6 +158,64 @@ bool leverAxis(const LeverCalibration& cal, double lever, double clipReverser, b
 // GENERAL ENG REVERSE THRUST ENGAGED (the PMDG 737 with "decrease throttle" held), or set it
 // without reversing.
 bool reversing(const Frame& f, int engine);
+
+// Reverse thrust in a replay on a "toggle" aircraft (ReverseBy::Toggle). The toggle switches every
+// engine in or out of reverse and the aircraft remembers it, but it may not show it at reverse idle
+// (the A350's nozzles and throttle simvar only show the reverse amount). So this keeps which mode
+// the aircraft is in: its own toggles, corrected by what the aircraft shows (reversing: it's in
+// reverse; forward thrust while a reverse amount is sent: it isn't), but not while its throttle
+// simvar is still heading back to idle (the A350's lags its lever by seconds). It toggles only
+// with the levers back at idle, and holds them there while the toggle settles.
+class ReverseToggle {
+public:
+    enum class Drive : uint8_t {
+        Forward,  // the throttle as the clip has it, out of reverse
+        Idle,     // the levers at idle, around a toggle
+        Reverse,  // the clip's reverse amount (throttle simvar / THROTTLE LOWER LIMIT), at most `cap`
+    };
+    struct Step {
+        Drive drive = Drive::Forward;
+        // Until the aircraft has shown reverse, a small amount: if it didn't take the toggle, that's
+        // a little forward thrust, which shows it.
+        double cap = 1.0;
+        bool toggle = false;     // send the toggle now, after the levers' idle
+        bool corrected = false;  // the aircraft showed it isn't in the mode it was thought to be in
+    };
+    // One frame. clipReverse: the clip is in reverse here (reversing(), any engine); liveReverse:
+    // the aircraft is; liveThrottle: its throttle simvar (the highest engine's), forward thrust
+    // above kForwardPct. Back at idle is neither.
+    Step step(bool clipReverse, bool liveReverse, double liveThrottle);
+    bool on() const { return on_; }                 // the aircraft is in reverse, as far as can be told
+    bool busy() const { return on_ || wait_ > 0; }  // or a toggle is still settling
+    void forget() {                                 // the aircraft was reset: out of reverse
+        on_ = confirmed_ = false;
+        wait_ = 0;
+    }
+    int toggles() const { return toggles_; }
+    int corrections() const { return corrections_; }
+
+    static constexpr double kForwardPct = 5.0;
+    static constexpr double kProbeAmount = 0.2;
+    static constexpr double kHeadingPct = 0.01;  // a frame: the throttle simvar heading back to idle
+    static constexpr int kSettleFrames = 30;     // after a toggle: idle this long, or until it shows reverse
+    static constexpr int kIdleFrames = 300;      // the longest wait for the throttle to come back to idle
+    static constexpr int kEvidenceFrames = 10;   // the aircraft showing otherwise this long corrects the mode
+    static constexpr int kTries = 3;             // toggles each time the clip goes in or out of reverse
+
+private:
+    bool on_ = false;
+    bool confirmed_ = false;  // it has shown reverse since the toggle
+    bool want_ = false;       // the clip's reverse in the last frame
+    Drive last_ = Drive::Forward;
+    double lastThrottle_ = NAN;
+    int wait_ = 0;
+    int idle_ = 0;
+    int evidence_ = 0;
+    int tries_ = 0;
+    int toggles_ = 0;
+    int corrections_ = 0;
+};
+
 // The channel a method takes its values from (engine is 0-based, throttle only), or -1.
 int methodSourceChannel(Control c, MethodKind k, int engine);
 // Every channel playback drives for this control when the profile drives it (any method):

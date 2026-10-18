@@ -77,6 +77,14 @@ struct FakeAircraft : IControlSim {
     bool holdReverse = false;
     double decreaseAt = -100.0;
     int decreases = 0;
+    // The A350 instead: neither the reverse events nor "decrease throttle" reverse it, but
+    // "toggle reverse" with the levers at idle does, without the reverse flag; the axis then sets
+    // the amount, and its nozzles and simvar show only the amount (nothing at reverse idle).
+    bool reverseByToggle = false;
+    bool toggled = false;
+    int toggles = 0;
+    int ignoreToggle = 0;           // that toggle (1-based) does nothing
+    bool toggleStuck = false;       // once in reverse, toggles do nothing
     bool axisRecorded = false;      // the key-event handler sees the pilot's axis (thr_axis_N)
     bool hideThrottleVars = false;  // nothing but the simvar moves with the throttle
 
@@ -99,7 +107,7 @@ struct FakeAircraft : IControlSim {
     double tla(int e) const {
         if (holdReverse) return -20.0;
         double a = axis[e];
-        if (reverser) return -20.0 * a;
+        if (reverser || toggled) return -20.0 * a;
         if (reverseZone) {
             if (a < 0.2) return -20.0 + 100.0 * a;
             a = (a - 0.2) / 0.8;
@@ -152,7 +160,7 @@ struct FakeAircraft : IControlSim {
             f.v[kEngineN1_1 + e] = n1[e];
             f.v[kInputThrottle1 + e] = ieThrottle(e);
             f.v[kReverser1 + e] = reverser ? 1.0 : 0.0;
-            f.v[kReverserNozzle1 + e] = reverser || holdReverse ? 100.0 : 0.0;
+            f.v[kReverserNozzle1 + e] = reverser || holdReverse ? 100.0 : toggled ? std::fmin(100.0, std::fmax(0.0, -5.0 * thr[e])) : 0.0;
             f.v[kThrottleAxis1 + e] = airbus && axisRecorded ? axis[e] : NAN;
         }
         f.v[kGearCenter] = f.v[kGearLeft] = f.v[kGearRight] = gearPos;
@@ -213,6 +221,11 @@ struct FakeAircraft : IControlSim {
         decreaseAt = t;
         if (reverseByHold && (airbus ? axis[0] < 0.05 : thr[0] < 1.0)) holdReverse = true;
     }
+    void toggleReverse() override {
+        ++toggles;
+        if (!reverseByToggle || toggles == ignoreToggle || (toggleStuck && toggled)) return;
+        if (airbus ? axis[0] < 0.05 : std::fabs(thr[0]) < 1.0) toggled = !toggled;  // only at idle
+    }
 
     bool beginControl(Control c, const ControlMethod& m, std::string& why) override {
         tried.push_back(m);
@@ -242,7 +255,7 @@ struct FakeAircraft : IControlSim {
                 if (airbus) {
                     axis[e] = a;
                 } else {
-                    thr[e] = reverser ? -25.0 * a : 100.0 * a;  // with the reverser in, the reverse amount
+                    thr[e] = reverser || toggled ? -25.0 * a : 100.0 * a;  // in reverse, the reverse amount
                 }
             }
         } else if (c == Control::Throttle && driven == throttleWorks) {
@@ -667,7 +680,7 @@ TEST(Setup_ThrottleLeverFoundAndCalibratedWhenTheSimvarCreeps) {
                               "Did the engines spool up and back down?"}));
     const JsonValue notice = h.status();
     CHECK_EQ(notice.getString("prompt", ""), std::string("Hands off the throttle"));
-    CHECK(notice.getString("detail", "").find("20 seconds") != std::string::npos);
+    CHECK(notice.getString("detail", "").find("40 seconds") != std::string::npos);
     const JsonValue* buttons = notice.get("buttons");
     REQUIRE(buttons && buttons->isArray() && !buttons->array.empty());
     CHECK_EQ(buttons->array[0].string, std::string("begin"));
@@ -824,6 +837,7 @@ TEST(Setup_ThrottleReverseByHoldingDecreaseOnALeverThatRunsDown) {
         CHECK(!h.aircraft.holdReverse);
         CHECK(h.aircraft.axis[0] < 0.05);  // left at idle
         CHECK_EQ(h.aircraft.reverserCalls, 2);  // the reverse events: tried, and stowed
+        CHECK_EQ(h.aircraft.toggles, 2);        // toggle reverse: tried, and toggled back
         CHECK(h.aircraft.decreases > 0);
         const LeverCalibration& cal = h.flow.profile()[Control::Throttle].lever;
         REQUIRE(cal.valid());
@@ -869,12 +883,96 @@ TEST(Setup_ThrottleReverseTestedWithoutALeverCalibration) {
         CHECK(tp.lever.var.empty());
         CHECK(tp.reverseBy == (hold ? ReverseBy::Hold : ReverseBy::Events));
         CHECK_EQ(h.aircraft.reverserCalls, 2);
+        CHECK_EQ(h.aircraft.toggles, hold ? 2 : 0);
         CHECK(hold ? h.aircraft.decreases > 0 : h.aircraft.decreases == 0);
         CHECK(!h.aircraft.reverser && !h.aircraft.holdReverse);
         CHECK_NEAR(h.aircraft.thr[0], 0.0, 1e-6);  // left at idle
         CHECK(describeControl(Control::Throttle, tp).find(hold ? "holding THROTTLE_DECR" : "REVERSE_THRUST_ON") !=
               std::string::npos);
     }
+}
+
+namespace {
+
+void captureLog(void* ctx, int level, const char* msg) {
+    static_cast<std::vector<std::string>*>(ctx)->push_back(msg);
+    testLog(nullptr, level, msg);
+}
+
+bool logged(const std::vector<std::string>& lines, const char* text) {
+    for (const std::string& l : lines) {
+        if (l.find(text) != std::string::npos) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+// The A350: neither the reverse events nor "decrease throttle" reverse it, but "toggle reverse" at
+// idle does, the axis setting the amount (its nozzles and simvar show only the amount). The sweep
+// toggles it back out at idle and checks with a little forward thrust that it's out: when the
+// first toggle back doesn't take, it toggles again. Either way the aircraft is left out of
+// reverse. With a lever calibration and without.
+TEST(Setup_ThrottleReverseByToggle) {
+    for (const bool airbus : {true, false}) {
+        for (const int ignore : {0, 2}) {
+            SetupHarness h;
+            std::vector<std::string> logs;
+            h.flow.setLogger(&captureLog, &logs);
+            throttleOnly(h);
+            h.aircraft.airbus = airbus;
+            h.aircraft.reversers = false;
+            h.aircraft.reverseByToggle = true;
+            h.aircraft.ignoreToggle = ignore;
+            h.facts.hasReverse = true;
+            REQUIRE(h.start());
+            ThrottlePilot p = throttlePilot(h);
+            confirmKeyEvents(h, p);
+            REQUIRE(h.phase() == "notice");
+            REQUIRE(h.answer("begin"));
+            REQUIRE(h.run(150.0, nullptr, "done"));
+            const ControlProfile& tp = h.flow.profile()[Control::Throttle];
+            CHECK(tp.state == ControlState::Ok);
+            CHECK(tp.reverseBy == ReverseBy::Toggle);
+            CHECK(!h.aircraft.toggled);  // out of reverse
+            CHECK_EQ(h.aircraft.toggles, ignore ? 3 : 2);
+            CHECK_EQ(h.aircraft.reverserCalls, 2);  // the reverse events first: tried, and stowed
+            CHECK_EQ(h.aircraft.decreases, 0);      // the toggle worked: no "decrease throttle"
+            CHECK(!h.aircraft.driving);
+            if (airbus) {
+                CHECK(h.aircraft.axis[0] < 0.05);  // left at idle
+                CHECK(tp.lever.valid());
+            } else {
+                CHECK_NEAR(h.aircraft.thr[0], 0.0, 1e-6);
+                CHECK(tp.lever.var.empty());
+            }
+            CHECK(tp.lever.reverse.empty());
+            CHECK(describeControl(Control::Throttle, tp).find("toggle reverse") != std::string::npos);
+            CHECK(logged(logs, "control setup: reverse thrust: with toggle reverse"));
+            CHECK(logged(logs, "control setup: out of reverse again"));
+            CHECK(ignore ? logged(logs, "still in reverse after toggling back") : !logged(logs, "still in reverse"));
+        }
+    }
+}
+
+// An aircraft that stays in reverse whatever is toggled: the sweep stops, asking the pilot to
+// toggle it out.
+TEST(Setup_ThrottleToggleThatWontComeOutStopsTheSweep) {
+    SetupHarness h;
+    throttleOnly(h);
+    h.aircraft.reversers = false;
+    h.aircraft.reverseByToggle = true;
+    h.facts.hasReverse = true;
+    REQUIRE(h.start());
+    ThrottlePilot p = throttlePilot(h);
+    confirmKeyEvents(h, p);
+    REQUIRE(h.phase() == "notice");
+    h.aircraft.toggleStuck = true;
+    REQUIRE(h.answer("begin"));
+    REQUIRE(h.run(60.0, nullptr, "retry"));
+    CHECK(h.status().getString("note", "").find("toggle reverse") != std::string::npos);
+    CHECK(!h.aircraft.driving);
+    CHECK(h.aircraft.toggles >= 4);  // in, back, twice more, and once more stopping
 }
 
 TEST(Setup_ThrottleLeverSweepStopsWhenTheAircraftRolls) {
@@ -1033,6 +1131,148 @@ TEST(Profile_LeverCalibrationTables) {
     CHECK(!reversing(f, 0));
 }
 
+// ---------------------------------------------------------------------------- toggle reverse in replays
+
+namespace {
+
+// The A350 in a replay: "toggle reverse" switches it in or out of reverse with the levers at
+// idle (or not at all, `ignore` times); in reverse the throttle simvar heads for -20% x the axis,
+// forward for 100% x the axis, 1.6% at least (idle). Nothing shows at reverse idle.
+struct ToggleAircraft {
+    bool reverse = false;
+    double axis = 0.0;
+    double thr = 1.6;
+    int toggles = 0;
+    int ignore = 0;
+    double lagSec = 0.4;  // the simvar behind the lever (the A350's: about 1.5 s)
+    void toggle() {
+        ++toggles;
+        if (ignore > 0) {
+            --ignore;
+            return;
+        }
+        if (axis < 0.01) reverse = !reverse;
+    }
+    void step(double dt) {
+        const double target = reverse ? -20.0 * axis : std::fmax(1.6, 100.0 * axis);
+        thr += (target - thr) * std::fmin(1.0, dt / lagSec);
+    }
+    bool reversing() const { return thr < -1.0; }
+};
+
+// Plays a throttle simvar (one value a frame, 60 Hz) through ReverseToggle as ControlDriver does,
+// and notes what the aircraft did.
+struct TogglePlayback {
+    ReverseToggle rt;
+    ToggleAircraft ac;
+    double deepest = 0.0;      // the aircraft's simvar, furthest into reverse
+    double mostForward = 0.0;  // and furthest forward
+    void frame(double clip) {
+        const ReverseToggle::Step st = rt.step(clip < -1.0, ac.reversing(), ac.thr);
+        double fraction = 0.0;
+        if (st.drive == ReverseToggle::Drive::Reverse) fraction = clip < 0.0 ? std::fmin(clip / -20.0, st.cap) : 0.0;
+        if (st.drive == ReverseToggle::Drive::Forward) fraction = clip > 0.0 ? clip / 100.0 : 0.0;
+        ac.axis = fraction;
+        if (st.toggle) ac.toggle();
+        ac.step(1.0 / 60.0);
+        deepest = std::fmin(deepest, ac.thr);
+        mostForward = std::fmax(mostForward, ac.thr);
+    }
+    void play(double seconds, double clip) {
+        for (int i = 0; i < static_cast<int>(seconds * 60.0); ++i) frame(clip);
+    }
+};
+
+}  // namespace
+
+// The clip's reverse amount is replayed, not full reverse: in at idle, the amount once the
+// aircraft shows reverse, out at idle after. Half reverse and a shallow ("idle") one, on a simvar
+// that follows the lever quickly, one as slow as the A350's, and one so slow that the wait for
+// idle runs out (toggled out while the simvar still shows reverse, which isn't taken for it).
+TEST(Playback_ToggleReverseReplaysTheAmount) {
+    for (const double lag : {0.4, 1.5, 3.0}) {
+        for (const double amount : {-10.0, -2.0}) {
+            const double k = lag / 0.4;  // time to settle
+            TogglePlayback p;
+            p.ac.lagSec = lag;
+            p.play(2.0, 1.6);
+            CHECK(!p.rt.busy());
+            p.play(4.0 * k, amount);
+            CHECK(p.ac.reverse);
+            CHECK(p.rt.on());
+            CHECK_NEAR(p.ac.thr, amount, 0.5);
+            CHECK(p.deepest > amount - 1.0);  // never full reverse
+            CHECK(p.mostForward < 2.0);       // nor forward thrust
+            p.play(3.0 * k, 1.6);
+            CHECK(!p.ac.reverse);  // out again
+            CHECK(!p.rt.busy());
+            CHECK_EQ(p.ac.toggles, 2);
+            CHECK_EQ(p.rt.corrections(), 0);
+            CHECK_NEAR(p.ac.thr, 1.6, 0.2);
+        }
+    }
+}
+
+// A toggle the aircraft didn't take shows: going into reverse, as a little forward thrust from
+// the small first amount; coming out, as reverse where the clip has forward thrust. Either way
+// it's toggled again, and the aircraft ends up out of reverse.
+TEST(Playback_ToggleReverseRetriesAToggleNotTaken) {
+    {
+        TogglePlayback p;
+        p.ac.ignore = 1;
+        p.play(1.0, 1.6);
+        p.play(5.0, -10.0);
+        CHECK(p.ac.reverse);
+        CHECK_NEAR(p.ac.thr, -10.0, 0.5);
+        CHECK(p.mostForward < 25.0);  // the probe's thrust, briefly
+        CHECK(p.rt.corrections() >= 1);
+        p.play(3.0, 1.6);
+        CHECK(!p.ac.reverse);
+        CHECK_EQ(p.ac.toggles, 3);
+    }
+    {
+        TogglePlayback p;
+        p.play(1.0, 1.6);
+        p.play(4.0, -10.0);
+        REQUIRE(p.ac.reverse);
+        p.ac.ignore = 1;    // the toggle out
+        p.play(6.0, 20.0);  // taxi thrust: in reverse that's reverse
+        CHECK(!p.ac.reverse);
+        CHECK(!p.rt.busy());
+        CHECK_EQ(p.ac.toggles, 3);
+        CHECK_EQ(p.rt.corrections(), 1);
+        CHECK_NEAR(p.ac.thr, 20.0, 1.0);
+    }
+}
+
+// A seek out of the middle of reverse (to forward thrust): idle and toggled out first. And an
+// aircraft that won't take the toggle: three tries, then idle until the clip changes.
+TEST(Playback_ToggleReverseSeekAndGiveUp) {
+    {
+        TogglePlayback p;
+        p.play(1.0, 1.6);
+        p.play(3.0, -15.0);
+        REQUIRE(p.ac.reverse);
+        p.mostForward = 0.0;
+        p.play(0.2, 40.0);
+        CHECK(p.mostForward < 2.0);  // no thrust either way until it's out
+        p.play(5.0, 40.0);
+        CHECK(!p.ac.reverse);
+        CHECK_EQ(p.ac.toggles, 2);
+        CHECK_NEAR(p.ac.thr, 40.0, 1.0);
+    }
+    {
+        TogglePlayback p;
+        p.ac.ignore = 100;
+        p.play(1.0, 1.6);
+        p.play(10.0, -10.0);
+        CHECK(!p.ac.reverse);
+        CHECK_EQ(p.ac.toggles, ReverseToggle::kTries);
+        CHECK(!p.rt.on());
+        CHECK(p.ac.thr < 5.0);  // idle meanwhile
+    }
+}
+
 TEST(Setup_ThrottleReplayStopsWhenTheAircraftRolls) {
     SetupHarness h;
     h.facts.hasSpoilers = false;
@@ -1187,6 +1427,22 @@ TEST(Profile_JsonRoundTrip) {
         REQUIRE(s.fromJson(old, std::strlen(old), &err));
         REQUIRE(s.find("y"));
         CHECK((*s.find("y"))[Control::Throttle].reverseBy == ReverseBy::Events);
+    }
+    {
+        // "Toggle reverse" (the A350).
+        ProfileStore s;
+        AircraftProfile& a350 = s.upsert("a350");
+        a350[Control::Throttle] = {ControlState::Ok, ControlMethod{MethodKind::KeyEvent, "", 1.0}, true};
+        a350[Control::Throttle].reverseBy = ReverseBy::Toggle;
+        std::string j;
+        s.toJson(j);
+        CHECK(j.find("\"reverseBy\":\"toggle\"") != std::string::npos);
+        ProfileStore t;
+        REQUIRE(t.fromJson(j.data(), j.size(), &err));
+        REQUIRE(t.find("a350"));
+        CHECK((*t.find("a350"))[Control::Throttle].reverseBy == ReverseBy::Toggle);
+        CHECK(describeControl(Control::Throttle, (*t.find("a350"))[Control::Throttle]).find("toggle reverse") !=
+              std::string::npos);
     }
     CHECK(describeControl(Control::Throttle, (*b2)[Control::Throttle]).find("INI_ENG#_THROTTLE_POS") != std::string::npos);
     CHECK(json.find("\"lever\"") == json.rfind("\"lever\""));  // only the profile that has one

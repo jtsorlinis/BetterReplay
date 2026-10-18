@@ -15,8 +15,9 @@
 // events drive the throttle, the step goes on: the variable that held still with the lever is the
 // lever's own, and the setup steps the throttle axis through its range and records where the
 // lever went (LeverCalibration). With reversers it then finds how to command reverse thrust: the
-// reverse events (then the axis sets the amount), or "decrease throttle" held at idle (the PMDG
-// 737), checking that the reversers deployed. Aircraft whose simvar held still skip all that.
+// reverse events (then the axis sets the amount), "toggle reverse" (likewise; the A350), or
+// "decrease throttle" held at idle (the PMDG 737), checking that the reversers deployed.
+// Aircraft whose simvar held still skip the calibration, but not the reverse test.
 #pragma once
 
 #include <cstddef>
@@ -65,11 +66,14 @@ public:
     virtual void applyControl(Control c, const Frame& f, bool force) = 0;
     virtual void endControl(Control c) = 0;
     // For the throttle lever's calibration: one variable's value now (NaN if unreadable), the
-    // thrust reversers (the reverse thrust on/off key events), and one THROTTLE_DECR, what a held
-    // "decrease throttle" key sends every frame (the PMDG 737 goes into reverse while it's held).
+    // thrust reversers (the reverse thrust on/off key events), one THROTTLE_DECR, what a held
+    // "decrease throttle" key sends every frame (the PMDG 737 goes into reverse while it's held),
+    // and THROTTLE_REVERSE_THRUST_TOGGLE ("toggle reverse"), which switches every engine in or out
+    // of reverse (the A350, which ignores the reverse events).
     virtual double readVar(const ScanVar& v) = 0;
     virtual void setReverser(bool on) = 0;
     virtual void throttleDecrease() = 0;
+    virtual void toggleReverse() = 0;
 };
 
 // Watches every scanned variable while the pilot moves a control and finds the ones that moved
@@ -226,6 +230,7 @@ private:
     void enterNotice();
     void beginSweep();
     void planReverse();
+    void planToggle();
     void sweepFrame(double dt, const Frame& live);
     void sweepTo(double axis, bool force);
     void finishSweep();
@@ -329,8 +334,11 @@ private:
     struct SweepMove {
         double axis;  // 0..1
         int record;   // 0: just get there, 1: a forward reading, 2: a reverse one, 3: hold
-                      // "decrease throttle", 4: let go and wait for the reversers to stow
-        int reverser; // -1 as it is, 0 stow, 1 engage (then a longer wait)
+                      // "decrease throttle", 4: let go and wait for the reversers to stow, 5: a
+                      // reading after toggling reverse, 6: check it's out of reverse again (a
+                      // little forward thrust), 7: at idle until the throttle simvar is back there
+                      // too (before a toggle)
+        int reverser; // -1 as it is, 0 stow, 1 engage, 2 toggle reverse (each then a longer wait)
     };
     std::vector<SweepMove> sweep_;
     size_t sweepAt_ = 0;
@@ -339,6 +347,13 @@ private:
     bool reverseSeen_ = false;    // the reverse events deployed the reversers
     bool holdTried_ = false;      // "decrease throttle" held at idle: tried, and it deployed them
     bool holdSeen_ = false;
+    bool toggleTried_ = false;    // "toggle reverse": tried, it deployed them, and the axis set the amount
+    bool toggleSeen_ = false;
+    bool toggleFollows_ = false;
+    bool toggledOn_ = false;      // our toggles have the aircraft in reverse
+    int toggleAgain_ = 0;         // extra toggles to get it out of reverse
+    double toggleIdle_ = NAN;     // the throttle simvar at reverse idle, and the furthest into reverse
+    double toggleDeep_ = NAN;
     double sweepHeld_ = 0.0;      // time at this move
     double sweepLast_ = NAN;      // the lever's last reading, and how long it's been unchanged
     double sweepSteady_ = 0.0;
