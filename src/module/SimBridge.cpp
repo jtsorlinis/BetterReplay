@@ -541,7 +541,6 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     SetupFacts& facts = input_.facts;
     facts.engines = numEngines_;
     facts.engineType = std::isfinite(ex[kExEngineType]) ? static_cast<int>(ex[kExEngineType]) : 1;
-    engineType_ = facts.engineType;
     facts.parkingBrake = ex[kExParkingBrake] >= 0.5;
     facts.onRunway = ex[kExOnRunway] >= 0.5;
     facts.engineRunning = false;
@@ -882,7 +881,6 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     cancelRestoreFlaps();
     engineStartMs_ = 0;
     engineLastMs_ = 0;
-    beginEngineWrites(present);
     for (int e = 0; e < 4; ++e) {
         n1DiffSum_[e] = 0.0;
         n1DiffMax_[e] = 0.0;
@@ -1197,116 +1195,6 @@ void SimBridge::logEngines() {
                   "%.1f times a second (the clip: %.1f)",
                   e + 1, n1DiffSum_[e] / n1Frames_[e], n1DiffMax_[e], n1Reversals_[e] / secs, n1ClipReversals_[e] / secs);
     }
-    if (engineWrites_ > 0) {
-        log::info("playback: engine values written on %d frame(s); the aircraft kept N1 within %.0f%% in %d of %d "
-                  "checked frame(s)",
-                  engineWrites_, kEngineKeptPct, engineKept_, engineChecked_);
-    }
-}
-
-void SimBridge::beginEngineWrites(const ChannelMask& present) {
-    static const char* const kNames[2] = {"TURB ENG N1", "TURB ENG N2"};
-    static const int kFirst[2] = {kEngineN1_1, kEngineN2_1};
-    engineWrites_ = engineChecked_ = engineKept_ = 0;
-    engineWindowChecked_ = engineWindowOff_ = 0;
-    engineWriteErrors_ = 0;
-    engineCheckFromMs_ = 0;
-    for (int k = 0; k < 2; ++k) {
-        engineWrite_[k] = false;
-        for (double& v : engineWritten_[k]) v = NAN;
-    }
-    // N1/N2 only exist on turbines: jets, turboprops and turbine helicopters.
-    if (engineType_ != 1 && engineType_ != 3 && engineType_ != 5) {
-        log::info("playback: engines left to the aircraft (engine type %d isn't a turbine)", engineType_);
-        return;
-    }
-    // Writing against an aircraft that keeps its own N1 only fights its engines for the first
-    // seconds of every replay (the A350 V2 does).
-    if (engineWritesRejected_) {
-        log::info("playback: engines left to the aircraft (it kept its own N1 when it was written before)");
-        return;
-    }
-    if (percentUnit_ == FS_INVALID_UNIT) percentUnit_ = fsVarsGetUnitId("percent");
-    for (int k = 0; k < 2; ++k) {
-        if (engineVarId_[k] == FS_VAR_INVALID_ID) engineVarId_[k] = fsVarsGetAVarId(kNames[k]);
-        if (engineVarId_[k] == FS_VAR_INVALID_ID || engineVarId_[k] == FS_VAR_AVAR_NONE || percentUnit_ == FS_INVALID_UNIT) {
-            continue;
-        }
-        for (int e = 0; e < numEngines_ && e < 4; ++e) engineWrite_[k] |= present.test(static_cast<size_t>(kFirst[k] + e));
-    }
-    if (engineWrite_[0]) {
-        log::info("playback: writing the clip's engine N1%s every frame, so the engine sound and animation follow it",
-                  engineWrite_[1] ? " and N2" : " (this clip has no N2)");
-    } else {
-        log::info("playback: engines left to the aircraft (%s)", present.test(kEngineN1_1) ? "can't write TURB ENG N1"
-                                                                                          : "this clip has no N1");
-        engineWrite_[1] = false;
-    }
-}
-
-void SimBridge::writeEngines(const Frame& frame, bool jumped) {
-    static const int kFirst[2] = {kEngineN1_1, kEngineN2_1};
-    if (!engineWrite_[0]) return;
-    const int64_t now = utcNowMs();
-    const int engines = numEngines_ < 4 ? numEngines_ : 4;
-
-    // Did the aircraft keep what was written last frame? (It reads back a frame later, after the
-    // sim's own engine update, so a small drift is expected.) Not right after a jump.
-    if (jumped) engineCheckFromMs_ = now + 1000;
-    if (now >= engineCheckFromMs_ && engineCheckFromMs_ != 0) {
-        bool any = false;
-        bool off = false;
-        for (int e = 0; e < engines; ++e) {
-            const double w = engineWritten_[0][e];
-            const double live = input_.raw.v[kEngineN1_1 + e];
-            if (!std::isfinite(w) || !std::isfinite(live)) continue;
-            any = true;
-            if (std::fabs(live - w) > kEngineKeptPct) off = true;
-        }
-        if (any) {
-            ++engineChecked_;
-            ++engineWindowChecked_;
-            if (off) {
-                ++engineWindowOff_;
-            } else {
-                ++engineKept_;
-            }
-            if (engineWindowChecked_ >= kEngineWindowFrames) {
-                // Writing against an aircraft that keeps its own N1 would only make it jitter.
-                if (engineWindowOff_ * 10 >= engineWindowChecked_ * 8) {
-                    log::warn("playback: the aircraft kept its own engine N1 in %d of the last %d frames (more than "
-                              "%.0f%% off what was written); leaving the engines to it for the rest of this playback",
-                              engineWindowOff_, engineWindowChecked_, kEngineKeptPct);
-                    engineWrite_[0] = engineWrite_[1] = false;
-                    engineWritesRejected_ = true;
-                    return;
-                }
-                engineWindowChecked_ = engineWindowOff_ = 0;
-            }
-        }
-    }
-    if (engineCheckFromMs_ == 0) engineCheckFromMs_ = now + 1000;
-
-    for (int k = 0; k < 2; ++k) {
-        if (!engineWrite_[k]) continue;
-        for (int e = 0; e < engines; ++e) {
-            const double v = frame.v[kFirst[k] + e];
-            engineWritten_[k][e] = v;
-            if (!std::isfinite(v)) continue;
-            FsVarParamVariant param;
-            param.type = FsVarParamTypeInteger;
-            param.intValue = static_cast<unsigned>(e + 1);
-            FsVarParamArray params;
-            params.size = 1;
-            params.array = &param;
-            const FsVarError err = fsVarsAVarSet(engineVarId_[k], percentUnit_, params, v);
-            if (err != FS_VAR_ERROR_NONE && engineWriteErrors_++ < 3) {
-                log::warn("playback: writing %s:%d failed (error 0x%x)", k == 0 ? "TURB ENG N1" : "TURB ENG N2", e + 1,
-                          static_cast<unsigned>(err));
-            }
-        }
-    }
-    ++engineWrites_;
 }
 
 void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
@@ -1328,8 +1216,7 @@ void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
     }
     if (throttleViaEvents_ && clipHasThrottle_) sendThrottleEvents(frame, jumped);
     trackEventChannels(frame, jumped);
-    trackEngines(frame, jumped);  // before writing: compares what the engines did with the clip
-    writeEngines(frame, jumped);
+    trackEngines(frame, jumped);
     if (playChannelCount_ == 0) return;
     for (int i = 0; i < playChannelCount_; ++i) {
         const int c = playChannels_[i];
@@ -1686,7 +1573,6 @@ void SimBridge::onAircraftChanged() {
     throttleViaEvents_ = false;
     snapRejected_ = false;
     snapAccepted_ = false;
-    engineWritesRejected_ = false;
     cancelRestoreFlaps();
 }
 

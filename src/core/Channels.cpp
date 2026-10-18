@@ -110,8 +110,8 @@ const ChannelDef kChannels[kChannelCount] = {
     {"ie_spdbrk", nullptr, nullptr, F32, LIN, INPUT, nullptr, nullptr, nullptr, 0,
      "HANDLING_SPEED_BRAKES|HANDLING_SPOILERS|HANDLING_SPEEDBRAKES", kSpoilersHandle, 1, true},
     // What the controls did, for the control setup's checks (did the engines spool up, did the
-    // spoilers come up?) and for analysis. Not in the playback definitions, but on turbine
-    // aircraft playback writes N1 (and N2, below) back itself: SimBridge::writeEngines.
+    // spoilers come up?), playback's engine diagnostics, and analysis. Not settable in effect:
+    // aircraft keep their own N1 when it's written.
     {"n1_1", "TURB ENG N1:1", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 1},
     {"n1_2", "TURB ENG N1:2", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 2},
     {"n1_3", "TURB ENG N1:3", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 3},
@@ -139,8 +139,7 @@ const ChannelDef kChannels[kChannelCount] = {
     {"thr_axis_2", nullptr, nullptr, F32, LIN, NONE, nullptr, nullptr, nullptr, 2},
     {"thr_axis_3", nullptr, nullptr, F32, LIN, NONE, nullptr, nullptr, nullptr, 3},
     {"thr_axis_4", nullptr, nullptr, F32, LIN, NONE, nullptr, nullptr, nullptr, 4},
-    // N2 per engine, alongside N1 above. Playback writes both back on turbine aircraft
-    // (SimBridge::writeEngines), so the engine sound and animation follow the clip.
+    // N2 per engine, alongside N1 above, recorded for analysis.
     {"n2_1", "TURB ENG N2:1", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 1},
     {"n2_2", "TURB ENG N2:2", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 2},
     {"n2_3", "TURB ENG N2:3", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 3},
