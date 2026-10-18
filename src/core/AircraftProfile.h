@@ -83,10 +83,9 @@ bool parseReverseByKey(const std::string& key, ReverseBy& out);
 struct LeverCalibration {
     std::string var;  // the L:var; '#' stands for the engine number. Empty: none
     std::vector<LeverPoint> forward;  // reverser stowed, by ascending axis
-    // With the reverser engaged (the axis then sets the reverse amount). Empty unless reverseBy
-    // is Events and the lever variable moved.
+    // With the reverser engaged (the axis then sets the reverse amount). Empty unless the reverse
+    // events work (ControlProfile::reverseBy) and the lever variable moved.
     std::vector<LeverPoint> reverse;
-    ReverseBy reverseBy = ReverseBy::Unknown;
 
     bool valid() const { return !var.empty() && forward.size() >= 2; }
 };
@@ -96,6 +95,7 @@ struct ControlProfile {
     ControlMethod method;
     bool confirmed = false;  // the pilot said the replay looked right (not only the automatic check)
     LeverCalibration lever;  // throttle only, with the key-event method
+    ReverseBy reverseBy = ReverseBy::Unknown;  // throttle only, with the key-event method
 };
 
 struct AircraftProfile {

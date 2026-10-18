@@ -134,15 +134,14 @@ std::string describeMethod(Control c, const ControlMethod& m) {
 
 std::string describeControl(Control c, const ControlProfile& cp) {
     std::string s = describeMethod(c, cp.method);
-    if (c == Control::Throttle && cp.lever.valid()) {
-        s += ", lever from L:var " + cp.lever.var;
-        switch (cp.lever.reverseBy) {
-            case ReverseBy::Events: s += ", reverse with SET_THROTTLEn_REVERSE_THRUST_ON"; break;
-            case ReverseBy::Hold: s += ", reverse by holding THROTTLE_DECR"; break;
-            case ReverseBy::Axis: s += ", reverse on the axis"; break;
-            case ReverseBy::None: s += ", no reverse"; break;
-            case ReverseBy::Unknown: break;
-        }
+    if (c != Control::Throttle) return s;
+    if (cp.lever.valid()) s += ", lever from L:var " + cp.lever.var;
+    switch (cp.reverseBy) {
+        case ReverseBy::Events: s += ", reverse with SET_THROTTLEn_REVERSE_THRUST_ON"; break;
+        case ReverseBy::Hold: s += ", reverse by holding THROTTLE_DECR"; break;
+        case ReverseBy::Axis: s += ", reverse on the axis"; break;
+        case ReverseBy::None: s += ", no reverse"; break;
+        case ReverseBy::Unknown: break;
     }
     return s;
 }
@@ -323,13 +322,13 @@ void ProfileStore::toJson(std::string& out) const {
             w.kv("var", c.method.var);
             w.kv("scale", c.method.scale);
             w.kv("confirmed", c.confirmed);
+            if (c.reverseBy != ReverseBy::Unknown) w.kv("reverseBy", reverseByKey(c.reverseBy));
             if (!c.lever.var.empty()) {
                 // [axis, lever] pairs
                 w.key("lever").beginObject();
                 w.kv("var", c.lever.var);
                 writeLeverTable(w, "forward", c.lever.forward);
                 writeLeverTable(w, "reverse", c.lever.reverse);
-                if (c.lever.reverseBy != ReverseBy::Unknown) w.kv("reverseBy", reverseByKey(c.lever.reverseBy));
                 w.endObject();
             }
             w.endObject();
@@ -368,11 +367,12 @@ bool ProfileStore::fromJson(const char* text, size_t length, std::string* error)
             cp.method.var = c->getString("var", "");
             cp.method.scale = c->getNumber("scale", 1.0);
             cp.confirmed = c->getBool("confirmed", false);
+            parseReverseByKey(c->getString("reverseBy", ""), cp.reverseBy);
             if (const JsonValue* lv = c->get("lever")) {
                 cp.lever.var = lv->getString("var", "");
                 cp.lever.forward = readLeverTable(lv->get("forward"));
                 cp.lever.reverse = readLeverTable(lv->get("reverse"));
-                parseReverseByKey(lv->getString("reverseBy", ""), cp.lever.reverseBy);
+                parseReverseByKey(lv->getString("reverseBy", ""), cp.reverseBy);  // where it was first kept
                 if (!cp.lever.valid()) cp.lever = LeverCalibration();
             }
             // A profile that says "use this method" without one can't be followed.

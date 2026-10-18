@@ -169,6 +169,10 @@ const char* const kNoticeDetail =
     "are, then tries reverse thrust if the aircraft has it. The engines spool up against the parking brake for "
     "about 20 seconds.";
 const char* const kSweepDetail = "Keep your hands off the throttle while BetterReplay learns where the lever's positions are.";
+const char* const kReverseNoticeDetail =
+    "BetterReplay now tries reverse thrust itself, to learn how to replay it on this aircraft. The engines spool "
+    "up against the parking brake for a few seconds.";
+const char* const kReverseSweepDetail = "Keep your hands off the throttle while BetterReplay tries reverse thrust.";
 
 const char* question(Control c) {
     switch (c) {
@@ -663,8 +667,10 @@ void SetupFlow::enterStep() {
     phaseT_ = 0.0;
     leverVerdict_ = LeverVerdict::Steady;
     leverStage_ = false;
+    reverseOnly_ = false;
     chosen_ = ControlMethod();
     lever_ = LeverCalibration();
+    reverseBy_ = ReverseBy::Unknown;
     leverIdle_ = NAN;
     leverSpan_ = 0.0;
     std::vector<SweepMove>().swap(sweep_);
@@ -1200,7 +1206,7 @@ SetupFlow::LeverVerdict SetupFlow::checkLever() {
 void SetupFlow::confirmMethod() {
     const ControlMethod m = methods_[method_];
     const bool keyEvents = control() == Control::Throttle && m.kind == MethodKind::KeyEvent;
-    if (!keyEvents || leverVerdict_ == LeverVerdict::Steady) {
+    if (!keyEvents) {
         if (control() == Control::Throttle && leverVerdict_ != LeverVerdict::Steady) {
             logf(0, "control setup: %s replays the aircraft's own variable, so the throttle needs no lever calibration",
                  describeMethod(control(), m).c_str());
@@ -1209,19 +1215,35 @@ void SetupFlow::confirmMethod() {
         return;
     }
     // The key events move the lever, but replayed from a simvar that isn't it (or maybe not: the
-    // pilot is asked): find the lever.
+    // pilot is asked): find the lever. Where the simvar is the lever, only reverse thrust is left.
     leverStage_ = true;
     chosen_ = m;
     mini_ = Clip();
     methods_.clear();
     attempts_.clear();
     method_ = 0;
-    if (leverVerdict_ == LeverVerdict::Unclear) {
+    if (leverVerdict_ == LeverVerdict::Steady) {
+        reverseOnly();
+    } else if (leverVerdict_ == LeverVerdict::Unclear) {
         phase_ = Phase::Query;  // the tracker keeps the movement until the answer
         phaseT_ = 0.0;
     } else {
         leverFromMovement();
     }
+}
+
+// The throttle needs no lever calibration: with reversers, the sweep only tries reverse thrust
+// (the PMDG 737, whose lever simvar is the lever, takes "decrease throttle" held at idle).
+void SetupFlow::reverseOnly() {
+    tracker_.clear();
+    lever_ = LeverCalibration();
+    if (!facts_.hasReverse) {
+        finishStep(ControlState::Ok, chosen_, true);
+        return;
+    }
+    reverseOnly_ = true;
+    logf(0, "control setup: the throttle needs no lever calibration; trying reverse thrust");
+    enterNotice();
 }
 
 // The lever's own variable from the holds in the pilot's movement (still in the tracker), then
@@ -1384,7 +1406,6 @@ void SetupFlow::beginSweep() {
     }
     driving_ = true;
     sweep_.clear();
-    for (int i = 0; i <= kSweepSteps; ++i) sweep_.push_back({static_cast<double>(i) / kSweepSteps, 1, -1});
     sweepAt_ = 0;
     sweepExtended_ = false;
     reverseZone_ = reverseSeen_ = holdTried_ = holdSeen_ = false;
@@ -1394,8 +1415,28 @@ void SetupFlow::beginSweep() {
     for (double& v : sweepFrame_.v) v = NAN;
     phase_ = Phase::Sweep;
     phaseT_ = 0.0;
-    logf(0, "control setup: stepping the throttle axis from bottom to full to calibrate L:var %s", lever_.var.c_str());
+    if (reverseOnly_) {
+        // No lever to calibrate: straight to the reverse test, from idle (axis 0, where the key
+        // events put this throttle at idle), and back there.
+        sweepExtended_ = true;
+        planReverse();
+        sweep_.push_back({0.0, 0, -1});
+        logf(0, "control setup: trying reverse thrust");
+    } else {
+        for (int i = 0; i <= kSweepSteps; ++i) sweep_.push_back({static_cast<double>(i) / kSweepSteps, 1, -1});
+        logf(0, "control setup: stepping the throttle axis from bottom to full to calibrate L:var %s", lever_.var.c_str());
+    }
     sweepTo(sweep_[0].axis, true);
+}
+
+// The reverse test's moves: the reverse events and the amount stepped up the axis, then back to
+// idle and stowed ("decrease throttle" held is added after that if they didn't work).
+void SetupFlow::planReverse() {
+    sweep_.push_back({0.0, 0, -1});
+    sweep_.push_back({0.0, 2, 1});
+    for (int i = 1; i <= kSweepReverseSteps; ++i) sweep_.push_back({static_cast<double>(i) / kSweepReverseSteps, 2, -1});
+    sweep_.push_back({0.0, 0, -1});
+    sweep_.push_back({0.0, 0, 0});
 }
 
 void SetupFlow::sweepTo(double axis, bool force) {
@@ -1417,9 +1458,10 @@ void SetupFlow::sweepFrame(double dt, const Frame& live) {
         return;
     }
     sweepHeld_ += dt;
-    const double v = sim_->readVar({engineVar(lever_.var, 1), true});
+    // The lever's reading (none when only reverse is tried: then nothing to wait for).
+    const double v = lever_.var.empty() ? NAN : sim_->readVar({engineVar(lever_.var, 1), true});
     const bool same = std::isfinite(v) && std::isfinite(sweepLast_) && std::fabs(v - sweepLast_) <= 1e-6 * std::max(1.0, std::fabs(v));
-    sweepSteady_ = same ? sweepSteady_ + dt : 0.0;
+    sweepSteady_ = same || lever_.var.empty() ? sweepSteady_ + dt : 0.0;
     sweepLast_ = v;
     const SweepMove m = sweep_[sweepAt_];  // (a copy: the plan can grow below)
     bool reversingNow = false;
@@ -1474,13 +1516,7 @@ void SetupFlow::sweepFrame(double dt, const Frame& live) {
         double beyond = 0.0;
         for (const LeverPoint& p : fwd) beyond = std::max(beyond, (idle - p.lever) * toFull);
         reverseZone_ = std::isfinite(idle) && beyond > std::max(0.01 * (hi - lo), 1e-9);
-        if (facts_.hasReverse && !reverseZone_) {
-            sweep_.push_back({0.0, 0, -1});
-            sweep_.push_back({0.0, 2, 1});
-            for (int i = 1; i <= kSweepReverseSteps; ++i) sweep_.push_back({static_cast<double>(i) / kSweepReverseSteps, 2, -1});
-            sweep_.push_back({0.0, 0, -1});
-            sweep_.push_back({0.0, 0, 0});
-        }
+        if (facts_.hasReverse && !reverseZone_) planReverse();
         sweep_.push_back({fwd.size() >= 2 && std::isfinite(idle) ? invertLever(fwd, idle) : 0.0, 0, -1});
         logf(0, "control setup: forward pass done (L:var %s %.4g..%.4g)%s", lever_.var.c_str(), lo, hi,
              facts_.hasReverse ? (reverseZone_ ? "; the axis has its own reverse zone" : "; now the reversers") : "");
@@ -1507,7 +1543,7 @@ void SetupFlow::finishSweep() {
         lo = i == 0 || l < lo ? l : lo;
         hi = i == 0 || l > hi ? l : hi;
     }
-    if (lever_.forward.size() < 2 || !(hi - lo > 0.25 * leverSpan_)) {
+    if (!reverseOnly_ && (lever_.forward.size() < 2 || !(hi - lo > 0.25 * leverSpan_))) {
         logf(1, "control setup: L:var %s moved %.4g over the axis sweep (%.4g when you held the positions)",
              lever_.var.c_str(), hi - lo, leverSpan_);
         lever_ = LeverCalibration();  // a retry looks for another variable
@@ -1531,13 +1567,19 @@ void SetupFlow::finishSweep() {
         rev.clear();
     }
     lever_.reverse = rev;
-    lever_.reverseBy = by;
+    reverseBy_ = by;
     if (facts_.hasReverse) {
         logf(by == ReverseBy::None ? 1 : 0, "control setup: reverse thrust: %s",
              by == ReverseBy::Axis     ? "on the throttle axis"
              : by == ReverseBy::Events ? "with the reverse thrust events, the axis setting the amount"
              : by == ReverseBy::Hold   ? "by holding THROTTLE_DECR (\"decrease throttle\") at idle"
                                        : "nothing tried deployed the reversers; replays leave reverse out");
+    }
+    if (reverseOnly_) {
+        lever_ = LeverCalibration();
+        std::vector<SweepMove>().swap(sweep_);
+        finishStep(ControlState::Ok, chosen_, true);
+        return;
     }
     // The detents: where the lever held one value over several steps.
     std::string detents;
@@ -1590,9 +1632,9 @@ void SetupFlow::finishStep(ControlState state, const ControlMethod& method, bool
         cp.state = state;
         cp.method = state == ControlState::Ok ? method : ControlMethod();
         cp.confirmed = confirmed;
-        cp.lever = state == ControlState::Ok && c == Control::Throttle && method.kind == MethodKind::KeyEvent
-                       ? lever_
-                       : LeverCalibration();
+        const bool keyThrottle = state == ControlState::Ok && c == Control::Throttle && method.kind == MethodKind::KeyEvent;
+        cp.lever = keyThrottle ? lever_ : LeverCalibration();
+        cp.reverseBy = keyThrottle ? reverseBy_ : ReverseBy::Unknown;
         logf(0, "control setup: %s %s%s%s", controlSpec(c).key, stateKey(state), state == ControlState::Ok ? " via " : "",
              state == ControlState::Ok ? describeControl(c, cp).c_str() : "");
     }
@@ -1663,7 +1705,7 @@ bool SetupFlow::answer(const std::string& a, std::string& error) {
                 note_.clear();
                 if (!leverStage_) {
                     beginUser();
-                } else if (lever_.var.empty()) {
+                } else if (lever_.var.empty() && !reverseOnly_) {
                     beginPositions(nullptr);
                 } else {
                     enterNotice();
@@ -1678,7 +1720,7 @@ bool SetupFlow::answer(const std::string& a, std::string& error) {
                 if (a == "yes") {
                     leverFromMovement();
                 } else {
-                    finishStep(ControlState::Ok, chosen_, true);
+                    reverseOnly();
                 }
                 return true;
             }
@@ -1711,8 +1753,11 @@ bool SetupFlow::answer(const std::string& a, std::string& error) {
         if (leverStage_) {
             // The method stays; the lever keeps an earlier calibration made for the same method.
             const ControlProfile& was = before_[Control::Throttle];
-            lever_ = was.state == ControlState::Ok && was.method == chosen_ ? was.lever : LeverCalibration();
-            logf(0, "control setup: lever calibration skipped%s", lever_.valid() ? "; keeping the earlier one" : "");
+            const bool same = was.state == ControlState::Ok && was.method == chosen_;
+            lever_ = same ? was.lever : LeverCalibration();
+            reverseBy_ = same ? was.reverseBy : ReverseBy::Unknown;
+            logf(0, "control setup: %s skipped%s", reverseOnly_ ? "reverse thrust test" : "lever calibration",
+                 same ? "; keeping the earlier setup" : "");
             finishStep(ControlState::Ok, chosen_, true);
         } else {
             finishStep(ControlState::Skipped, ControlMethod(), false);
@@ -1772,8 +1817,8 @@ void SetupFlow::statusJson(JsonWriter& w) const {
         case Phase::User: detail = holding ? kHoldDetail : ""; break;
         case Phase::Query: detail = kQueryDetail; break;
         case Phase::Positions: detail = kPositionsDetail; break;
-        case Phase::Notice: detail = kNoticeDetail; break;
-        case Phase::Sweep: detail = kSweepDetail; break;
+        case Phase::Notice: detail = reverseOnly_ ? kReverseNoticeDetail : kNoticeDetail; break;
+        case Phase::Sweep: detail = reverseOnly_ ? kReverseSweepDetail : kSweepDetail; break;
         default: break;
     }
     w.kv("detail", detail);

@@ -336,7 +336,7 @@ function attemptsHtml(setup: SetupStatus): string {
     const phase = setup.phase || "";
     if (phase === "sweep") {
         const pct = Math.round(100 * Math.min(1, Math.max(0, setup.progress || 0)));
-        return '<div class="br-attempt current"><span class="br-attempt-mark"></span>Learning the lever positions: ' +
+        return '<div class="br-attempt current"><span class="br-attempt-mark"></span>Testing the throttle: ' +
             pct + "%</div>";
     }
     if (phase !== "replay" && phase !== "hold" && phase !== "ask") return "";

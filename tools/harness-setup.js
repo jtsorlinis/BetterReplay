@@ -46,6 +46,11 @@ window.harnessSetup = (function () {
       "the parking brake for about 20 seconds."],
     sweep: ["Moving the throttle", "Keep your hands off the throttle while BetterReplay learns where the lever's positions are."],
   };
+  const REVERSE_TEXT = {
+    notice: "BetterReplay now tries reverse thrust itself, to learn how to replay it on this aircraft. The engines spool " +
+      "up against the parking brake for a few seconds.",
+    sweep: "Keep your hands off the throttle while BetterReplay tries reverse thrust.",
+  };
   const SWEEP_SEC = 8;
   const TASK_SEC = 1.6;   // the pilot does each instruction in this long, once started
   const HOLD_SEC = 3.2;   // a hold: half a second to get there, then the ring fills
@@ -70,13 +75,16 @@ window.harnessSetup = (function () {
     s.attempts = [];
     s.need = "";
     s.lever = false;
+    s.reverseOnly = false;
     if (s.step >= s.plan.length) { s.phase = "done"; return; }
     s.phase = control() === "gear" && sim.onGround ? "takeoff" : "prepare";
   }
   function finish(state) {
     const c = control();
     s.results[c] = state;
-    s.methods[c] = state === "ok" ? METHODS[c][s.method][0] + (s.lever && c === "throttle" ? ", lever from L:var INI_ENG#_THROTTLE_POS" : "") : "";
+    s.methods[c] = state === "ok" ? METHODS[c][s.method][0] +
+      (s.lever && !s.reverseOnly && c === "throttle" ? ", lever from L:var INI_ENG#_THROTTLE_POS" : "") +
+      (s.lever && c === "throttle" ? ", reverse by holding THROTTLE_DECR" : "") : "";
     s.step++;
     enterStep();
   }
@@ -95,6 +103,8 @@ window.harnessSetup = (function () {
   function beginPositions(note) {
     s.phase = "positions"; s.t = 0; s.moving = -1; s.task = 0; s.taskDone = false; s.hold = 0; s.note = note || "";
   }
+  // No lever to calibrate (the simvar is the lever, or its levers move with the thrust): only reverse is tried.
+  function reverseOnly() { s.lever = true; s.reverseOnly = true; s.phase = "notice"; s.note = ""; }
   // The lever's own variable, from the movement's holds (or, with "leverHidden", the holds once more).
   function leverFromMovement() { if (sim.leverHidden) beginPositions(POSITIONS_AGAIN); else { s.phase = "notice"; s.note = ""; } }
   // The pilot's instructions, `m` s after starting to move: sets the one showing and a hold's
@@ -186,14 +196,15 @@ window.harnessSetup = (function () {
     if (p === "ask" && a === "yes") {
       s.note = "";
       const keyEvents = control() === "throttle" && METHODS.throttle[s.method][0].indexOf("key events") === 0;
-      if (!keyEvents || !sim.airbus) { finish("ok"); return true; }
-      s.lever = true;
+      if (!keyEvents) { finish("ok"); return true; }
       s.attempts = [];
+      if (!sim.airbus) { reverseOnly(); return true; }
+      s.lever = true;
       if (sim.unclear) s.phase = "query"; else leverFromMovement();
       return true;
     }
     if (p === "query" && (a === "yes" || a === "no")) {
-      if (a === "no") { s.lever = false; finish("ok"); return true; }
+      if (a === "no") { reverseOnly(); return true; }
       leverFromMovement();
       return true;
     }
@@ -241,7 +252,8 @@ window.harnessSetup = (function () {
     return Object.assign(out, {
       phase: s.phase, step: done ? "" : c, title: done ? "Done" : TITLE[c], stepNo: done ? s.plan.length : s.step + 1,
       steps: s.plan.length, prompt: prompts[s.phase] || "", note: s.note,
-      detail: LEVER_TEXT[s.phase] ? LEVER_TEXT[s.phase][1] : s.phase === "user" && holding ? HOLD_DETAIL : "",
+      detail: s.reverseOnly && REVERSE_TEXT[s.phase] ? REVERSE_TEXT[s.phase] :
+        LEVER_TEXT[s.phase] ? LEVER_TEXT[s.phase][1] : s.phase === "user" && holding ? HOLD_DETAIL : "",
       progress: s.phase === "sweep" ? Math.min(1, s.t / SWEEP_SEC) : 0,
       task: pilot ? s.task : 0, tasks: done ? 0 : s.phase === "positions" ? POSITION_TASKS.length : TASKS[c].length,
       taskDone: pilot && s.taskDone, holdTask: holding, hold: holding ? s.hold : 0,

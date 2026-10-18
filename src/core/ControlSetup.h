@@ -218,12 +218,14 @@ private:
     void analyze();
     LeverVerdict checkLever();
     void confirmMethod();  // the pilot said yes to the method being tried
+    void reverseOnly();
     void leverFromMovement();
     void beginPositions(const char* note);
     void positionsFrame(double dt, const Frame& live);
     bool findLever();
     void enterNotice();
     void beginSweep();
+    void planReverse();
     void sweepFrame(double dt, const Frame& live);
     void sweepTo(double axis, bool force);
     void finishSweep();
@@ -318,8 +320,10 @@ private:
     AircraftProfile before_;  // the profile when the run started: a skipped step keeps its result
     LeverVerdict leverVerdict_ = LeverVerdict::Steady;
     bool leverStage_ = false;  // the throttle's method is confirmed; now its lever
+    bool reverseOnly_ = false; // and it needs no lever calibration: only reverse thrust is tried
     ControlMethod chosen_;     // that method
     LeverCalibration lever_;   // what the lever stage found, stored with the step
+    ReverseBy reverseBy_ = ReverseBy::Unknown;  // and how reverse thrust is commanded
     double leverIdle_ = NAN;   // the lever variable at idle (the end of the holds)
     double leverSpan_ = 0.0;   // and how far it moved there
     struct SweepMove {

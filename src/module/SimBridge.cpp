@@ -932,8 +932,9 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
                 log::info("playback: the throttle levers follow %s: %s (recorded before the lever setup?)",
                           kChannels[kThrottle1].simvar, why.c_str());
             }
-            driver_.setReverseBy(cp.lever.reverseBy);  // from the clip's reversers either way
         }
+        // Reverse thrust from the clip's reversers, with or without a lever calibration.
+        if (c == Control::Throttle && cp.state == ControlState::Ok) driver_.setReverseBy(cp.reverseBy);
     }
     for (int c = 0; c < kChannelCount; ++c) {
         if (owned.test(static_cast<size_t>(c)) && kChannels[c].play == PlayMode::Set) playSkip_.set(static_cast<size_t>(c));
