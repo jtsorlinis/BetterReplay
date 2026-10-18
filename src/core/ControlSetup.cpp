@@ -923,6 +923,15 @@ double SetupFlow::buildMethods() {
         }
     }
     if (c != Control::Flaps || facts_.flapPositions > 1) methods_.push_back({MethodKind::KeyEvent, std::string(), 1.0});
+    // What hardware bindings send, for aircraft that ignore the events above (the PMDG 737).
+    // Before the simvars: writing those moves the outcome the check reads even where the aircraft
+    // animates its own surfaces, which only the pilot can then turn down.
+    if (c == Control::Flaps) {
+        methods_.push_back({MethodKind::KeyEvent, kKeyFlapsNotches, 1.0});
+        if (facts_.flapPositions > 1) methods_.push_back({MethodKind::KeyEvent, kKeyFlapsAxis, 1.0});
+    } else if (c == Control::Spoilers) {
+        methods_.push_back({MethodKind::KeyEvent, kKeySpoilersAxis, 1.0});
+    }
     if (controlSpec(c).simvarFirst >= 0) methods_.push_back({MethodKind::SimVar, std::string(), 1.0});
     taken = 0;
     for (const auto& f : lvars) {

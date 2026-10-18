@@ -1872,6 +1872,7 @@ void SimBridge::applyControl(Control c, const Frame& f, bool force) {
 }
 
 void SimBridge::endControl(Control c) {
+    driver_.restoreLVars(c);
     driver_.end(c);
     if (c == Control::Throttle && setupMasking_) {
         setupMasking_ = false;

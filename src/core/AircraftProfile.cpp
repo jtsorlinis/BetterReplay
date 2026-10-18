@@ -119,6 +119,8 @@ std::string describeMethod(Control c, const ControlMethod& m) {
         case MethodKind::LVar: return "L:var " + m.var;
         case MethodKind::SimVar: return "simvars";
         case MethodKind::KeyEvent:
+            if (m.var == kKeyFlapsNotches) return "key events FLAPS_INCR/FLAPS_DECR";
+            if (!m.var.empty()) return "key event " + m.var;
             switch (c) {
                 case Control::Spoilers: return "key event SPOILERS_SET";
                 case Control::Flaps: return "key event FLAPS_SET";

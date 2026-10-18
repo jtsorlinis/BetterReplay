@@ -28,8 +28,16 @@ enum class MethodKind : uint8_t {
     InputValue,  // SimConnect_SetInputEvent with the recorded value
     LVar,        // the aircraft's L:var, set to the recorded value
     SimVar,      // the control's simvars, written every frame
-    KeyEvent,    // the legacy key events: THROTTLEn_AXIS_SET_EX1, FLAPS_SET, SPOILERS_SET, GEAR_UP/DOWN
+    KeyEvent,    // key events, like hardware bindings send. `var` names the family: empty for
+                 // THROTTLEn_AXIS_SET_EX1, FLAPS_SET, SPOILERS_SET, GEAR_SET/UP/DOWN, or one of the
+                 // kKey* variants below
 };
+
+// KeyEvent variants (ControlMethod::var), for aircraft that ignore FLAPS_SET and SPOILERS_SET but
+// take what their hardware bindings send (the PMDG 737).
+constexpr const char* kKeyFlapsNotches = "FLAPS_INCR";       // FLAPS_INCR/FLAPS_DECR, a notch at a time
+constexpr const char* kKeyFlapsAxis = "AXIS_FLAPS_SET";      // -16383 (up) .. 16383 (full)
+constexpr const char* kKeySpoilersAxis = "AXIS_SPOILER_SET";  // -16383 (stowed) .. 16383 (full)
 
 struct ControlMethod {
     MethodKind kind = MethodKind::None;

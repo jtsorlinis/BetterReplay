@@ -436,13 +436,38 @@ TEST(Setup_FailingMethodsAreSkippedWithoutAskingAndANoTriesTheNext) {
     CHECK(h.flow.profile()[Control::Spoilers].state == ControlState::Failed);
     std::vector<MethodKind> rest;
     for (size_t i = 4; i < h.aircraft.tried.size(); ++i) rest.push_back(h.aircraft.tried[i].kind);
-    REQUIRE(rest.size() == 3);
-    CHECK(rest[0] == MethodKind::SimVar);
-    CHECK(rest[1] == MethodKind::LVar);
-    CHECK(h.aircraft.tried[5].var == "SPOILER_ANIMATION");
-    CHECK(rest[2] == MethodKind::InputValue);
+    REQUIRE(rest.size() == 4);
+    CHECK(rest[0] == MethodKind::KeyEvent);
+    CHECK(h.aircraft.tried[4].var == kKeySpoilersAxis);
+    CHECK(rest[1] == MethodKind::SimVar);
+    CHECK(rest[2] == MethodKind::LVar);
+    CHECK(h.aircraft.tried[6].var == "SPOILER_ANIMATION");
+    CHECK(rest[3] == MethodKind::InputValue);
     CHECK_EQ(h.aircraft.ends, static_cast<int>(h.aircraft.tried.size()));
     CHECK(h.status().getString("note", "").find("Couldn't replay the spoilers") != std::string::npos);
+}
+
+// The PMDG 737 ignores SPOILERS_SET but takes AXIS_SPOILER_SET, what a hardware speedbrake axis
+// sends: it's tried after the default key event, before the simvars and the L:vars.
+TEST(Setup_SpoilersFallBackToTheHardwareAxisEvent) {
+    SetupHarness h;
+    h.facts.gearRetractable = false;
+    h.aircraft.spoilersWork = ControlMethod{MethodKind::KeyEvent, kKeySpoilersAxis, 1.0};
+    REQUIRE(h.start());
+    CHECK(h.run(90.0, deploySpoilers(h.aircraft, 2.0), "ask"));
+    REQUIRE(h.aircraft.tried.size() == 4);
+    CHECK(h.aircraft.tried[0].kind == MethodKind::InputSet);
+    CHECK(h.aircraft.tried[1].kind == MethodKind::InputSet);
+    CHECK(h.aircraft.tried[2] == (ControlMethod{MethodKind::KeyEvent, "", 1.0}));
+    CHECK(h.aircraft.tried[3] == h.aircraft.spoilersWork);
+    REQUIRE(h.answer("yes"));
+    const ControlProfile& sp = h.flow.profile()[Control::Spoilers];
+    CHECK(sp.state == ControlState::Ok);
+    CHECK(sp.method == h.aircraft.spoilersWork);
+    CHECK_EQ(describeMethod(Control::Spoilers, sp.method), std::string("key event AXIS_SPOILER_SET"));
+    CHECK_EQ(describeMethod(Control::Flaps, ControlMethod{MethodKind::KeyEvent, kKeyFlapsNotches, 1.0}),
+             std::string("key events FLAPS_INCR/FLAPS_DECR"));
+    CHECK_EQ(describeMethod(Control::Flaps, ControlMethod{MethodKind::KeyEvent, "", 1.0}), std::string("key event FLAPS_SET"));
 }
 
 TEST(Setup_ThrottleUsesOnePatternForBothEnginesAndWaitsForTheSpool) {
@@ -875,6 +900,7 @@ TEST(Profile_JsonRoundTrip) {
         v2[Control::Throttle].lever.var = "INI_ENG#_THROTTLE_POS";
         v2[Control::Throttle].lever.forward = {{0.0, 0.0}, {0.5, 28.83}, {0.525, 28.83}, {1.0, 51.9}};
         v2[Control::Throttle].lever.reverse = {{0.0, 0.0}, {1.0, -23.07}};
+        v2[Control::Flaps] = {ControlState::Ok, ControlMethod{MethodKind::KeyEvent, kKeyFlapsNotches, 1.0}, true};
     }
     AircraftProfile& a = store.upsert("simobjects/airplanes/a320neo");
     a.title = "Airbus A320neo \"V2\"";
@@ -897,6 +923,7 @@ TEST(Profile_JsonRoundTrip) {
     REQUIRE(lv.forward.size() == 4 && lv.reverse.size() == 2);
     CHECK_NEAR(lv.forward[2].axis, 0.525, 1e-9);
     CHECK_NEAR(lv.forward[3].lever, 51.9, 1e-9);
+    CHECK((*b2)[Control::Flaps].method == (ControlMethod{MethodKind::KeyEvent, kKeyFlapsNotches, 1.0}));
     CHECK_NEAR(lv.reverse[1].lever, -23.07, 1e-9);
     CHECK(describeControl(Control::Throttle, (*b2)[Control::Throttle]).find("INI_ENG#_THROTTLE_POS") != std::string::npos);
     CHECK(json.find("\"lever\"") == json.rfind("\"lever\""));  // only the profile that has one

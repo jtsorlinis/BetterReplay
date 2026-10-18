@@ -45,6 +45,9 @@ public:
     // Drives the control from the frame's channels (methodSourceChannel). Values are sent when
     // they change, and every few frames anyway; `force` sends them now.
     void apply(Control c, const Frame& f, bool force);
+    // The control setup, after trying an L:var method: put the L:var back as it was, so a
+    // variable that only animates one panel (the PMDG's NGXLeftInbdTrailFlaps) isn't left moved.
+    void restoreLVars(Control c);
     void end(Control c);
     void endAll();
     bool active(Control c) const { return slots_[static_cast<int>(c)].active; }
@@ -66,6 +69,7 @@ private:
         FsBVarId setId[4] = {FS_VAR_INVALID_ID, FS_VAR_INVALID_ID, FS_VAR_INVALID_ID, FS_VAR_INVALID_ID};
         uint64_t hash[4] = {};
         FsLVarId lvar[4] = {FS_VAR_INVALID_ID, FS_VAR_INVALID_ID, FS_VAR_INVALID_ID, FS_VAR_INVALID_ID};
+        double original[4] = {NAN, NAN, NAN, NAN};  // the L:vars when the method began
         SimVarTarget simvars[4];
         int simvarCount = 0;
         double sent[4] = {NAN, NAN, NAN, NAN};
@@ -87,6 +91,9 @@ private:
     static bool dueWhenLasting(Slot& s, int i, double v, bool force, double minStep, double nowStep, int frames);
     static constexpr int kLastingFrames = 30;
     void applyKeyEvent(Control c, Slot& s, const Frame& f, bool force);
+    static constexpr int kNotchFrames = 8;       // FLAPS_INCR/DECR: at least this far apart
+    static constexpr int kNotchWaitFrames = 60;  // and waiting this long for the handle to show it
+    void stepFlaps(Slot& s, double target, bool force);
     static void keyEvent(int id, int32_t value);
 
     Context ctx_;

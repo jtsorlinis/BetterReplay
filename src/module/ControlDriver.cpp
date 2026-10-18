@@ -101,6 +101,7 @@ bool ControlDriver::begin(Control c, const ControlMethod& m, std::string& why) {
                     why = "the aircraft has no L:var " + name;
                     return false;
                 }
+                if (fsVarsLVarGet(s.lvar[e], number_, &s.original[e]) != FS_VAR_ERROR_NONE) s.original[e] = NAN;
             }
             break;
         case MethodKind::SimVar: {
@@ -132,7 +133,7 @@ bool ControlDriver::begin(Control c, const ControlMethod& m, std::string& why) {
             break;
         }
         case MethodKind::KeyEvent:
-            if (c == Control::Flaps && (!ctx_.flapPositions || *ctx_.flapPositions < 2)) {
+            if (c == Control::Flaps && m.var != kKeyFlapsNotches && (!ctx_.flapPositions || *ctx_.flapPositions < 2)) {
                 why = "FLAPS_SET needs the number of flap positions";
                 return false;
             }
@@ -287,15 +288,31 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
             break;
         case Control::Flaps: {
             const double idx = f.v[kFlapsHandleIndex];
+            if (!std::isfinite(idx)) break;
+            if (s.method.var == kKeyFlapsNotches) {
+                stepFlaps(s, std::round(idx), force);
+                break;
+            }
             const int positions = ctx_.flapPositions ? *ctx_.flapPositions : 0;
-            if (!std::isfinite(idx) || positions < 2) break;
-            const double value = std::round(clamp(std::round(idx), 0.0, positions - 1.0) / (positions - 1.0) * 16383.0);
+            if (positions < 2) break;
+            const double fraction = clamp(std::round(idx), 0.0, positions - 1.0) / (positions - 1.0);
+            if (s.method.var == kKeyFlapsAxis) {
+                const double value = std::round(fraction * 32766.0 - 16383.0);
+                if (dueOnChange(s, 0, value, force, 1.0)) keyEvent(KEY_AXIS_FLAPS_SET, static_cast<int32_t>(value));
+                break;
+            }
+            const double value = std::round(fraction * 16383.0);
             if (dueOnChange(s, 0, value, force, 1.0)) keyEvent(KEY_FLAPS_SET, static_cast<int32_t>(value));
             break;
         }
         case Control::Spoilers: {
             const double h = f.v[kSpoilersHandle];
             if (!std::isfinite(h)) break;
+            if (s.method.var == kKeySpoilersAxis) {
+                const double value = std::round(clamp(h, 0.0, 1.0) * 32766.0 - 16383.0);
+                if (dueOnChange(s, 0, value, force, 48.0)) keyEvent(KEY_AXIS_SPOILER_SET, static_cast<int32_t>(value));
+                break;
+            }
             const double value = std::round(clamp(h, 0.0, 1.0) * 16383.0);
             if (dueOnChange(s, 0, value, force, 24.0)) keyEvent(KEY_SPOILERS_SET, static_cast<int32_t>(value));
             break;
@@ -312,6 +329,30 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
             log::info("controls: gear %s (key events)", state > 0.5 ? "down" : "up");
             break;
         }
+    }
+}
+
+// Like a hardware flap switch: one notch toward the clip's handle index, the next once the
+// aircraft's handle shows the last one (or after a second, if it doesn't report it).
+void ControlDriver::stepFlaps(Slot& s, double target, bool force) {
+    const double live = ctx_.live ? ctx_.live->v[kFlapsHandleIndex] : NAN;
+    if (!std::isfinite(live)) return;
+    ++s.since[0];
+    if (std::fabs(live - target) < 0.5) return;
+    const bool arrived = !std::isfinite(s.sent[0]) || std::fabs(live - s.sent[0]) < 0.5;
+    if (!force && (s.since[0] < kNotchFrames || (!arrived && s.since[0] < kNotchWaitFrames))) return;
+    const bool extend = target > live;
+    keyEvent(extend ? KEY_FLAPS_INCR : KEY_FLAPS_DECR, 0);
+    s.sent[0] = std::round(live) + (extend ? 1.0 : -1.0);
+    s.since[0] = 0;
+    ++s.sends;
+}
+
+void ControlDriver::restoreLVars(Control c) {
+    Slot& s = slots_[static_cast<int>(c)];
+    if (!s.active || s.method.kind != MethodKind::LVar) return;
+    for (int e = 0; e < s.count; ++e) {
+        if (s.lvar[e] != FS_VAR_INVALID_ID && std::isfinite(s.original[e])) fsVarsLVarSet(s.lvar[e], number_, s.original[e]);
     }
 }
 
