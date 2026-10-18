@@ -80,6 +80,7 @@ private:
         EVT_CRASHED,
         EVT_CRASH_RESET,
         EVT_POSITION_CHANGED,
+        EVT_AIRCRAFT_LOADED,  // with the aircraft.cfg path: the aircraft's profile key
     };
     // Extra values appended after the channels in DEF_RECORD.
     enum Extra {
@@ -145,8 +146,19 @@ private:
     void matchInputChannels();   // input event channels <- the aircraft's list (profile names first)
     void resolveLVarChannels();  // L:var channels <- the profile's L:vars
     void reresolveForProfile();
+    // The aircraft's identity (AircraftIdentity): the state is asked for at once on a new title
+    // or flight, then every kPathAskEveryMs while no path is trusted, kPathAsks times at most.
     void requestAircraftPath();
+    void checkAircraftPath();
     void onSystemState(const SIMCONNECT_RECV_SYSTEM_STATE* s);
+    void onAircraftLoaded(const char* name, size_t size);
+    void applyAircraftKey(bool changed);
+    static constexpr int64_t kPathAskEveryMs = 2000;
+    static constexpr int kPathAsks = 30;
+    AircraftIdentity identity_;
+    int64_t nextPathAskMs_ = 0;
+    int pathAsks_ = 0;
+    bool staleLogged_ = false;
     void logLVars();       // lists the aircraft's L:vars for gear/throttle/flaps/spoilers (research)
     void tracePlayback();  // debug: once a second, what playback sent vs what the aircraft reports
     // Diagnostics, off unless switched on here: a CSV row per replay frame in the work folder
@@ -255,7 +267,6 @@ private:
     std::vector<FsBVarId> scanB_;
     std::vector<FsLVarId> scanL_;
     int flapPositions_ = 0;
-    bool aircraftPathRequested_ = false;
 
     // playback
     ChannelMask playPresent_;                  // channels the playing clip has

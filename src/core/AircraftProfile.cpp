@@ -436,6 +436,68 @@ std::string aircraftFamily(const std::string& path) {
     return path.substr(0, category + 1) + withoutVariant(folder);
 }
 
+bool isTitleKey(const std::string& key) { return key.compare(0, 6, "title:") == 0; }
+
+std::string aircraftFolder(const std::string& raw) {
+    std::string path;
+    for (const char ch : raw) {
+        const char c = ch == '\\' ? '/' : ch;
+        path.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c + 32) : c);
+    }
+    const std::string root = "simobjects/";
+    const size_t at = path.compare(0, root.size(), root) == 0 ? 0 : path.find("/" + root);
+    if (at != std::string::npos && at > 0) path.erase(0, at + 1);
+    const size_t slash = path.rfind('/');
+    const std::string file = slash == std::string::npos ? std::string() : path.substr(slash + 1);
+    const size_t dot = file.rfind('.');
+    if (dot != std::string::npos && (file.compare(dot, 4, ".cfg") == 0 || file.compare(dot, 4, ".air") == 0) &&
+        dot + 4 == file.size()) {
+        path.resize(slash);
+    }
+    return path;
+}
+
+bool AircraftIdentity::onTitle(const std::string& title) {
+    if (title.empty() || title == title_) return false;
+    title_ = title;
+    if (!path_.empty() && pathTitle_.empty()) {
+        pathTitle_ = title;  // the path came first: it's this aircraft's
+        return false;
+    }
+    source_ = Source::Title;
+    const std::string key = "title:" + title;
+    if (key == key_) return false;
+    key_ = key;
+    return true;
+}
+
+bool AircraftIdentity::onEvent(const std::string& path) {
+    if (path.empty()) return false;
+    // The event can come before the new title: then the title it goes with is the next one.
+    if (source_ == Source::Title) pathTitle_ = title_;
+    else if (path != path_) pathTitle_.clear();
+    return trust(path, Source::Event);
+}
+
+bool AircraftIdentity::onState(const std::string& path) {
+    stale_ = false;
+    if (path.empty() || source_ == Source::Event) return false;  // the event is newer than the state
+    if (path == path_ && !pathTitle_.empty() && pathTitle_ != title_) {
+        stale_ = true;
+        return false;
+    }
+    pathTitle_ = title_;  // empty before the first title: then it's the next one's
+    return trust(path, Source::State);
+}
+
+bool AircraftIdentity::trust(const std::string& path, Source source) {
+    path_ = path;
+    source_ = source;
+    if (path == key_) return false;
+    key_ = path;
+    return true;
+}
+
 size_t ProfileStore::groupVariants() {
     size_t changed = 0;
     std::vector<AircraftProfile> grouped;

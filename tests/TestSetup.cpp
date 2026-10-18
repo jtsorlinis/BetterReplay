@@ -1551,6 +1551,66 @@ TEST(Profile_VariantsShareOneKey) {
     CHECK_EQ(store.groupVariants(), 0u);
 }
 
+TEST(Profile_AircraftFolder) {
+    const std::string a350 = "simobjects/airplanes/a350/presets/inibuilds/a350-900_default_cabin_ulr/config";
+    CHECK_EQ(aircraftFolder("SimObjects\\Airplanes\\a350\\presets\\inibuilds\\A350-900_Default_Cabin_ULR\\config\\aircraft.CFG"),
+             a350);
+    // The event's full path, a streamed aircraft's included, comes out the same as the state's.
+    CHECK_EQ(aircraftFolder(".\\LocalState\\StreamedPackages\\inibuilds-aircraft-a350\\Content\\SimObjects\\Airplanes\\"
+                            "a350\\presets\\inibuilds\\A350-900_Default_Cabin_ULR\\config\\aircraft.cfg"),
+             a350);
+    CHECK_EQ(aircraftFolder("C:\\Community\\pmdg-aircraft-738\\SimObjects\\Airplanes\\PMDG 737-800\\aircraft.cfg"),
+             std::string("simobjects/airplanes/pmdg 737-800"));
+    CHECK_EQ(aircraftFolder(""), std::string());
+    CHECK(isTitleKey("title:A380-800"));
+    CHECK(!isTitleKey(a350));
+}
+
+TEST(Profile_IdentityIgnoresStaleState) {
+    const std::string a350 = "simobjects/airplanes/a350/presets/inibuilds/a350-900_default_cabin_ulr/config";
+    const std::string a380 = "simobjects/airplanes/a380/presets/x/a380-800/config";
+
+    // Startup: the state answers before the first title; the title then goes with it.
+    AircraftIdentity id;
+    CHECK(id.wantState());
+    CHECK(id.onState(a350));
+    CHECK(!id.onTitle("A350-900 ULR"));
+    CHECK_EQ(id.key(), a350);
+    CHECK(!id.wantState());
+
+    // Switched to the A380 (as logged): the title changes, the state still names the A350.
+    CHECK(id.onTitle("A380-800 RR Cabin"));
+    CHECK_EQ(id.key(), std::string("title:A380-800 RR Cabin"));
+    CHECK(id.wantState());
+    CHECK(!id.onState(a350));
+    CHECK(id.stale());
+    CHECK_EQ(id.key(), std::string("title:A380-800 RR Cabin"));
+    // Its path when the sim catches up, or from the event.
+    CHECK(id.onState(a380));
+    CHECK(!id.stale());
+    CHECK_EQ(id.key(), a380);
+
+    // Back to the A350, the event first: the title then goes with it.
+    CHECK(id.onEvent(a350));
+    CHECK_EQ(id.key(), a350);
+    CHECK(!id.onTitle("A350-900 ULR"));
+    CHECK_EQ(id.key(), a350);
+    // A lagging state answer doesn't undo the event.
+    CHECK(!id.onState(a380));
+    CHECK_EQ(id.key(), a350);
+
+    // The title first, then the event.
+    CHECK(id.onTitle("A380-800 RR Cabin"));
+    CHECK(id.onEvent(a380));
+    CHECK_EQ(id.key(), a380);
+    CHECK(!id.onTitle("A380-800 RR Cabin"));
+
+    // Another livery in the same aircraft.cfg (one title per livery): the event says it's the same.
+    CHECK(id.onTitle("A380-800 Other Livery"));
+    CHECK(id.onEvent(a380));
+    CHECK_EQ(id.key(), a380);
+}
+
 TEST(Profile_JsonRoundTrip) {
     ProfileStore store;
     store.upsert("c172").declined = true;

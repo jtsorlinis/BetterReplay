@@ -611,16 +611,17 @@ bool Engine::play(const std::string& file, std::string& error) {
 
 bool Engine::recordedOnThisAircraft(const ClipMeta& meta, std::string& error) const {
     bool same = false;
-    if (!meta.aircraftPath.empty()) {
-        if (aircraftKey_.empty()) {
-            error = "the aircraft isn't identified yet";
-            return false;
-        }
+    if (!meta.aircraftPath.empty() && aircraftKey_.empty()) {
+        error = "the aircraft isn't identified yet";
+        return false;
+    }
+    if (!meta.aircraftPath.empty() && !isTitleKey(meta.aircraftPath) && !isTitleKey(aircraftPath_)) {
         // The exact aircraft.cfg, not its family: variants share a control profile but not clips.
         // Their weights and thrust differ, and the physics fights a replay recorded on another.
         same = meta.aircraftPath == aircraftPath_;
     } else {
-        same = meta.aircraft.empty() || equalsIgnoringCase(meta.aircraft, aircraft_);  // older clips: by title
+        // Older clips, and an aircraft whose path wasn't known then or isn't now: by title.
+        same = meta.aircraft.empty() || equalsIgnoringCase(meta.aircraft, aircraft_);
     }
     if (same) return true;
     error = meta.aircraft.empty() ? "recorded in another aircraft: switch to it to replay this clip"

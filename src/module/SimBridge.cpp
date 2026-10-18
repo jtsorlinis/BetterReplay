@@ -208,6 +208,7 @@ bool SimBridge::open() {
         {EVT_FLIGHT_LOADED, "FlightLoaded"}, {EVT_SIM, "Sim"},         {EVT_SIM_START, "SimStart"},
         {EVT_SIM_STOP, "SimStop"},           {EVT_PAUSE_EX1, "Pause_EX1"}, {EVT_CRASHED, "Crashed"},
         {EVT_CRASH_RESET, "CrashReset"},     {EVT_POSITION_CHANGED, "PositionChanged"},
+        {EVT_AIRCRAFT_LOADED, "AircraftLoaded"},
     };
     for (const auto& e : kSystemEvents) track(SimConnect_SubscribeToSystemEvent(h_, e.id, e.name), e.name);
     track(SimConnect_SubscribeToFlowEvent(h_), "SubscribeToFlowEvent");
@@ -234,29 +235,46 @@ bool SimBridge::open() {
     return true;
 }
 
-// The aircraft.cfg path identifies the aircraft for its control profile. Asked for after every
-// flight load and aircraft change.
+// The aircraft.cfg path identifies the aircraft for its control profile: from the AircraftLoaded
+// event, or failing that the system state, asked for after every flight load and aircraft change.
 void SimBridge::requestAircraftPath() {
-    aircraftPathRequested_ = true;
+    nextPathAskMs_ = utcNowMs() + kPathAskEveryMs;
+    ++pathAsks_;
     track(SimConnect_RequestSystemState(h_, REQ_AIRCRAFT_PATH, "AircraftLoaded"), "RequestSystemState AircraftLoaded");
+}
+
+void SimBridge::checkAircraftPath() {
+    if (!identity_.wantState() || pathAsks_ >= kPathAsks || utcNowMs() < nextPathAskMs_) return;
+    requestAircraftPath();
 }
 
 void SimBridge::onSystemState(const SIMCONNECT_RECV_SYSTEM_STATE* s) {
     if (s->dwRequestID != REQ_AIRCRAFT_PATH) return;
-    aircraftPathRequested_ = false;
-    std::string key;
-    for (const char* p = s->szString; *p && key.size() < 255; ++p) {
-        const char ch = *p == '\\' ? '/' : *p;
-        key.push_back(static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch + 32 : ch));
+    const std::string path(s->szString, strnlen(s->szString, sizeof(s->szString)));
+    const bool changed = identity_.onState(aircraftFolder(path));
+    if (identity_.stale()) {
+        // Another aircraft's path: the sim hasn't caught up (or doesn't, for a streamed aircraft).
+        if (!staleLogged_) {
+            log::info("aircraft path: %s, still the %s's: asking again", path.c_str(), identity_.pathTitle().c_str());
+            staleLogged_ = true;
+        }
+        if (pathAsks_ >= kPathAsks) {
+            log::warn("the sim still gives the %s's path; this aircraft goes by its title", identity_.pathTitle().c_str());
+        }
+        return;
     }
-    const std::string cfg = "/aircraft.cfg";
-    if (key.size() > cfg.size() && key.compare(key.size() - cfg.size(), cfg.size(), cfg) == 0) key.resize(key.size() - cfg.size());
-    if (key.empty()) {
-        if (!lastTitle_[0]) return;  // try again once the title is known
-        key = std::string("title:") + lastTitle_;
-    }
-    log::info("aircraft path: %s", s->szString[0] ? s->szString : "(none; using the title)");
-    engine_.setAircraftKey(key);
+    if (changed) log::info("aircraft path: %s", path.c_str());
+    applyAircraftKey(changed);
+}
+
+void SimBridge::onAircraftLoaded(const char* name, size_t size) {
+    const std::string path(name, strnlen(name, size));
+    log::info("AircraftLoaded event: %s", path.c_str());
+    applyAircraftKey(identity_.onEvent(aircraftFolder(path)));
+}
+
+void SimBridge::applyAircraftKey(bool changed) {
+    if (changed) engine_.setAircraftKey(identity_.key());
 }
 
 void SimBridge::close() {
@@ -374,6 +392,7 @@ void SimBridge::dispatch(SIMCONNECT_RECV* p, DWORD size) {
         }
         case SIMCONNECT_RECV_ID_EVENT_FILENAME: {
             const auto* e = reinterpret_cast<const SIMCONNECT_RECV_EVENT_FILENAME*>(p);
+            if (e->uEventID == EVT_AIRCRAFT_LOADED) onAircraftLoaded(e->szFileName, sizeof(e->szFileName));
             if (e->uEventID == EVT_FLIGHT_LOADED) {
                 log::info("FlightLoaded: %s", e->szFileName);
                 engine_.onFlightLoaded("FlightLoaded event");
@@ -384,6 +403,7 @@ void SimBridge::dispatch(SIMCONNECT_RECV* p, DWORD size) {
                 inputEvents_.clear();
                 inputEventsListed_ = false;
                 enumerateAtFrame_ = frameCount_ + 120;  // list the new aircraft's input events once it's settled
+                pathAsks_ = 0;
                 requestAircraftPath();
                 nextAirportsMs_ = 0;  // the Engine forgot the last flight's airports
                 airportsLogged_ = false;
@@ -602,6 +622,7 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     }
 
     requestAirports();
+    checkAircraftPath();
 
     if (frameCount_++ == 0) {
         const double* r = input_.raw.v;
@@ -2103,7 +2124,12 @@ void SimBridge::onTitleData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size)
     std::memcpy(lastTitle_, s, keep);
     lastTitle_[keep] = '\0';
     engine_.setAircraftTitle(std::string(s, len));
-    if (changed && !aircraftPathRequested_) requestAircraftPath();  // a new aircraft: its profile key
+    if (!changed) return;
+    // A new aircraft: by its title until its path is known.
+    applyAircraftKey(identity_.onTitle(std::string(s, len)));
+    pathAsks_ = 0;
+    staleLogged_ = false;
+    if (identity_.wantState()) requestAircraftPath();
 }
 
 }  // namespace br

@@ -109,6 +109,44 @@ struct ControlProfile {
 // model's own digits, so the PMDG 737-600/-700/-800/-900 are "simobjects/airplanes/pmdg 737" and
 // an A350-900 and -1000 are both "a350". Anything else (a "title:" key) is returned as it is.
 std::string aircraftFamily(const std::string& path);
+bool isTitleKey(const std::string& key);  // "title:<aircraft title>": the aircraft's path isn't known
+
+// The aircraft.cfg folder in a path the sim gives, as Engine::setAircraftKey takes it: lower case,
+// '/' separators, from "simobjects/" on, without the file. The AircraftLoaded event's path is a
+// full one ("...\Content\SimObjects\Airplanes\a350\presets\...\config\aircraft.cfg"), the system
+// state's starts at SimObjects; both come out the same.
+std::string aircraftFolder(const std::string& raw);
+
+// Which aircraft is loaded, from what the sim says about it: its title (polled), the AircraftLoaded
+// event (sent as an aircraft loads, with its path) and the AircraftLoaded system state (asked for).
+// The state lags: after a switch from the A350 to the A380, MSFS 2024 kept answering with the
+// A350's path, and the A380 got the A350's control profile. So a state answer with the path that
+// came with another title is stale and isn't used, and once the event has named the aircraft the
+// state isn't needed. Until a path is trusted the aircraft goes by its title ("title:<title>").
+class AircraftIdentity {
+public:
+    // Each returns true when key() changed. Paths as aircraftFolder() gives them.
+    bool onTitle(const std::string& title);
+    bool onEvent(const std::string& path);
+    bool onState(const std::string& path);
+
+    const std::string& key() const { return key_; }  // for Engine::setAircraftKey; empty until anything is known
+    bool wantState() const { return source_ == Source::None || source_ == Source::Title; }  // no path trusted yet
+    bool stale() const { return stale_; }  // the last state answer was another aircraft's path
+    const std::string& path() const { return path_; }
+    const std::string& pathTitle() const { return pathTitle_; }
+
+private:
+    enum class Source : uint8_t { None, Title, State, Event };
+    bool trust(const std::string& path, Source source);
+
+    std::string title_;
+    std::string path_;       // the last trusted path
+    std::string pathTitle_;  // the title it came with; empty while that title hasn't come yet
+    Source source_ = Source::None;
+    bool stale_ = false;
+    std::string key_;
+};
 
 struct AircraftProfile {
     std::string key;    // identifies the aircraft: aircraftFamily() of its path
