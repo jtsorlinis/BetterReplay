@@ -24,9 +24,14 @@ double maxIgnoringNaN(double a, double b) {
     return a > b ? a : b;
 }
 
+constexpr double kPowerStepSec = 0.25;  // the engine power history's spacing
+
 }  // namespace
 
-EventDetector::EventDetector(const DetectorConfig& config) : cfg_(config) { disarm(0.0, nullptr); }
+EventDetector::EventDetector(const DetectorConfig& config) : cfg_(config) {
+    power_.reset(static_cast<size_t>((cfg_.takeoffMaxPreRollSec + 10.0) / kPowerStepSec) + 8);
+    disarm(0.0, nullptr);
+}
 
 void EventDetector::logf(const char* fmt, ...) {
     if (!log_) return;
@@ -51,6 +56,7 @@ void EventDetector::disarm(double t, const char* reason) {
     airRunStart_ = NAN;
     lastSlowGround_ = NAN;
     gHistory_.clear();
+    power_.clear();
     if (reason) {
         logf("detector disarmed (%s)%s; arming in %.0f s", reason, hadEvent ? ", in-progress event discarded" : "",
              cfg_.armDelaySec);
@@ -58,6 +64,24 @@ void EventDetector::disarm(double t, const char* reason) {
 }
 
 void EventDetector::notifyResumedAfterPause() { pendingContinuityCheck_ = true; }
+
+int EventDetector::finishInProgress(double t, DetectedEvent out[2]) {
+    int n = 0;
+    finishPending(t, out, n);
+    return n;
+}
+
+void EventDetector::finishPending(double t, DetectedEvent* out, int& n) {
+    if (landing_.active) {
+        logf("landing ends here: the recording stops");
+        finishLanding(t, out, n);
+    }
+    if (takeoff_.active && takeoff_.confirmed) {
+        logf("takeoff ends here: the recording stops");
+        finishTakeoff(t, out, n);
+    }
+    takeoff_ = Takeoff();
+}
 
 const char* EventDetector::phase() const {
     if (!armed_) return "disarmed";
@@ -79,6 +103,7 @@ int EventDetector::update(const DetectorSample& s, DetectedEvent out[2]) {
             const double climbed = std::fabs(s.altFt - last_.altFt);
             if (moved > cfg_.continuityMaxDistanceM || climbed > cfg_.continuityMaxAltFt) {
                 logf("aircraft moved %.0f m / %.0f ft while paused", moved, climbed);
+                finishPending(last_.t, out, n);
                 disarm(s.t, "relocated during pause");
             } else if (cfg_.holdOffNewEventsAfterPause && armed_) {
                 holdNewUntil_ = s.t + cfg_.armDelaySec;
@@ -88,6 +113,9 @@ int EventDetector::update(const DetectorSample& s, DetectedEvent out[2]) {
     }
 
     gHistory_.push({s.t, s.gForce});
+    if (std::isfinite(s.enginePower) && (power_.empty() || s.t - power_.back().t >= kPowerStepSec - 1e-9)) {
+        power_.push({s.t, s.enginePower});
+    }
 
     const bool onGround = s.onGround;
     if (!haveTrack_) {
@@ -114,7 +142,7 @@ int EventDetector::update(const DetectorSample& s, DetectedEvent out[2]) {
     }
 
     if (wasOnGround && !onGround) {
-        onLiftoff(s, out, n);
+        onLiftoff(s);
     } else if (!wasOnGround && onGround) {
         onTouchdown(s, out, n);
     }
@@ -130,29 +158,86 @@ int EventDetector::update(const DetectorSample& s, DetectedEvent out[2]) {
     return n;
 }
 
-void EventDetector::onLiftoff(const DetectorSample& s, DetectedEvent* out, int& n) {
+void EventDetector::onLiftoff(const DetectorSample& s) {
+    // A bounce, unless it stays airborne for landingGoAroundSec (airborneTick).
     if (landing_.active) {
-        if (landing_.confirmed) {
-            logf("landing: airborne again");
-            finishLanding(s.t, out, n);
-        } else {
-            landing_.bouncing = true;
-            landing_.vsRead = true;  // keep the first touchdown's rate, not a later bounce's
-            landing_.bounceLiftoffT = s.t;
-            logf("landing: bounced, airborne %.1f s after touchdown", s.t - landing_.touchdownT);
-        }
+        landing_.bouncing = true;
+        landing_.vsRead = true;  // keep the first touchdown's rate, not a later bounce's
+        landing_.bounceLiftoffT = s.t;
+        logf("landing: airborne again %.1f s after touchdown", s.t - landing_.touchdownT);
     }
 
     if (!takeoff_.active && !newEventsHeld(s.t)) {
-        double start = std::isnan(groundRunStart_) ? s.t : groundRunStart_;
-        if (!std::isnan(lastSlowGround_) && lastSlowGround_ > start) start = lastSlowGround_;
-        start = std::max(start, s.t - cfg_.takeoffMaxPreRollSec);
+        const double ground = std::isnan(groundRunStart_) ? s.t : groundRunStart_;
+        const double earliest = s.t - cfg_.takeoffMaxPreRollSec;
+        const double spool = spoolUpStart(std::max(earliest + cfg_.takeoffPreSpoolSec, ground), s.t);
+        double start = spool - cfg_.takeoffPreSpoolSec;
+        if (std::isnan(spool)) {
+            // No engine readings to go by: from the last moment below takeoffSlowGroundSpeedKt.
+            start = ground;
+            if (!std::isnan(lastSlowGround_) && lastSlowGround_ > start) start = lastSlowGround_;
+        }
+        start = std::max(start, earliest);
         takeoff_ = Takeoff();
         takeoff_.active = true;
         takeoff_.liftoffT = s.t;
         takeoff_.startT = start;
-        if (!landing_.active) logf("liftoff: takeoff candidate (roll began %.1f s earlier)", s.t - start);
+        if (landing_.active) return;
+        if (std::isnan(spool)) {
+            logf("liftoff: takeoff candidate (no engine readings; roll began %.1f s earlier)", s.t - start);
+        } else {
+            logf("liftoff: takeoff candidate (engines spooled up %.1f s earlier)", s.t - spool);
+        }
     }
+}
+
+double EventDetector::spoolUpStart(double from, double to) const {
+    const auto time = [](const PowerSample& p) { return p.t; };
+    const size_t first = lowerBoundBy(power_, from, time);
+    const size_t end = std::min(lowerBoundBy(power_, to + 1e-6, time), power_.size());
+    if (end < first + 4) return NAN;
+    double top = -INFINITY;
+    for (size_t i = first; i < end; ++i) top = std::max(top, power_.at(i).p);
+    if (!(top > 0.0)) return NAN;
+
+    // Idle: the lowest the engines held steady, running (not shut down or starting) and well
+    // below takeoff power (not a hold at it on the brakes). A short hold on the way up (40% N1 to
+    // let the engines stabilise) is above idle, so it's part of the spool-up.
+    const double band = cfg_.takeoffIdleBand * top;
+    const double running = 0.1 * top;
+    double idle = INFINITY;
+    for (size_t i = first; i < end; ++i) {
+        double lo = power_.at(i).p;
+        double hi = lo;
+        for (size_t j = i + 1; j < end; ++j) {
+            lo = std::min(lo, power_.at(j).p);
+            hi = std::max(hi, power_.at(j).p);
+            if (hi - lo > band) break;
+            if (power_.at(j).t - power_.at(i).t >= cfg_.takeoffIdleSteadySec) {
+                if (lo >= running && hi <= 0.8 * top) idle = std::min(idle, hi);
+                break;
+            }
+        }
+    }
+    if (std::isinf(idle)) {  // never steady: the lowest it ran at
+        for (size_t i = first; i < end; ++i) {
+            if (power_.at(i).p >= running) idle = std::min(idle, power_.at(i).p);
+        }
+    }
+    if (std::isinf(idle) || top - idle < 0.1 * top) return NAN;  // no spool-up in here
+    for (size_t i = end; i-- > first;) {
+        if (power_.at(i).p <= idle + band) return power_.at(i).t;
+    }
+    return NAN;
+}
+
+double EventDetector::peakGAround(const DetectorSample& s) const {
+    double peak = s.gForce;
+    for (size_t i = 0; i < gHistory_.size(); ++i) {
+        const GSample& g = gHistory_.at(i);
+        if (g.t >= s.t - cfg_.peakGWindowBeforeTouchdownSec) peak = maxIgnoringNaN(peak, g.g);
+    }
+    return peak;
 }
 
 void EventDetector::onTouchdown(const DetectorSample& s, DetectedEvent* out, int& n) {
@@ -169,7 +254,7 @@ void EventDetector::onTouchdown(const DetectorSample& s, DetectedEvent* out, int
     if (landing_.active && landing_.bouncing) {
         landing_.bouncing = false;
         ++landing_.bounces;
-        landing_.peakG = maxIgnoringNaN(landing_.peakG, s.gForce);
+        landing_.peakG = maxIgnoringNaN(landing_.peakG, peakGAround(s));
         logf("landing: touchdown again (bounce %u)", static_cast<unsigned>(landing_.bounces));
         return;
     }
@@ -184,45 +269,31 @@ void EventDetector::onTouchdown(const DetectorSample& s, DetectedEvent* out, int
         landing_.active = true;
         landing_.touchdownT = s.t;
         landing_.touchdownVsFpm = last_.verticalSpeedFpm;  // fallback if the touchdown simvar is missing
-        double peak = s.gForce;
-        for (size_t i = 0; i < gHistory_.size(); ++i) {
-            const GSample& g = gHistory_.at(i);
-            if (g.t >= s.t - cfg_.peakGWindowBeforeTouchdownSec) peak = maxIgnoringNaN(peak, g.g);
-        }
-        landing_.peakG = peak;
+        landing_.peakG = peakGAround(s);
         logf("touchdown: landing candidate (VS %.0f fpm, GS %.0f kt)", last_.verticalSpeedFpm, s.groundSpeedKt);
     }
 }
 
 void EventDetector::airborneTick(const DetectorSample& s, DetectedEvent* out, int& n) {
-    if (landing_.active) {  // only possible while bouncing
-        landing_.peakG = maxIgnoringNaN(landing_.peakG, s.gForce);
-        if (s.t - landing_.bounceLiftoffT > cfg_.landingMaxBounceAirborneSec) {
-            logf("landing candidate dropped: airborne %.0f s after touching down", s.t - landing_.bounceLiftoffT);
-            landing_ = Landing();
-        }
+    if (landing_.active && s.t - landing_.bounceLiftoffT > cfg_.landingGoAroundSec) {  // only while bouncing
+        logf("landing: airborne again for %.0f s", cfg_.landingGoAroundSec);
+        finishLanding(s.t, out, n);
     }
 
-    if (!takeoff_.active) return;
+    // Until then the liftoff may still be a bounce, so a takeoff from it waits.
+    if (!takeoff_.active || landing_.active) return;
     const double sinceLiftoff = s.t - takeoff_.liftoffT;
     if (!takeoff_.confirmed) {
         if (sinceLiftoff >= cfg_.takeoffMinAirborneSec && s.aglFt > cfg_.takeoffMinAglFt) {
             takeoff_.confirmed = true;
             logf("takeoff confirmed (%.1f s airborne, AGL %.0f ft)", sinceLiftoff, s.aglFt);
-            if (landing_.active) {
-                logf("landing candidate dropped: climbed away before %.0f s on the ground", cfg_.landingMinGroundSec);
-                landing_ = Landing();
-            }
-        } else if (sinceLiftoff >= cfg_.takeoffMaxAfterLiftoffSec) {
+        } else if (sinceLiftoff >= cfg_.takeoffAfterLiftoffSec) {
             logf("takeoff candidate dropped: still below %.0f ft AGL after %.0f s", cfg_.takeoffMinAglFt, sinceLiftoff);
             takeoff_ = Takeoff();
             return;
         }
     }
-    if (takeoff_.confirmed &&
-        (s.aglFt >= cfg_.takeoffEndAglFt || sinceLiftoff >= cfg_.takeoffMaxAfterLiftoffSec)) {
-        finishTakeoff(s.t, out, n);
-    }
+    if (takeoff_.confirmed && sinceLiftoff >= cfg_.takeoffAfterLiftoffSec) finishTakeoff(s.t, out, n);
 }
 
 void EventDetector::groundTick(const DetectorSample& s, DetectedEvent* out, int& n) {
@@ -242,8 +313,17 @@ void EventDetector::groundTick(const DetectorSample& s, DetectedEvent* out, int&
         logf("landing confirmed (%.1f s on the ground, %u bounce(s))", s.t - groundRunStart_,
              static_cast<unsigned>(landing_.bounces));
     }
-    if (landing_.confirmed &&
-        (s.groundSpeedKt < cfg_.landingEndGroundSpeedKt || sinceTouchdown >= cfg_.landingMaxAfterTouchdownSec)) {
+    if (s.onRunway) landing_.runwaySeen = true;
+    const char* end = nullptr;
+    if (s.groundSpeedKt < cfg_.landingStopGroundSpeedKt) {
+        end = "stopped";
+    } else if (landing_.runwaySeen && !s.onRunway && s.flapsRetracted && s.spoilersRetracted) {
+        end = "off the runway with the flaps and spoilers retracted";
+    } else if (sinceTouchdown >= cfg_.landingMaxAfterTouchdownSec) {
+        end = "still rolling at the time limit";
+    }
+    if (end) {
+        logf("landing: %s", end);
         finishLanding(s.t, out, n);
     }
 }

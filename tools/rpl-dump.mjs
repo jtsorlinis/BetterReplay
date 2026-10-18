@@ -39,7 +39,7 @@ while (pos + 8 <= buf.length) {
   const p = pos + 8;
   if (p + size > buf.length) fail(`truncated ${id} chunk`);
   if (id === 'META') {
-    const aircraft = readStr(p + 32)[0];
+    const [aircraft, afterAircraft] = readStr(p + 32);
     meta = {
       event: EVENTS[view.getUint8(p)] || view.getUint8(p),
       bounces: view.getUint16(p + 2, true),
@@ -50,6 +50,7 @@ while (pos + 8 <= buf.length) {
       touchdownVsFpm: view.getFloat32(p + 24, true),
       peakG: view.getFloat32(p + 28, true),
       aircraft,
+      aircraftPath: afterAircraft + 2 <= p + size ? readStr(afterAircraft)[0] : '',
     };
   } else if (id === 'CHAN') {
     const count = view.getUint16(p, true);

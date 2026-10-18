@@ -1142,6 +1142,43 @@ TEST(Setup_TrackerIgnoresTimersAndChangesBeforeTheMovement) {
 
 // ---------------------------------------------------------------------------- profiles
 
+TEST(Profile_VariantsShareOneKey) {
+    const std::string pmdg = "simobjects/airplanes/pmdg 737";
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/pmdg 737-800/presets/pmdg/pmdg 737-800 bw tc/config"), pmdg);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/pmdg 737-800/presets/pmdg/pmdg 737-800 ssw/config"), pmdg);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/pmdg 737-600/presets/pmdg/pmdg 737-600/config"), pmdg);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/pmdg 737-700/presets/pmdg/pmdg 737-700 bbj/config"), pmdg);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/pmdg 737-900er/presets/pmdg/pmdg 737-900er/config"), pmdg);
+    CHECK_EQ(aircraftFamily(pmdg), pmdg);
+    const std::string a350 = "simobjects/airplanes/a350";
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/a350/presets/inibuilds/a350-900_default_cabin/config"), a350);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/a350/presets/inibuilds/a350-900ulr/config"), a350);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/a350-1000/presets/inibuilds/a350-1000/config"), a350);
+    // Different aircraft stay apart; a dash that isn't a variant number stays.
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/microsoft-a320neo/presets/inibuilds/a20n/config"),
+             std::string("simobjects/airplanes/microsoft-a320neo"));
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/asobo_pc-12/presets/asobo/pc12/config"),
+             std::string("simobjects/airplanes/asobo_pc-12"));
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/an-225/presets/x/config"), std::string("simobjects/airplanes/an-225"));
+    CHECK_EQ(aircraftFamily("title:Some Jet"), std::string("title:Some Jet"));
+    CHECK_EQ(aircraftFamily("c:/sim/simobjects/airplanes/pmdg 737-800/config"), "c:/sim/" + pmdg);
+
+    // Profiles kept per variant before: one per family, the most recently updated.
+    ProfileStore store;
+    store.upsert("simobjects/airplanes/pmdg 737-800/presets/pmdg/pmdg 737-800 bw tc/config").updatedUtcMs = 2;
+    store.upsert("simobjects/airplanes/pmdg 737-700/presets/pmdg/pmdg 737-700/config").updatedUtcMs = 5;
+    store.upsert("simobjects/airplanes/asobo_cj4/presets/asobo/cj4/config").updatedUtcMs = 1;
+    store.upsert("simobjects/airplanes/a350").updatedUtcMs = 3;
+    CHECK_EQ(store.groupVariants(), 4u);  // three re-keyed, one -700/-800 pair merged
+    REQUIRE(store.size() == 3);
+    const AircraftProfile* p = store.find(pmdg);
+    REQUIRE(p != nullptr);
+    CHECK_EQ(p->updatedUtcMs, static_cast<int64_t>(5));
+    CHECK(store.find("simobjects/airplanes/asobo_cj4") != nullptr);
+    CHECK(store.find(a350) != nullptr);
+    CHECK_EQ(store.groupVariants(), 0u);
+}
+
 TEST(Profile_JsonRoundTrip) {
     ProfileStore store;
     store.upsert("c172").declined = true;

@@ -14,21 +14,31 @@ namespace br {
 struct DetectorConfig {
     double armDelaySec = 10.0;  // after flight load, teleport, slew, crash
 
-    // Takeoff
+    // Takeoff: from takeoffPreSpoolSec before the engines start spooling up for it until
+    // takeoffAfterLiftoffSec after liftoff (or back on the ground, if that's sooner).
     double takeoffMinAirborneSec = 5.0;
     double takeoffMinAglFt = 50.0;
-    double takeoffSlowGroundSpeedKt = 10.0;  // clip starts at the last moment below this
-    double takeoffEndAglFt = 1000.0;
-    double takeoffMaxAfterLiftoffSec = 60.0;
-    double takeoffMaxPreRollSec = 180.0;  // never start a takeoff clip earlier than this before liftoff
+    double takeoffPreSpoolSec = 5.0;
+    double takeoffAfterLiftoffSec = 120.0;  // a takeoff not confirmed by then is dropped
+    double takeoffMaxPreRollSec = 175.0;    // never start a takeoff clip earlier than this before liftoff
+                                            // (keeps it inside the 5-minute buffer)
+    // The spool-up: the engines' idle is the lowest power (DetectorSample::enginePower) they held
+    // steady for takeoffIdleSteadySec, within takeoffIdleBand of takeoff power (the most before
+    // liftoff). They start spooling up the last time before liftoff they were that close to idle.
+    double takeoffIdleSteadySec = 5.0;
+    double takeoffIdleBand = 0.03;
+    // Without engine readings the clip starts at the last moment on the ground below this.
+    double takeoffSlowGroundSpeedKt = 10.0;
 
-    // Landing
+    // Landing: from landingPreRollSec before the first touchdown until a full stop, off the runway
+    // with the flaps and spoilers retracted, or airborne again for landingGoAroundSec (a shorter
+    // time in the air is a bounce).
     double landingMinAirborneSec = 5.0;  // a touchdown after a shorter hop isn't a landing
-    double landingMinGroundSec = 3.0;
+    double landingMinGroundSec = 3.0;    // then "landing-rollout" (status only)
     double landingPreRollSec = 120.0;
-    double landingEndGroundSpeedKt = 30.0;
+    double landingStopGroundSpeedKt = 1.0;
+    double landingGoAroundSec = 15.0;
     double landingMaxAfterTouchdownSec = 170.0;  // keeps pre-roll + rollout inside the 5-minute buffer
-    double landingMaxBounceAirborneSec = 60.0;   // longer than this airborne = not a bounce any more
     double touchdownVsReadDelaySec = 0.25;       // when to read PLANE TOUCHDOWN NORMAL VELOCITY
     double peakGWindowBeforeTouchdownSec = 1.0;
 
@@ -53,6 +63,12 @@ struct DetectorSample {
     double lonDeg = 0.0;
     double altFt = 0.0;
     double touchdownNormalVelFps = NAN;  // PLANE TOUCHDOWN NORMAL VELOCITY, NaN if unavailable
+    // The engines' power, to find the takeoff's spool-up: the highest N1 (%), RPM on pistons.
+    // NaN without readings (the takeoff then starts at the last moment below 10 kt).
+    double enginePower = NAN;
+    bool onRunway = false;  // ON ANY RUNWAY
+    bool flapsRetracted = true;
+    bool spoilersRetracted = true;
 };
 
 struct DetectedEvent {
@@ -84,6 +100,12 @@ public:
     // Recording resumed after a pause; the next sample is checked for a position jump.
     void notifyResumedAfterPause();
 
+    // The flight is ending or the aircraft is about to be moved (main menu, flight load, slew,
+    // teleport): a landing in progress and a confirmed takeoff end at `t`, the last recorded
+    // moment, rather than being lost. Writes them to `out` and returns how many. Call before
+    // disarm().
+    int finishInProgress(double t, DetectedEvent out[2]);
+
     // Feeds one sample. Writes up to two finished events to `out` and returns how many.
     int update(const DetectorSample& s, DetectedEvent out[2]);
 
@@ -103,6 +125,7 @@ private:
         bool confirmed = false;
         bool bouncing = false;  // airborne again after touchdown, not yet back on the ground
         bool vsRead = false;
+        bool runwaySeen = false;  // on a runway since touching down (so it can leave it)
         double touchdownT = 0.0;
         double bounceLiftoffT = 0.0;
         double touchdownVsFpm = NAN;
@@ -113,8 +136,17 @@ private:
         double t;
         double g;
     };
+    struct PowerSample {
+        double t;
+        double p;
+    };
 
-    void onLiftoff(const DetectorSample& s, DetectedEvent* out, int& n);
+    void onLiftoff(const DetectorSample& s);
+    // When the engines started spooling up for a takeoff, from the power history in [from, to];
+    // NaN if it can't tell (no readings, or no rise from idle in there).
+    double spoolUpStart(double from, double to) const;
+    double peakGAround(const DetectorSample& s) const;  // G at a touchdown and the second before
+    void finishPending(double t, DetectedEvent* out, int& n);
     void onTouchdown(const DetectorSample& s, DetectedEvent* out, int& n);
     void airborneTick(const DetectorSample& s, DetectedEvent* out, int& n);
     void groundTick(const DetectorSample& s, DetectedEvent* out, int& n);
@@ -140,6 +172,7 @@ private:
     double lastSlowGround_ = NAN;  // last time on the ground below takeoffSlowGroundSpeedKt
     DetectorSample last_;
     RingBuffer<GSample> gHistory_{64};
+    RingBuffer<PowerSample> power_;  // enginePower every 0.25 s, back to takeoffMaxPreRollSec
 
     Takeoff takeoff_;
     Landing landing_;

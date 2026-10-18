@@ -275,6 +275,61 @@ void controlChannels(Control c, ChannelMask& out) {
 
 // ---------------------------------------------------------------------------- store
 
+namespace {
+
+bool isDigit(char c) { return c >= '0' && c <= '9'; }
+
+// "pmdg 737-800" -> "pmdg 737", "a350-1000" -> "a350", "pmdg 737-900er" -> "pmdg 737". Not
+// "pc-12" or "an-225": the dash has to follow the model's digits.
+std::string withoutVariant(const std::string& folder) {
+    for (size_t i = 1; i < folder.size(); ++i) {
+        if (folder[i] != '-' || !isDigit(folder[i - 1])) continue;
+        size_t j = i + 1;
+        while (j < folder.size() && isDigit(folder[j])) ++j;
+        const size_t digits = j - (i + 1);
+        if (digits == 3 || digits == 4) return folder.substr(0, i);
+    }
+    return folder;
+}
+
+}  // namespace
+
+std::string aircraftFamily(const std::string& path) {
+    const std::string root = "simobjects/";
+    size_t at = path.compare(0, root.size(), root) == 0 ? 0 : path.find("/" + root);
+    if (at == std::string::npos) return path;
+    if (path[at] == '/') ++at;
+    const size_t category = path.find('/', at + root.size());  // airplanes/, rotorcraft/...
+    if (category == std::string::npos) return path;
+    const size_t folderEnd = path.find('/', category + 1);
+    const std::string folder = path.substr(category + 1, folderEnd == std::string::npos ? std::string::npos
+                                                                                         : folderEnd - category - 1);
+    if (folder.empty()) return path;
+    return path.substr(0, category + 1) + withoutVariant(folder);
+}
+
+size_t ProfileStore::groupVariants() {
+    size_t changed = 0;
+    std::vector<AircraftProfile> grouped;
+    for (AircraftProfile& p : profiles_) {
+        const std::string family = aircraftFamily(p.key);
+        if (family != p.key) {
+            p.key = family;
+            ++changed;
+        }
+        auto same = std::find_if(grouped.begin(), grouped.end(),
+                                 [&](const AircraftProfile& g) { return g.key == family; });
+        if (same == grouped.end()) {
+            grouped.push_back(std::move(p));
+        } else {
+            ++changed;
+            if (p.updatedUtcMs > same->updatedUtcMs) *same = std::move(p);
+        }
+    }
+    profiles_.swap(grouped);
+    return changed;
+}
+
 const AircraftProfile* ProfileStore::find(const std::string& key) const {
     for (const AircraftProfile& p : profiles_) {
         if (p.key == key) return &p;

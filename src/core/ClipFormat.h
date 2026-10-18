@@ -4,7 +4,7 @@
 //   chunk*: char[4] id, u32 payloadSize, payload     (unknown chunks are skipped)
 //
 //   META  u8 event, u8 reserved, u16 bounces, i64 utcStartMs, f32 sampleRateHz, u32 frames,
-//         f32 eventOffsetSec, f32 touchdownVsFpm, f32 peakG, str aircraft
+//         f32 eventOffsetSec, f32 touchdownVsFpm, f32 peakG, str aircraft, str aircraftPath
 //         (new fields are appended; readers stop at the payload size)
 //   CHAN  u16 count, count x { u8 storage, u8 interp, u8 bytes, str key }
 //   SAMP  u32 frames, u32 stride, frames x { f32 t, channel values in CHAN order }

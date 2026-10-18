@@ -41,6 +41,7 @@ const commBusMock = `
       bounces: ev === 'landing' ? i % 3 : 0, auto: ev !== 'manual' });
   }
   const state = { rev: 1, rec: true, why: '', armed: false, armIn: 6, phase: 'disarmed', buffer: 0,
+    aircraft: 'Airbus A320neo',
     play: { active: false, file: '', t: 0, dur: 0, speed: 1, playing: false, eventT: 0 } };
   const listeners = {};
   // prepareSec: Play first holds that long, "lowering the gear"; fail: { op: 'error' } fails the
@@ -68,7 +69,7 @@ const commBusMock = `
   function status() {
     return { v: 1, rec: state.rec && !state.play.active, why: state.play.active ? 'playback' : state.why,
       armed: state.armed, armIn: state.armIn, phase: state.phase, bufferSec: state.buffer, bufferMax: 300,
-      aircraft: 'Airbus A320neo', clipsRev: state.rev, clipCount: clips.length, lastSaved: '', error: '',
+      aircraft: state.aircraft, clipsRev: state.rev, clipCount: clips.length, lastSaved: '', error: '',
       play: Object.assign({}, state.play), setup: window.harnessSetup.status() };
   }
   function reply(id, op, ok, error) { emit('BetterReplay.Reply', { id: id, op: op, ok: ok, error: error || '' }); }
@@ -95,6 +96,10 @@ const commBusMock = `
       case 'delete': { const i = find(cmd.file); if (i < 0) return reply(cmd.id, cmd.op, false, 'unknown clip');
         clips.splice(i, 1); state.rev++; if (state.play.file === cmd.file) state.play.active = false; return reply(cmd.id, cmd.op, true); }
       case 'play': { const i = find(cmd.file); if (i < 0) return reply(cmd.id, cmd.op, false, 'unknown clip');
+        // Like Engine::play: only on the aircraft the clip was recorded on (harness.state.aircraft).
+        if (clips[i].aircraft !== state.aircraft) {
+          return reply(cmd.id, cmd.op, false, 'recorded in the ' + clips[i].aircraft + ': switch to that aircraft to replay it');
+        }
         Object.assign(state.play, { active: true, file: cmd.file, t: 0, dur: clips[i].durationSec, playing: true,
           eventT: clips[i].event === 'landing' ? 120 : 0, preparing: window.harness.prepareSec > 0,
           prepareLeft: window.harness.prepareSec }); return reply(cmd.id, cmd.op, true); }

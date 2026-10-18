@@ -25,6 +25,9 @@ struct ClipMeta {
     float peakG = NAN;            // landings only
     uint16_t bounces = 0;
     std::string aircraft;
+    // The aircraft's identity as Engine::setAircraftKey got it (its aircraft.cfg folder). Empty
+    // in clips from before it was recorded: those are matched by `aircraft` (the title).
+    std::string aircraftPath;
     // Channel key -> the aircraft variable it recorded, for input event and L:var channels
     // (their names depend on the aircraft and its control profile).
     std::vector<std::pair<std::string, std::string>> vars;

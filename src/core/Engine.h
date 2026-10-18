@@ -100,9 +100,11 @@ public:
     void setSimReplayActive(bool active);  // the sim's own replay / cinematics
     void setRelocating(bool relocating);   // teleport / skip / back-on-track in progress
     void setAircraftTitle(const std::string& title);
-    // Identifies the aircraft for its control profile (the module uses its aircraft.cfg path).
-    void setAircraftKey(const std::string& key);
-    const std::string& aircraftKey() const { return aircraftKey_; }
+    // Identifies the aircraft (the module passes its aircraft.cfg folder). Clips record it, and only
+    // replay on the same aircraft or a variant of it; the control profile is kept under its
+    // aircraftFamily(), so the variants share one.
+    void setAircraftKey(const std::string& path);
+    const std::string& aircraftKey() const { return aircraftKey_; }  // the family
     const AircraftProfile* currentProfile() const;
     // The aircraft variable an input event / L:var channel records from now on ("" = none);
     // saved clips list them.
@@ -160,6 +162,12 @@ private:
     const char* computeSuspendReason(bool slewActive) const;
     bool restoringAircraft() const { return settleFrames_ > 0 || (out_ && out_->restoring()); }
     void recordFrame(const FrameInput& in, int64_t utcNowMs);
+    // The flight ends or the aircraft is moved: a landing or takeoff in progress is saved up to
+    // the last recorded moment rather than lost.
+    void finishEvents();
+    // A clip replays only on the aircraft it was recorded on or a variant of it (aircraftFamily);
+    // otherwise `error` asks to switch to it.
+    bool recordedOnThisAircraft(const ClipMeta& meta, std::string& error) const;
     void playbackFrame(double dt);
     void endPlayback(bool restore, const char* why);
     bool saveRange(EventType type, double startT, double endT, const DetectedEvent* ev, int64_t utcNowMs,
@@ -193,7 +201,8 @@ private:
     bool relocating_ = false;
     bool slewActive_ = false;
     std::string aircraft_;
-    std::string aircraftKey_;
+    std::string aircraftPath_;
+    std::string aircraftKey_;  // aircraftFamily(aircraftPath_)
     SetupFacts facts_;
     int64_t lastUtcMs_ = 0;
 
@@ -220,6 +229,7 @@ private:
 
     // recording clock
     double recTime_ = 0.0;
+    int64_t recUtcMs_ = 0;  // wall time at recTime_
     double nextSampleT_ = 0.0;
     double prevSimTime_ = NAN;
     const char* suspendReason_ = "waiting for sim";

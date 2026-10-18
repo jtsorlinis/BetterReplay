@@ -35,6 +35,7 @@ ClipMeta makeMeta() {
     m.touchdownVsFpm = -142.5f;
     m.peakG = 1.31f;
     m.bounces = 2;
+    m.aircraftPath = "simobjects/airplanes/asobo_c172sp_as1000/presets/asobo/c172sp/config";
     m.aircraft = "Cessna 172 Skyhawk \xC3\xA9";
     return m;
 }
@@ -72,6 +73,7 @@ TEST(ClipFormat_RoundTripPreservesMetaAndSamples) {
     CHECK_NEAR(clip.meta.peakG, 1.31, 1e-6);
     CHECK_EQ(clip.meta.bounces, 2);
     CHECK_EQ(clip.meta.aircraft, makeMeta().aircraft);
+    CHECK_EQ(clip.meta.aircraftPath, makeMeta().aircraftPath);
     CHECK_EQ(clip.present.count(), static_cast<size_t>(kChannelCount));
 
     REQUIRE(clip.frames.size() == frames.size());
@@ -107,6 +109,32 @@ TEST(ClipFormat_ReadMetaOnly) {
     REQUIRE(readClipMeta(bytes.data(), bytes.size(), meta, nullptr));
     CHECK_EQ(meta.frames, 10u);
     CHECK_EQ(meta.aircraft, makeMeta().aircraft);
+    CHECK_EQ(meta.aircraftPath, makeMeta().aircraftPath);
+}
+
+TEST(ClipFormat_OlderClipsHaveNoAircraftPath) {
+    // META as written before the path was added: it ends with the title.
+    std::vector<uint8_t> bytes;
+    ByteWriter w(bytes);
+    w.bytes("BRPL", 4);
+    w.u16(kClipFormatVersion);
+    w.u16(0);
+    const size_t c = w.beginChunk("META");
+    w.u8(2);
+    w.u8(0);
+    w.u16(0);
+    w.i64(5);
+    w.f32(30.0f);
+    w.u32(0);
+    w.f32(0);
+    w.f32(NAN);
+    w.f32(NAN);
+    w.str("Old Jet");
+    w.endChunk(c);
+    ClipMeta meta;
+    REQUIRE(readClipMeta(bytes.data(), bytes.size(), meta, nullptr));
+    CHECK_EQ(meta.aircraft, std::string("Old Jet"));
+    CHECK(meta.aircraftPath.empty());
 }
 
 TEST(ClipFormat_SkipsUnknownChunks) {
@@ -139,6 +167,7 @@ TEST(ClipFormat_UnknownAndMissingChannelsMapByKey) {
     w.f32(NAN);
     w.f32(NAN);
     w.str("Future Jet");
+    w.str("simobjects/airplanes/future jet");
     w.f32(99.0f);  // a field appended by a future version: must be ignored
     w.endChunk(c);
     c = w.beginChunk("CHAN");
@@ -171,6 +200,7 @@ TEST(ClipFormat_UnknownAndMissingChannelsMapByKey) {
     std::string err;
     REQUIRE(readClip(bytes.data(), bytes.size(), clip, &err));
     CHECK_EQ(clip.meta.aircraft, std::string("Future Jet"));
+    CHECK_EQ(clip.meta.aircraftPath, std::string("simobjects/airplanes/future jet"));
     CHECK_EQ(clip.present.count(), 2u);
     CHECK(clip.present.test(kAlt));
     CHECK(clip.present.test(kGroundSpeed));

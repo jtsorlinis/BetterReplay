@@ -54,7 +54,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   - AGL is about 0
   - on ground = 1
 - [ ] About 2 s after the flight loads: `input event channels: recording ie_thr_1=ENGINE_THROTTLE_1, ie_gear=LANDING_GEAR_GEAR…; not on this aircraft: …`. That says which of the aircraft's own controls get recorded, and from which input event.
-- [ ] `aircraft path: …`, then `aircraft key …: no control profile yet` (or the profile's summary). Note the path: control profiles are stored under it.
+- [ ] `aircraft path: …`, then `aircraft key …: no control profile yet` (or the profile's summary). Note the path and the key: control profiles are stored under the key, which variants share (`…/pmdg 737` for every PMDG 737, `…/a350` for the A350-900, -900ULR and -1000).
 - [ ] **No clip is created by the spawn**: no `saved` line.
 - [ ] After a minute: `status: recording, phase ground, buffer 60 s, …` (the heartbeat repeats every 60 s).
 
@@ -69,43 +69,49 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 
 ## 4. Takeoff
 
-- [ ] Taxi to the runway, stop briefly, then take off normally and climb past 1,000 ft AGL. **Expect:**
+- [ ] Taxi to the runway, stop briefly, then take off normally and keep climbing for 2 minutes. **Expect:**
   ```
-  detector: liftoff: takeoff candidate (roll began N s earlier)
+  detector: liftoff: takeoff candidate (engines spooled up N s earlier)
   detector: takeoff confirmed (5.0 s airborne, AGL N ft)
   detector: takeoff finished: N s clip (liftoff at +N s)
   saved YYYY-MM-DD_HHMM_takeoff.rpl: N s, N frames, N KB
   ```
 - [ ] Under **Saved clips**, a green **Takeoff** tag and the local date/time, with the aircraft and duration.
 - [ ] Check the clip: `node tools\rpl-dump.mjs "<work folder>\<file>.rpl"`.
-  - It starts with ground speed under 10 kt.
+  - It starts with the engines at idle (`n1_1`), 5 s before they spool up for the takeoff, not at the engine start or a taxi bump.
   - `ongnd` goes 1 → 0 at the liftoff offset.
-  - It ends near 1,000 ft AGL or 60 s after liftoff.
+  - It ends 120 s after liftoff.
 
 ## 5. Landing
 
-- [ ] Fly a pattern and make a normal landing, then roll out below 30 kt. **Expect:**
+- [ ] Fly a pattern and make a normal landing, then vacate the runway with the flaps out. **Expect:**
   ```
   detector: touchdown: landing candidate (VS -N fpm, GS N kt)
   detector: landing confirmed (3.0 s on the ground, 0 bounce(s))
+  ```
+  and nothing more until you retract the spoilers and flaps (or stop), then:
+  ```
+  detector: landing: off the runway with the flaps and spoilers retracted
   detector: landing finished: N s clip, VS -N fpm, peak N.NN G, 0 bounce(s)
   saved YYYY-MM-DD_HHMM_landing.rpl: …
   ```
-- [ ] Under **Saved clips**, a blue **Landing** tag, with VS, G and duration (about 120 s plus the rollout).
+- [ ] Under **Saved clips**, a blue **Landing** tag, with VS, G and duration (120 s plus the rollout and taxi off).
+- [ ] Land again and come to a stop on the runway: `landing: stopped`.
+- [ ] Land, and before the landing clip is saved, go back to the main menu: the landing is saved up to that moment (`landing ends here: the recording stops`).
 - [ ] **Compare the VS with another source** (a landing-rate tool, or the sim's own). The clip uses `PLANE TOUCHDOWN NORMAL VELOCITY`; note its sign and magnitude.
 
 ## 6. Bounce
 
 - [ ] Make a firm landing that bounces, then settle and roll out.
-  - **Expect** `landing: bounced, airborne N s after touchdown` and `touchdown again (bounce 1)`.
+  - **Expect** `landing: airborne again N s after touchdown` and `touchdown again (bounce 1)`.
   - Exactly **one** landing clip, with `1 bounce`.
   - The VS is from the first touchdown.
 
 ## 7. Touch-and-go
 
-- [ ] Land, stay on the ground for more than 3 s above 30 kt, then take off again.
-  - **Expect** `landing: airborne again`, then a landing clip.
-  - Then a takeoff clip that starts at the touchdown.
+- [ ] Land, stay on the ground for a few seconds without stopping, then take off again.
+  - **Expect** `landing: airborne again N s after touchdown`, then 15 s later `landing: airborne again for 15 s` and a landing clip that ends there.
+  - Then, 2 minutes after the liftoff, a takeoff clip that starts 5 s before the engines spooled up again on the runway.
 
 ## 8. Pause mid-landing
 
@@ -115,7 +121,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 - [ ] Repeat, pausing right after touchdown. The landing is saved, and its duration doesn't include the pause.
 - [ ] *(Optional)* Pause and move the aircraft from the pause/map menu if possible, then unpause.
   - **Expect** `detector: aircraft moved N m / N ft while paused` and `detector disarmed (relocated during pause)`.
-  - No false clip.
+  - No false clip. If you'd touched down before pausing, the landing is saved up to the pause.
 - [ ] Note which pause flags appeared. `0x1` = full pause, `0x4` = active pause, `0x8` = sim pause.
 
 ## 9. Slew, spawns, menus

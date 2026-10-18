@@ -1616,8 +1616,10 @@ button {
   border-color: rgba(255, 107, 107, 0.6);
 }
 
+/* Wrapped, so a longer message ("Recorded in the …: switch to that aircraft") reads in full. */
 .br-clip.failed .br-clip-sub {
   color: var(--br-red);
+  white-space: normal;
 }
 
 .br-clips-note {

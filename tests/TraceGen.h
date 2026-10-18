@@ -18,6 +18,10 @@ struct TraceGen {
     double gsKt = 0.0;
     double vsFpm = 0.0;
     double tdNormalFps = NAN;
+    double power = NAN;  // engine power (N1 %); NaN: no engine readings
+    bool onRunway = true;
+    bool flapsUp = true;
+    bool spoilersDown = true;
     std::vector<br::DetectorSample> samples;
 
     TraceGen(bool onGround, double agl, double gs) : aglFt(agl), gsKt(gs) { push(onGround); }
@@ -34,6 +38,10 @@ struct TraceGen {
         s.lonDeg = lonDeg;
         s.altFt = elevFt + aglFt;
         s.touchdownNormalVelFps = tdNormalFps;
+        s.enginePower = power;
+        s.onRunway = onRunway;
+        s.flapsRetracted = flapsUp;
+        s.spoilersRetracted = spoilersDown;
         samples.push_back(s);
     }
 
@@ -55,6 +63,18 @@ struct TraceGen {
     }
 
     void hold(double sec, bool onGround) { segment(sec, gsKt, aglFt, onGround); }
+
+    // Ramps the engine power to `to` over `sec`, holding speed and height.
+    void spool(double sec, double to, bool onGround) {
+        const int steps = static_cast<int>(std::lround(sec / dt));
+        const double p0 = power;
+        for (int i = 1; i <= steps; ++i) {
+            power = p0 + (to - p0) * static_cast<double>(i) / steps;
+            t += dt;
+            latDeg -= gsKt * 0.514444 * dt / 111320.0;
+            push(onGround);
+        }
+    }
 
     // Sets the G load of the most recent sample.
     void spike(double g) { samples.back().gForce = g; }

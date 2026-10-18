@@ -73,6 +73,12 @@ FrameInput toInput(const DetectorSample& s) {
     in.raw.v[kAlt] = s.altFt;
     in.simTimeSec = s.t;
     in.touchdownNormalVelFps = s.touchdownNormalVelFps;
+    // What the detector reads them from.
+    for (int e = 0; e < 2; ++e) in.raw.v[kEngineN1_1 + e] = std::isfinite(s.enginePower) ? s.enginePower : 0.0;
+    in.facts.onRunway = s.onRunway;
+    in.raw.v[kFlapsHandleIndex] = s.flapsRetracted ? 0.0 : 2.0;
+    in.raw.v[kFlapsLeft] = in.raw.v[kFlapsRight] = s.flapsRetracted ? 0.0 : 0.4;
+    in.raw.v[kSpoilersHandle] = in.raw.v[kSpoilersLeft] = s.spoilersRetracted ? 0.0 : 1.0;
     return in;
 }
 
@@ -111,21 +117,28 @@ struct Harness {
     }
 };
 
-// Approach from 1500 ft and land; returns the touchdown sample index.
+// Approach from 1500 ft and land, rolling to a stop; returns the touchdown sample index.
 size_t landingTrace(TraceGen& g) {
     const size_t td = approachAndTouchdown(g, 115.0);
-    g.segment(25.0, 15.0, 0.0, true);
+    g.segment(30.0, 0.0, 0.0, true);
     g.hold(10.0, true);
     return td;
 }
+
+constexpr const char* kPmdg800 = "simobjects/airplanes/pmdg 737-800/presets/pmdg/pmdg 737-800 bw tc/config";
+constexpr const char* kPmdg700 = "simobjects/airplanes/pmdg 737-700/presets/pmdg/pmdg 737-700 bw/config";
 
 }  // namespace
 
 TEST(Engine_FullFlightSavesTakeoffAndLanding) {
     TraceGen g(true, 0.0, 0.0);
     g.dt = 1.0 / 60.0;  // the sim runs faster than the recording rate
+    g.power = 20.0;
     g.hold(30.0, true);
+    const double spool = g.now();
+    g.spool(4.0, 90.0, true);
     g.segment(30.0, 70.0, 0.0, true);
+    const double liftoff = g.now() + g.dt;
     g.segment(40.0, 90.0, 1200.0, false);
     g.segment(60.0, 140.0, 3000.0, false);
     g.hold(60.0, false);
@@ -133,6 +146,7 @@ TEST(Engine_FullFlightSavesTakeoffAndLanding) {
     const size_t td = landingTrace(g);
 
     Harness h;
+    h.engine.setAircraftKey(kPmdg800);
     h.feedAll(g.samples);
 
     REQUIRE(h.storage.clipCount() == 2);
@@ -148,7 +162,7 @@ TEST(Engine_FullFlightSavesTakeoffAndLanding) {
     CHECK_EQ(landings[0]->aircraft, std::string("Test Aircraft"));
     CHECK(landings[0]->autoClip);
     CHECK_NEAR(landings[0]->touchdownVsFpm, -150.0, 2.0);
-    CHECK_NEAR(landings[0]->durationSec, 120.0 + 21.25, 0.1);  // 115 -> 15 kt crosses 30 kt after 21.25 s
+    CHECK_NEAR(landings[0]->durationSec, 120.0 + 29.75, 0.1);  // 115 -> 0 kt is below 1 kt after 29.75 s
 
     // Set BR_SAMPLE_OUT=<path> to keep this clip on disk (handy for tools/rpl-dump.mjs).
     if (const char* out = std::getenv("BR_SAMPLE_OUT")) {
@@ -181,10 +195,82 @@ TEST(Engine_FullFlightSavesTakeoffAndLanding) {
     const int64_t tdUtc = kUtcBase + static_cast<int64_t>(g.samples[td].t * 1000.0);
     CHECK_NEAR(static_cast<double>(clip.meta.utcStartMs), static_cast<double>(tdUtc - 120000), 100.0);
 
+    CHECK_EQ(clip.meta.aircraftPath, std::string(kPmdg800));
+
+    // The takeoff: from 5 s before the engines spooled up (N1) to 2 minutes after liftoff.
     Clip to;
     REQUIRE(h.load(takeoffs[0]->file, to));
     CHECK(to.meta.event == EventType::Takeoff);
     CHECK(std::isnan(to.meta.touchdownVsFpm));
+    CHECK(to.meta.eventOffsetSec >= liftoff - (spool - 5.0) - 0.3);  // seen a moment into the spool-up
+    CHECK(to.meta.eventOffsetSec <= liftoff - (spool - 5.0) + 0.05);
+    CHECK_NEAR(takeoffs[0]->durationSec, to.meta.eventOffsetSec + 120.0, 0.1);
+}
+
+TEST(Engine_LandingEndsOffTheRunwayCleanedUp) {
+    TraceGen g(false, 1500.0, 120.0);
+    g.flapsUp = false;
+    const size_t td = approachAndTouchdown(g, 115.0);
+    g.spoilersDown = false;
+    g.segment(25.0, 15.0, 0.0, true);
+    g.onRunway = false;
+    g.hold(5.0, true);
+    g.spoilersDown = true;
+    g.flapsUp = true;
+    const double clean = g.now() + g.dt;
+    g.hold(20.0, true);
+
+    Harness h;
+    h.feedAll(g.samples);
+    const auto landings = h.clipsOf(EventType::Landing);
+    REQUIRE(landings.size() == 1);
+    CHECK_NEAR(landings[0]->durationSec, 120.0 + (clean - g.samples[td].t), 0.1);
+}
+
+TEST(Engine_LandingInProgressIsSavedWhenTheFlightEnds) {
+    TraceGen g(false, 1500.0, 120.0);
+    const size_t td = approachAndTouchdown(g, 115.0);
+    g.segment(15.0, 50.0, 0.0, true);  // still rolling
+    Harness h;
+    h.feedAll(g.samples);
+    CHECK(h.clipsOf(EventType::Landing).empty());
+    h.engine.setAtMainMenu(true);
+    const auto landings = h.clipsOf(EventType::Landing);
+    REQUIRE(landings.size() == 1);
+    CHECK_NEAR(landings[0]->durationSec, 120.0 + (g.now() - g.samples[td].t), 0.1);
+    h.engine.onFlightLoaded("next flight");  // nothing left to save
+    CHECK_EQ(h.clipsOf(EventType::Landing).size(), 1u);
+}
+
+TEST(Engine_VariantsShareOneControlProfile) {
+    // aircraft.json from before: kept under the 737-800 preset's own path.
+    MemoryStorage storage;
+    {
+        ProfileStore old;
+        AircraftProfile& p = old.upsert(kPmdg800);
+        p.title = "737-800 PAX BW TC";
+        p[Control::Flaps].state = ControlState::Ok;
+        p[Control::Flaps].method.kind = MethodKind::KeyEvent;
+        p[Control::Flaps].method.var = kKeyFlapsNotches;
+        std::string json;
+        old.toJson(json);
+        storage.files["aircraft.json"].assign(json.begin(), json.end());
+    }
+    Engine e(storage);
+    e.setLogger(&testLog, nullptr);
+    e.init();
+    e.setAircraftKey(kPmdg700);
+    CHECK_EQ(e.aircraftKey(), std::string("simobjects/airplanes/pmdg 737"));
+    const AircraftProfile* p = e.currentProfile();
+    REQUIRE(p != nullptr);
+    CHECK((*p)[Control::Flaps].method.var == std::string(kKeyFlapsNotches));
+    // Saved back under the family.
+    ProfileStore saved;
+    const std::vector<uint8_t>& bytes = storage.files["aircraft.json"];
+    std::string err;
+    REQUIRE(saved.fromJson(reinterpret_cast<const char*>(bytes.data()), bytes.size(), &err));
+    REQUIRE(saved.size() == 1);
+    CHECK_EQ(saved.profiles()[0].key, std::string("simobjects/airplanes/pmdg 737"));
 }
 
 TEST(Engine_PauseMidLandingIsSqueezedOut) {
@@ -210,6 +296,26 @@ TEST(Engine_PauseMidLandingIsSqueezedOut) {
     const auto landings = h.clipsOf(EventType::Landing);
     REQUIRE(landings.size() == 1);
     CHECK_NEAR(landings[0]->durationSec, baseDuration, 0.05);
+}
+
+TEST(Engine_SlewOnTheRolloutSavesTheLandingUpToIt) {
+    TraceGen g(false, 1500.0, 120.0);
+    const size_t td = approachAndTouchdown(g, 115.0);
+    g.segment(10.0, 60.0, 0.0, true);
+    const size_t slewFrom = g.index();
+    g.hold(5.0, true);
+    Harness h;
+    h.feed(g.samples, 0, slewFrom);
+    for (size_t i = slewFrom; i < g.samples.size(); ++i) {
+        FrameInput in = toInput(g.samples[i]);
+        in.slewActive = true;
+        h.engine.onFrame(in, kUtcBase);
+    }
+    CHECK(h.clipsOf(EventType::Landing).empty());
+    h.feed(g.samples, g.samples.size() - 1, g.samples.size());  // out of slew
+    const auto landings = h.clipsOf(EventType::Landing);
+    REQUIRE(landings.size() == 1);
+    CHECK_NEAR(landings[0]->durationSec, 120.0 + (g.samples[slewFrom - 1].t - g.samples[td].t), 0.1);
 }
 
 TEST(Engine_SlewOnFinalDisarmsDetection) {

@@ -481,6 +481,38 @@ TEST(EnginePlayback_RejectsBadRequests) {
     CHECK(!h.engine.playbackActive());
 }
 
+TEST(EnginePlayback_OnlyOnTheAircraftItWasRecordedOnOrAVariant) {
+    PlaybackHarness h;
+    Clip clip = makeClip(3.0);
+    clip.meta.aircraft = "737-800 PAX BW TC";
+    clip.meta.aircraftPath = "simobjects/airplanes/pmdg 737-800/presets/pmdg/pmdg 737-800 bw tc/config";
+    std::vector<uint8_t> bytes;
+    writeClip(clip.meta, VectorFrameSource(clip.frames), bytes);
+    h.storage.files[h.clipFile] = bytes;
+    std::string err;
+
+    h.engine.setAircraftTitle("A350-900 (Default Cabin)");
+    h.engine.setAircraftKey("simobjects/airplanes/a350/presets/inibuilds/a350-900_default_cabin/config");
+    CHECK(!h.engine.play(h.clipFile, err));
+    CHECK_EQ(err, std::string("recorded in the 737-800 PAX BW TC: switch to that aircraft to replay it"));
+    CHECK(!h.engine.playbackActive());
+    CHECK_EQ(h.sim.begins, 0);
+
+    // Another variant of it is fine: the -700 with other winglets.
+    h.engine.setAircraftTitle("737-700 PAX BW");
+    h.engine.setAircraftKey("simobjects/airplanes/pmdg 737-700/presets/pmdg/pmdg 737-700 bw/config");
+    REQUIRE(h.engine.play(h.clipFile, err));
+    REQUIRE(h.engine.stopPlayback(err));
+
+    // Clips from before the aircraft's path was recorded go by its title.
+    clip.meta.aircraftPath.clear();
+    writeClip(clip.meta, VectorFrameSource(clip.frames), bytes);
+    h.storage.files[h.clipFile] = bytes;
+    CHECK(!h.engine.play(h.clipFile, err));
+    h.engine.setAircraftTitle("737-800 pax bw tc");
+    CHECK(h.engine.play(h.clipFile, err));
+}
+
 TEST(EnginePlayback_EventChannelsSendStateChangesOnly) {
     // A gear handle recorded mid-travel (0.3, 0.6, 0.9) is one state change: down.
     PlaybackHarness h;

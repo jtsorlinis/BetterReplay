@@ -98,8 +98,17 @@ struct ControlProfile {
     ReverseBy reverseBy = ReverseBy::Unknown;  // throttle only, with the key-event method
 };
 
+// The key an aircraft's control profile is kept under, shared by its variants. `path` is the
+// aircraft.cfg folder as Engine::setAircraftKey gets it (lower case, '/' separators), e.g.
+// "simobjects/airplanes/pmdg 737-800/presets/pmdg/pmdg 737-800 bw tc/config". The key is the
+// aircraft's folder under SimObjects, so its presets (the PMDG's BW, SSW and BCF, the A350's
+// -900ULR) share it, without the model's variant number: a dash and 3 or 4 digits after the
+// model's own digits, so the PMDG 737-600/-700/-800/-900 are "simobjects/airplanes/pmdg 737" and
+// an A350-900 and -1000 are both "a350". Anything else (a "title:" key) is returned as it is.
+std::string aircraftFamily(const std::string& path);
+
 struct AircraftProfile {
-    std::string key;    // identifies the aircraft (Engine::setAircraft)
+    std::string key;    // identifies the aircraft: aircraftFamily() of its path
     std::string title;  // for people reading aircraft.json
     int64_t updatedUtcMs = 0;
     bool declined = false;  // "never for this aircraft": the setup isn't offered again
@@ -168,6 +177,11 @@ public:
     bool remove(const std::string& key);
     size_t size() const { return profiles_.size(); }
     const std::vector<AircraftProfile>& profiles() const { return profiles_; }
+
+    // Re-keys profiles kept under an aircraft's own path (before variants shared one) by
+    // aircraftFamily(). Where several variants had one, the most recently updated is kept.
+    // Returns how many profiles changed or went.
+    size_t groupVariants();
 
     void toJson(std::string& out) const;
     bool fromJson(const char* text, size_t length, std::string* error);

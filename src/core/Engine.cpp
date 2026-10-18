@@ -38,7 +38,32 @@ double frameTime(const Frame& f) { return f.t; }
 // state is sent, so a handle recorded mid-travel at 0.3, 0.6, 0.9 produces one event, not three.
 double eventState(double v) { return std::isnan(v) ? NAN : (v >= 0.5 ? 1.0 : 0.0); }
 
-DetectorSample toDetectorSample(const Frame& f, double touchdownNormalVelFps) {
+bool equalsIgnoringCase(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        const char x = a[i] >= 'A' && a[i] <= 'Z' ? static_cast<char>(a[i] + 32) : a[i];
+        const char y = b[i] >= 'A' && b[i] <= 'Z' ? static_cast<char>(b[i] + 32) : b[i];
+        if (x != y) return false;
+    }
+    return true;
+}
+
+// The engines' power for the takeoff's spool-up: the highest N1, or RPM on pistons.
+double enginePower(const Frame& f, int engineType) {
+    if (engineType == 2) return NAN;  // ENGINE TYPE none: a glider
+    const int first = engineType == 0 ? kEngineRpm1 : kEngineN1_1;
+    double p = NAN;
+    for (int e = 0; e < 4; ++e) {
+        const double v = f.v[first + e];
+        if (std::isfinite(v) && (std::isnan(p) || v > p)) p = v;
+    }
+    return p;
+}
+
+// Within `limit` of zero, or not reported.
+bool retracted(double v, double limit) { return !std::isfinite(v) || v < limit; }
+
+DetectorSample toDetectorSample(const Frame& f, const FrameInput& in) {
     DetectorSample s;
     s.t = f.t;
     s.onGround = f.v[kOnGround] >= 0.5;
@@ -49,7 +74,12 @@ DetectorSample toDetectorSample(const Frame& f, double touchdownNormalVelFps) {
     s.latDeg = f.v[kLat];
     s.lonDeg = f.v[kLon];
     s.altFt = f.v[kAlt];
-    s.touchdownNormalVelFps = touchdownNormalVelFps;
+    s.touchdownNormalVelFps = in.touchdownNormalVelFps;
+    s.enginePower = enginePower(f, in.facts.engineType);
+    s.onRunway = in.facts.onRunway;
+    s.flapsRetracted = retracted(f.v[kFlapsHandleIndex], 0.5) && retracted(f.v[kFlapsLeft], 0.02) &&
+                       retracted(f.v[kFlapsRight], 0.02);
+    s.spoilersRetracted = retracted(f.v[kSpoilersHandle], 0.02) && retracted(f.v[kSpoilersLeft], 0.02);
     return s;
 }
 
@@ -107,6 +137,10 @@ void Engine::loadProfiles() {
         std::string err;
         if (profiles_.fromJson(reinterpret_cast<const char*>(buf.data()), buf.size(), &err)) {
             logf(0, "loaded %s (%zu aircraft control profile(s))", name, profiles_.size());
+            if (const size_t n = profiles_.groupVariants()) {
+                logf(0, "%zu control profile(s) moved to their aircraft's family, shared by its variants", n);
+                saveProfiles();
+            }
             return;
         }
         logf(1, "%s is unreadable (%s)", name, err.c_str());
@@ -201,6 +235,7 @@ void Engine::onFlightLoaded(const char* what) {
     endPlayback(false, "flight loaded");
     setup_.cancel("flight loaded");
     setupSnoozed_ = false;
+    finishEvents();
     ring_.clear();
     prevSimTime_ = NAN;
     detector_.disarm(recTime_, what);
@@ -213,6 +248,7 @@ void Engine::onRelocated(const char* what) {
         logf(0, "ignoring '%s' during playback", what);
         return;
     }
+    finishEvents();
     detector_.disarm(recTime_, what);
 }
 
@@ -231,6 +267,7 @@ void Engine::setAtMainMenu(bool atMenu) {
     if (atMenu) {
         endPlayback(false, "main menu");
         setup_.cancel("main menu");
+        finishEvents();
     }
     atMainMenu_ = atMenu;
 }
@@ -250,7 +287,9 @@ void Engine::setAircraftTitle(const std::string& title) {
     aircraft_ = title;
 }
 
-void Engine::setAircraftKey(const std::string& key) {
+void Engine::setAircraftKey(const std::string& path) {
+    aircraftPath_ = path;
+    const std::string key = aircraftFamily(path);
     if (key == aircraftKey_) return;
     setup_.cancel("aircraft changed");
     aircraftKey_ = key;
@@ -335,6 +374,7 @@ void Engine::onFrame(const FrameInput& in, int64_t utcNowMs) {
     if (suspendReason_ != nullptr) {
         logf(0, "recording resumed (was: %s)", suspendReason_);
         if (pendingResume_ == ResumeKind::Relocate) {
+            finishEvents();
             detector_.disarm(recTime_, suspendReason_);
         } else if (pendingResume_ == ResumeKind::Pause) {
             detector_.notifyResumedAfterPause();
@@ -345,6 +385,7 @@ void Engine::onFrame(const FrameInput& in, int64_t utcNowMs) {
     }
 
     recTime_ += dt;
+    recUtcMs_ = utcNowMs;
     recordFrame(in, utcNowMs);
 }
 
@@ -359,10 +400,19 @@ void Engine::recordFrame(const FrameInput& in, int64_t utcNowMs) {
     f.t = recTime_;
 
     DetectedEvent events[2];
-    const int n = detector_.update(toDetectorSample(f, in.touchdownNormalVelFps), events);
+    const int n = detector_.update(toDetectorSample(f, in), events);
     for (int i = 0; i < n; ++i) {
         std::string err;
         saveRange(events[i].type, events[i].startT, events[i].endT, &events[i], utcNowMs, err, nullptr);
+    }
+}
+
+void Engine::finishEvents() {
+    DetectedEvent events[2];
+    const int n = detector_.finishInProgress(ring_.empty() ? recTime_ : ring_.back().t, events);
+    for (int i = 0; i < n; ++i) {
+        std::string err;
+        saveRange(events[i].type, events[i].startT, events[i].endT, &events[i], recUtcMs_, err, nullptr);
     }
 }
 
@@ -394,6 +444,7 @@ bool Engine::saveRange(EventType type, double startT, double endT, const Detecte
     meta.sampleRateHz = static_cast<float>(cfg_.sampleRateHz);
     meta.utcStartMs = utcNowMs - static_cast<int64_t>((recTime_ - first.t) * 1000.0);
     meta.aircraft = aircraft_;
+    meta.aircraftPath = aircraftPath_;
     for (int c = 0; c < kChannelCount; ++c) {
         if (!channelVar_[c].empty()) meta.vars.emplace_back(kChannels[c].key, channelVar_[c]);
     }
@@ -496,6 +547,11 @@ bool Engine::play(const std::string& file, std::string& error) {
         error = "clip is empty";
         return false;
     }
+    if (!recordedOnThisAircraft(clip.meta, error)) {
+        logf(0, "playback of %s refused: recorded in %s (%s), this is %s (%s)", file.c_str(), clip.meta.aircraft.c_str(),
+             clip.meta.aircraftPath.c_str(), aircraft_.c_str(), aircraftPath_.c_str());
+        return false;
+    }
 
     const bool switching = playbackActive_;
     playback_.load(std::move(clip), file);
@@ -511,6 +567,23 @@ bool Engine::play(const std::string& file, std::string& error) {
          playback_.duration(), playback_.clip().frames.size(), playback_.present().count(),
          static_cast<int>(kChannelCount), switching ? "" : "; aircraft snapshot taken");
     return true;
+}
+
+bool Engine::recordedOnThisAircraft(const ClipMeta& meta, std::string& error) const {
+    bool same = false;
+    if (!meta.aircraftPath.empty()) {
+        if (aircraftKey_.empty()) {
+            error = "the aircraft isn't identified yet";
+            return false;
+        }
+        same = aircraftFamily(meta.aircraftPath) == aircraftKey_;
+    } else {
+        same = meta.aircraft.empty() || equalsIgnoringCase(meta.aircraft, aircraft_);  // older clips: by title
+    }
+    if (same) return true;
+    error = meta.aircraft.empty() ? "recorded in another aircraft: switch to it to replay this clip"
+                                  : "recorded in the " + meta.aircraft + ": switch to that aircraft to replay it";
+    return false;
 }
 
 bool Engine::pausePlayback(std::string& error) {
