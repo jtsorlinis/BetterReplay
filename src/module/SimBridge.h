@@ -151,10 +151,11 @@ private:
     void tracePlayback();  // debug: once a second, what playback sent vs what the aircraft reports
     // Diagnostics, off unless switched on here: a CSV row per replay frame in the work folder
     // (trace_<clip>.csv, about 1 MB a minute), what was written against what the aircraft shows,
-    // with airspeed, engine thrust, N1/N2 and the throttle sent. It found the uneven replay clock
-    // behind the A350's engine sound fluttering in the cabin. The aircraft's values are read
-    // before this frame's writes, so a velocity's "_w" is what the previous frame wrote and
-    // "_live" what the aircraft made of it.
+    // with airspeed, engine thrust, N1/N2, the throttle sent and the replay's clock. It found the
+    // uneven replay clock behind the A350's engine sound fluttering in the cabin, the hitches
+    // behind the squeaks left after that, and the rotation rates read back 3.28 times what was
+    // written. The aircraft's values are read before this frame's writes, so a velocity's "_w" is
+    // what the previous frame wrote and "_live" what the aircraft made of it.
     static constexpr bool kPlaybackTrace = false;
     void traceOpen();
     void traceRow(const Frame& frame, bool jumped);
@@ -201,6 +202,8 @@ private:
     uint64_t frameCount_ = 0;
     float sinceOpen_ = 0.0f;
     float pendingDt_ = 0.0f;
+    int updatesSinceData_ = 0;  // update() calls since the last data frame (for the trace)
+    int traceUpdates_ = 0;
     float sinceHeartbeat_ = 0.0f;
     bool pollDispatch_ = false;
     bool sizeWarned_ = false;
@@ -265,6 +268,37 @@ private:
     int restoreChannelCount_ = 0;
     double setBuffer_[kChannelCount] = {};
     double lastSentEvent_[kChannelCount] = {};  // event channel states, to log only real changes
+    // ROTATION VELOCITY BODY X/Y/Z written in radians per second read back 3.28 times (feet per
+    // metre) what was written, though what the sim shows in flight is right (it matches how fast
+    // the heading and pitch change). A replay's yaw on the takeoff roll was 2.1 degrees a second
+    // instead of 0.64, with the aircraft held straight. So they're written scaled by this, and each
+    // replay checks the rate the aircraft shows against the clip's (checkRotationScale).
+    static constexpr double kFeetPerMetre = 3.28084;
+    static constexpr int kRotationSamples = 90;
+    double rotationScale_ = 1.0 / kFeetPerMetre;
+    double rotationRatios_[kRotationSamples] = {};
+    int rotationSamples_ = 0;
+    void checkRotationScale();
+    // The position, attitude and velocities (lat .. rotation velocities) are set directly
+    // (fsVarsAVarSet) as the replay writes them, from the sim's per-frame update (Engine::onUpdate)
+    // rather than queued through SimConnect, which applies them at its own point in the frame. A
+    // replay's first frames check that the aircraft is where it was set; if it isn't, or a set
+    // fails, they go through SimConnect again (until the aircraft changes).
+    static constexpr int kDirectChecks = 60;
+    static constexpr int kDirectSkipFrames = 5;  // after a jump
+    FsAVarId directId_[kChannelCount] = {};
+    FsUnitId directUnit_[kChannelCount] = {};
+    int directChannels_[kChannelCount] = {};
+    int directChannelCount_ = 0;
+    bool directMotion_ = true;
+    bool directResolved_ = false;
+    int directChecks_ = 0;
+    int directMisses_ = 0;
+    int directSkip_ = 0;
+    void resolveDirect();
+    void writeDirect(const Frame& frame);
+    void checkDirect();
+    void fallBackFromDirect(const char* why);
     bool playDefDefined_ = false;
     bool restoreDefDefined_ = false;
     int numEngines_ = 4;

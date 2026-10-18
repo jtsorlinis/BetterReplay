@@ -486,26 +486,40 @@ TEST(EnginePlayback_RejectsBadRequests) {
     CHECK(!h.engine.playbackActive());
 }
 
-TEST(EnginePlayback_OnlyOnTheAircraftItWasRecordedOnOrAVariant) {
+TEST(EnginePlayback_OnlyOnTheAircraftItWasRecordedOn) {
     PlaybackHarness h;
+    const std::string a350900 = "simobjects/airplanes/a350/presets/inibuilds/a350-900_default_cabin/config";
     Clip clip = makeClip(3.0);
-    clip.meta.aircraft = "737-800 PAX BW TC";
-    clip.meta.aircraftPath = "simobjects/airplanes/pmdg 737-800/presets/pmdg/pmdg 737-800 bw tc/config";
+    clip.meta.aircraft = "A350-900 (Default Cabin)";
+    clip.meta.aircraftPath = a350900;
     std::vector<uint8_t> bytes;
     writeClip(clip.meta, VectorFrameSource(clip.frames), bytes);
     h.storage.files[h.clipFile] = bytes;
     std::string err;
 
-    h.engine.setAircraftTitle("A350-900 (Default Cabin)");
-    h.engine.setAircraftKey("simobjects/airplanes/a350/presets/inibuilds/a350-900_default_cabin/config");
+    h.engine.setAircraftTitle("737-800 PAX BW TC");
+    h.engine.setAircraftKey("simobjects/airplanes/pmdg 737-800/presets/pmdg/pmdg 737-800 bw tc/config");
     CHECK(!h.engine.play(h.clipFile, err));
-    CHECK_EQ(err, std::string("recorded in the 737-800 PAX BW TC: switch to that aircraft to replay it"));
+    CHECK_EQ(err, std::string("recorded in the A350-900 (Default Cabin): switch to that aircraft to replay it"));
     CHECK(!h.engine.playbackActive());
     CHECK_EQ(h.sim.begins, 0);
 
-    // Another variant of it is fine: the -700 with other winglets.
-    h.engine.setAircraftTitle("737-700 PAX BW");
-    h.engine.setAircraftKey("simobjects/airplanes/pmdg 737-700/presets/pmdg/pmdg 737-700 bw/config");
+    // The other variants share its control profile but not its clips: the -900ULR (another preset
+    // in the same folder) and the -1000.
+    h.engine.setAircraftTitle("A350-900 ULR");
+    h.engine.setAircraftKey("simobjects/airplanes/a350/presets/inibuilds/a350-900_default_cabin_ulr/config");
+    const std::string family = h.engine.aircraftKey();
+    CHECK(!h.engine.play(h.clipFile, err));
+    CHECK_EQ(err, std::string("recorded in the A350-900 (Default Cabin): switch to that aircraft to replay it"));
+    h.engine.setAircraftTitle("A350-1000");
+    h.engine.setAircraftKey("simobjects/airplanes/a350-1000/presets/inibuilds/a350-1000/config");
+    CHECK_EQ(h.engine.aircraftKey(), family);
+    CHECK(!h.engine.play(h.clipFile, err));
+    CHECK_EQ(h.sim.begins, 0);
+
+    h.engine.setAircraftTitle("A350-900 (Default Cabin)");
+    h.engine.setAircraftKey(a350900);
+    CHECK_EQ(h.engine.aircraftKey(), family);
     REQUIRE(h.engine.play(h.clipFile, err));
     REQUIRE(h.engine.stopPlayback(err));
 
@@ -513,8 +527,9 @@ TEST(EnginePlayback_OnlyOnTheAircraftItWasRecordedOnOrAVariant) {
     clip.meta.aircraftPath.clear();
     writeClip(clip.meta, VectorFrameSource(clip.frames), bytes);
     h.storage.files[h.clipFile] = bytes;
+    h.engine.setAircraftTitle("A350-900 ULR");
     CHECK(!h.engine.play(h.clipFile, err));
-    h.engine.setAircraftTitle("737-800 pax bw tc");
+    h.engine.setAircraftTitle("a350-900 (default cabin)");
     CHECK(h.engine.play(h.clipFile, err));
 }
 
@@ -703,6 +718,50 @@ TEST(EnginePlayback_StepsByRealTimeBetweenFrames) {
     utc += 27;
     h.engine.onFrame(liveFrame(h.simTime, -33.0), utc);
     CHECK_NEAR(h.engine.playback().time(), held + 0.027, 1e-6);
+}
+
+// With the sim's per-frame update (onUpdate) the replay steps by its frame time and writes from
+// there, once a frame; data frames in between don't move it. If the updates stop, the data
+// frames drive it again.
+TEST(EnginePlayback_StepsByTheSimsFrameUpdate) {
+    PlaybackHarness h;
+    std::string err;
+    REQUIRE(h.engine.play(h.clipFile, err));
+    auto frame = [&](bool update, double frameDt, double simDt) {
+        if (update) h.engine.onUpdate(frameDt);
+        h.simTime += simDt;
+        h.engine.onFrame(liveFrame(h.simTime, -33.0), 1792247525000 + std::llround(h.simTime * 1000.0));
+    };
+    frame(true, 1.0 / 36.0, 1.0 / 36.0);
+    double last = h.engine.playback().time();
+    size_t writes = h.sim.written.size();
+    const double simSteps[] = {0.0185, 0.037, 0.0, 0.0556, 0.0278};
+    for (int i = 0; i < 72; ++i) {
+        frame(true, i == 40 ? 0.0633 : 1.0 / 36.0, simSteps[i % 5]);  // a 63 ms hitch at frame 40
+        const double t = h.engine.playback().time();
+        CHECK_NEAR(t - last, i == 40 ? 0.0633 : 1.0 / 36.0, 1e-9);
+        CHECK_EQ(h.sim.written.size(), writes + 1);  // one write a frame
+        last = t;
+        writes = h.sim.written.size();
+    }
+    // Another data frame within the same frame (no update before it): nothing moves.
+    h.engine.onFrame(liveFrame(h.simTime, -33.0), 1792247525000 + std::llround(h.simTime * 1000.0));
+    CHECK_NEAR(h.engine.playback().time(), last, 0);
+    CHECK_EQ(h.sim.written.size(), writes);
+
+    h.engine.setPauseFlags(1);  // paused: held
+    for (int i = 0; i < 10; ++i) frame(true, 1.0 / 36.0, 0.0);
+    CHECK_NEAR(h.engine.playback().time(), last, 1e-12);
+    h.engine.setPauseFlags(0);
+    frame(true, 1.0 / 36.0, 1.0 / 36.0);  // the data frame after the pause lifts the hold
+    last = h.engine.playback().time();
+    frame(true, 1.0 / 36.0, 1.0 / 36.0);
+    CHECK_NEAR(h.engine.playback().time() - last, 1.0 / 36.0, 1e-9);
+
+    // The updates stop: three data frames later the data frames drive the replay again.
+    last = h.engine.playback().time();
+    for (int i = 0; i < 30; ++i) frame(false, 0.0, 1.0 / 36.0);
+    CHECK(h.engine.playback().time() - last > 25.0 / 36.0);
 }
 
 TEST(EnginePlayback_DeletingThePlayingClipStopsIt) {

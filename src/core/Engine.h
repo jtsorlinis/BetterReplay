@@ -105,8 +105,8 @@ public:
     void setRelocating(bool relocating);   // teleport / skip / back-on-track in progress
     void setAircraftTitle(const std::string& title);
     // Identifies the aircraft (the module passes its aircraft.cfg folder). Clips record it, and only
-    // replay on the same aircraft or a variant of it; the control profile is kept under its
-    // aircraftFamily(), so the variants share one.
+    // replay on the same aircraft.cfg, so not on another variant; the control profile is kept under
+    // its aircraftFamily(), so the variants share one.
     void setAircraftKey(const std::string& path);
     const std::string& aircraftKey() const { return aircraftKey_; }  // the family
     const AircraftProfile* currentProfile() const;
@@ -122,6 +122,9 @@ public:
 
     // ---- per sim frame
     void onFrame(const FrameInput& in, int64_t utcNowMs);
+    // The sim's per-frame update and its frame time (seconds). When the module calls it, replays
+    // step and write the aircraft from here rather than from onFrame.
+    void onUpdate(double frameDtSec);
 
     // ---- commands (return false and set `error` on failure)
     bool saveLast(int64_t utcNowMs, std::string& error);
@@ -139,6 +142,10 @@ public:
     // After Stop, how long the aircraft may still stay frozen while it settles (0: it isn't).
     double restoreSecondsLeft() const;
     const PlaybackController& playback() const { return playback_; }
+    // The last frame: the real time since the one before, and how far the replay clock moved on it
+    // (before the playback speed; 0 while held). For the playback trace.
+    double lastWallDt() const { return lastWallDt_; }
+    double lastPlayDt() const { return lastPlayDt_; }
 
     // Control setup (ControlSetup.h). Offered for every aircraft without a profile: it can start
     // once on a runway with the engines running and the parking brake set. "later" hides the offer until the next
@@ -179,8 +186,8 @@ private:
     // The flight ends or the aircraft is moved: a landing or takeoff in progress is saved up to
     // the last recorded moment rather than lost.
     void finishEvents();
-    // A clip replays only on the aircraft it was recorded on or a variant of it (aircraftFamily);
-    // otherwise `error` asks to switch to it.
+    // A clip replays only on the aircraft.cfg it was recorded on, not on another variant that shares
+    // its control profile; otherwise `error` asks to switch to it.
     bool recordedOnThisAircraft(const ClipMeta& meta, std::string& error) const;
     void playbackFrame(double dt);
     void endPlayback(bool restore, const char* why);
@@ -245,6 +252,13 @@ private:
     // How long the sim's time has stood still (wall clock); past kSimStillMs a replay holds too.
     static constexpr int64_t kSimStillMs = 250;
     int64_t simStillMs_ = 0;
+    // Paused, or the sim's time standing still: a replay holds.
+    bool playbackHeld() const { return pauseFlags_ != 0 || simStillMs_ > kSimStillMs; }
+    bool updateDriven_ = false;   // replays go by onUpdate
+    int framesWithoutUpdate_ = 0;
+    static constexpr int kUpdateLostFrames = 3;
+    double lastWallDt_ = 0.0;
+    double lastPlayDt_ = 0.0;
 
     // recording clock
     double recTime_ = 0.0;

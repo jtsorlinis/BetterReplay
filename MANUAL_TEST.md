@@ -163,6 +163,8 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   - If you see `freeze still off after SET; sending TOGGLE`, note it. Note whether it then worked.
   - If you see `could not turn … freeze on`, playback will fight the sim.
 - [ ] The aircraft jumps to the clip start and flies the recorded path smoothly. Note any jitter, drift or stutter.
+- [ ] The log has `playback: position, attitude and velocities set directly every frame (N of 60 frames off)` with N near 0, and `playback: the rotation rates follow the clip (written x0.305)` a few seconds in.
+- [ ] The engine sound stays steady at speed, in the cabin near the engines too: no flutter, and no squeaks when the sim stutters for a frame. If you hear one, note roughly when in the clip, and replay it with the trace on (`kPlaybackTrace`): its `wall_dt_ms` and `step_ms` columns show the frame times and the step the replay took for each. On the A350, small pitch jitters in the fan's whine on FLX takeoffs from about 80 kt are a known open issue (see *A350 engine whine in replays* in the README's Known gaps).
 - [ ] The panel switches to the player: the clip's name, a large seek bar with the amber touchdown mark at 2:00, round play/pause and stop buttons, and the speeds.
 - [ ] The PFD airspeed and vertical speed follow the clip (body velocities are written every frame), not the speed you had before pressing Play.
 - [ ] **Throttle** (clips recorded with throttle support): the thrust levers follow the clip.
@@ -205,6 +207,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 - [ ] Play a clip, then play a **different** clip without stopping, then Stop. You're returned to the position from *before the first* clip.
 - [ ] While a clip plays, pause the sim. Playback holds, then continues when you unpause.
 - [ ] Note whether crash detection ever triggered during playback (e.g. near the ground).
+- [ ] **Another variant:** in the A350-900ULR, play a clip recorded in the -900 (or the other way round). **Expect** it to be refused (*Recorded in the A350-900 (Default Cabin): switch to that aircraft to replay it*, and `playback of … refused` in the log), while the control profile stays shared: the log shows the same `aircraft key simobjects/airplanes/a350` for both.
 
 ## 12. Control setup
 

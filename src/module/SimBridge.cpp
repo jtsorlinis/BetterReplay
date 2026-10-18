@@ -1,10 +1,12 @@
 #include "SimBridge.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 
+#include "Interp.h"
 #include "Log.h"
 #include "Platform.h"
 
@@ -50,6 +52,10 @@ const char* const kMaskedInputEvents[] = {
 constexpr size_t kMaskedInputEventCount = sizeof(kMaskedInputEvents) / sizeof(kMaskedInputEvents[0]);
 
 bool isThrottle(int channel) { return channel >= kThrottle1 && channel <= kThrottle4; }
+
+bool isRotation(int channel) { return channel >= kRotVelBodyX && channel <= kRotVelBodyZ; }
+
+constexpr double kPi = 3.14159265358979323846;
 
 // Set channels playback stops writing when the aircraft keeps overriding them: flaps, spoilers
 // and control surfaces. Position, attitude and velocities are always written (they're frozen or
@@ -315,6 +321,7 @@ void SimBridge::onKeyEvent(FsEventId id, const FsVarParamArray* params) {
 void SimBridge::update(float dTime) {
     if (!h_) return;
     pendingDt_ += dTime;
+    ++updatesSinceData_;
     sinceOpen_ += dTime;
     sinceHeartbeat_ += dTime;
     if (sinceHeartbeat_ >= 60.0f) {
@@ -327,6 +334,7 @@ void SimBridge::update(float dTime) {
         pollDispatch_ = true;
         log::warn("no SimConnect messages 2 s after init; polling SimConnect_CallDispatch every frame");
     }
+    if (frameCount_ > 0) engine_.onUpdate(dTime);  // replays step and write from here (Engine::onUpdate)
 }
 
 void SimBridge::heartbeat() {
@@ -541,7 +549,9 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     input_.slewActive = ex[kExSlew] >= 0.5;
     input_.touchdownNormalVelFps = ex[kExTouchdownNormalVel];
     input_.fallbackDtSec = pendingDt_;
+    traceUpdates_ = updatesSinceData_;
     pendingDt_ = 0.0f;
+    updatesSinceData_ = 0;
     freezeState_[kFreezeLatLon] = ex[kExFreezeLatLon] >= 0.5;
     freezeState_[kFreezeAlt] = ex[kExFreezeAlt] >= 0.5;
     freezeState_[kFreezeAtt] = ex[kExFreezeAtt] >= 0.5;
@@ -566,7 +576,10 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     facts.flapPositions = flapPositions_;
     facts.hasReverse = std::isfinite(throttleLowerLimit_) && throttleLowerLimit_ < -1.0;
     if (freezeCheckFrames_ > 0 && --freezeCheckFrames_ == 0) verifyFreeze();
-    if (playChannelCount_ > 0 && haveWritten_) checkOverrides();
+    if ((playChannelCount_ > 0 || directChannelCount_ > 0) && haveWritten_) {
+        checkOverrides();
+        checkDirect();
+    }
     if (playing_ && throttleViaEvents_ && clipHasThrottle_) checkThrottleEvents();
     if (playing_) checkEventChannels();
     if (playing_) checkInputEvents();
@@ -706,8 +719,8 @@ void SimBridge::setInputMasking(bool on) {
 void SimBridge::checkOverrides() {
     ++checkedFrames_;
     bool throttleOverridden = false;
-    for (int i = 0; i < playChannelCount_; ++i) {
-        const int c = playChannels_[i];
+    for (int i = 0; i < playChannelCount_ + directChannelCount_; ++i) {
+        const int c = i < playChannelCount_ ? playChannels_[i] : directChannels_[i - playChannelCount_];
         const double w = written_[c];
         const double live = input_.raw.v[c];
         if (!std::isfinite(w) || !std::isfinite(live)) continue;
@@ -758,24 +771,103 @@ void SimBridge::yieldChannel(int channel, int overriddenPct) {
 }
 
 void SimBridge::rebuildPlaybackDefinition() {
-    const ChannelMask set = playPresent_ & ~playSkip_;
+    ChannelMask set = playPresent_ & ~playSkip_;
+    directChannelCount_ = 0;
+    if (directMotion_) {
+        resolveDirect();
+        for (int c = kLat; c <= kRotVelBodyZ; ++c) {
+            if (!set.test(static_cast<size_t>(c)) || directId_[c] == FS_VAR_INVALID_ID) continue;
+            directChannels_[directChannelCount_++] = c;
+            set.reset(static_cast<size_t>(c));
+        }
+    }
     playChannelCount_ = buildDefinition(DEF_PLAYBACK, playDefDefined_, PlayMode::Set, &set, playChannels_);
     firstPlaybackWrite_ = true;
     haveWritten_ = false;  // the next comparison needs a write with the new layout
 }
 
+void SimBridge::resolveDirect() {
+    if (directResolved_) return;
+    directResolved_ = true;
+    for (int c = kLat; c <= kRotVelBodyZ; ++c) {
+        directId_[c] = FS_VAR_INVALID_ID;
+        directUnit_[c] = FS_INVALID_UNIT;
+        if (kChannels[c].play != PlayMode::Set) continue;
+        const FsAVarId id = fsVarsGetAVarId(kChannels[c].simvar);
+        const FsUnitId unit = fsVarsGetUnitId(kChannels[c].units);
+        if (id == FS_VAR_INVALID_ID || id == FS_VAR_AVAR_NONE || unit == FS_INVALID_UNIT) {
+            log::warn("playback: can't set %s directly; it goes through SimConnect", kChannels[c].simvar);
+            continue;
+        }
+        directId_[c] = id;
+        directUnit_[c] = unit;
+    }
+}
+
+void SimBridge::writeDirect(const Frame& frame) {
+    FsVarParamArray none = {};
+    bool failed = false;
+    for (int i = 0; i < directChannelCount_; ++i) {
+        const int c = directChannels_[i];
+        const double v = frame.v[c];
+        written_[c] = std::isnan(v) ? input_.raw.v[c] : v;  // gap in the clip: hold the live value
+        const double value = isRotation(c) ? written_[c] * rotationScale_ : written_[c];
+        const FsVarError err = fsVarsAVarSet(directId_[c], directUnit_[c], none, value);
+        if (err != FS_VAR_ERROR_NONE) {
+            log::warn("playback: setting %s directly failed (error 0x%x)", kChannels[c].simvar, static_cast<unsigned>(err));
+            failed = true;
+        }
+    }
+    if (failed) fallBackFromDirect("a direct write failed");
+}
+
+void SimBridge::fallBackFromDirect(const char* why) {
+    if (!directMotion_) return;
+    directMotion_ = false;
+    log::warn("playback: %s; writing the position, attitude and velocities through SimConnect from now on", why);
+    rebuildPlaybackDefinition();
+}
+
+// The first second or two of a replay: does the aircraft take the position set directly? (A
+// frame's movement off is fine: the data may come before the write.)
+void SimBridge::checkDirect() {
+    if (directChannelCount_ == 0 || directChecks_ >= kDirectChecks) return;
+    if (directSkip_ > 0) {
+        --directSkip_;
+        return;
+    }
+    const double* live = input_.raw.v;
+    if (!std::isfinite(live[kLat]) || !std::isfinite(written_[kLat]) || !std::isfinite(written_[kAlt])) return;
+    const double north = (live[kLat] - written_[kLat]) * 111320.0;
+    const double east = wrap180(live[kLon] - written_[kLon]) * 111320.0 * std::cos(written_[kLat] * kPi / 180.0);
+    const double up = (live[kAlt] - written_[kAlt]) * 0.3048;
+    if (std::hypot(north, east) > 5.0 || std::fabs(up) > 2.0) ++directMisses_;
+    if (++directChecks_ < kDirectChecks) return;
+    if (directMisses_ * 2 > kDirectChecks) {
+        char why[96];
+        std::snprintf(why, sizeof(why), "the aircraft wasn't where it was set in %d of %d frames", directMisses_,
+                      kDirectChecks);
+        fallBackFromDirect(why);
+    } else {
+        log::info("playback: position, attitude and velocities set directly every frame (%d of %d frames off)",
+                  directMisses_, kDirectChecks);
+    }
+}
+
 void SimBridge::logOverrides() {
     if (checkedFrames_ >= 30) {
         int reported = 0;
-        for (int i = 0; i < playChannelCount_; ++i) {
-            const int c = playChannels_[i];
+        for (int i = 0; i < playChannelCount_ + directChannelCount_; ++i) {
+            const int c = i < playChannelCount_ ? playChannels_[i] : directChannels_[i - playChannelCount_];
             const int pct = overrideFrames_[c] * 100 / checkedFrames_;
             if (pct < 20) continue;
             ++reported;
             log::warn("playback: %s (%s) was overridden by the aircraft in %d%% of frames", kChannels[c].key,
                       kChannels[c].simvar, pct);
         }
-        if (reported == 0) log::info("playback: all %d written channels held their values", playChannelCount_);
+        if (reported == 0) {
+            log::info("playback: all %d written channels held their values", playChannelCount_ + directChannelCount_);
+        }
     }
     int eventsChecked = 0;
     int eventsOff = 0;
@@ -1019,6 +1111,10 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
         for (int c = kThrottle1; c <= kThrottle4; ++c) playSkip_.set(static_cast<size_t>(c));
     }
     rebuildPlaybackDefinition();
+    rotationSamples_ = 0;
+    directChecks_ = 0;
+    directMisses_ = 0;
+    directSkip_ = kDirectSkipFrames;
     checkedFrames_ = 0;
     for (int& n : overrideFrames_) n = 0;
     windowFrames_ = 0;
@@ -1058,9 +1154,9 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
         setInputMasking(true);
         throttle = "throttle via simvars, hardware throttle input blocked";
     }
-    log::info("playback: writing %d channels per frame and %d input event(s) (%d engine(s)); freezing "
-              "position/altitude/attitude; %s",
-              playChannelCount_, inputs, numEngines_, throttle);
+    log::info("playback: writing %d channels per frame (%d of them set directly) and %d input event(s) (%d "
+              "engine(s)); freezing position/altitude/attitude; %s",
+              playChannelCount_ + directChannelCount_, directChannelCount_, inputs, numEngines_, throttle);
     traceOpen();
     for (int c = 0; c < kChannelCount; ++c) {
         if (!ieActive_[c]) continue;
@@ -1266,6 +1362,33 @@ void SimBridge::logEngines() {
     }
 }
 
+// Once a replay has written enough rotation, the rate the aircraft shows against the clip's: if
+// it isn't about the same, the scale is corrected by it (and logged).
+void SimBridge::checkRotationScale() {
+    if (rotationSamples_ >= kRotationSamples) return;
+    for (int c = kRotVelBodyX; c <= kRotVelBodyZ && rotationSamples_ < kRotationSamples; ++c) {
+        const double w = written_[c];
+        const double live = input_.raw.v[c];
+        if (!std::isfinite(w) || !std::isfinite(live) || std::fabs(w) < 0.004) continue;
+        rotationRatios_[rotationSamples_++] = live / w;
+    }
+    if (rotationSamples_ < kRotationSamples) return;
+    std::sort(rotationRatios_, rotationRatios_ + kRotationSamples);
+    const double median = rotationRatios_[kRotationSamples / 2];
+    if (median > 0.7 && median < 1.4) {
+        log::info("playback: the rotation rates follow the clip (written x%.3f)", rotationScale_);
+        return;
+    }
+    if (!(median > 0.05 && median < 20.0)) {
+        log::warn("playback: the rotation rates are %.2f times the clip's; leaving the scale at x%.3f", median,
+                  rotationScale_);
+        return;
+    }
+    rotationScale_ /= median;
+    log::warn("playback: the rotation rates were %.2f times the clip's; writing them x%.3f from now on", median,
+              rotationScale_);
+}
+
 void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
     if (!h_ || !playing_) return;
     if (trace_) traceRow(frame, jumped);
@@ -1287,14 +1410,18 @@ void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
     if (throttleViaEvents_ && clipHasThrottle_) sendThrottleEvents(frame, jumped);
     trackEventChannels(frame, jumped);
     trackEngines(frame, jumped);
-    if (playChannelCount_ == 0) return;
+    if (playChannelCount_ == 0 && directChannelCount_ == 0) return;
+    if (!jumped && haveWritten_) checkRotationScale();
+    if (jumped) directSkip_ = kDirectSkipFrames;
+    writeDirect(frame);  // (may hand them back to the SimConnect definition below)
     for (int i = 0; i < playChannelCount_; ++i) {
         const int c = playChannels_[i];
         const double v = frame.v[c];
-        setBuffer_[i] = std::isnan(v) ? input_.raw.v[c] : v;  // gap in the clip: hold the live value
-        written_[c] = setBuffer_[i];
+        written_[c] = std::isnan(v) ? input_.raw.v[c] : v;  // gap in the clip: hold the live value
+        setBuffer_[i] = isRotation(c) ? written_[c] * rotationScale_ : written_[c];
     }
     haveWritten_ = true;
+    if (playChannelCount_ == 0) return;
     const HRESULT hr = SimConnect_SetDataOnSimObject(h_, DEF_PLAYBACK, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, 0, 0,
                                                      static_cast<DWORD>(playChannelCount_ * sizeof(double)), setBuffer_);
     if (firstPlaybackWrite_) {
@@ -1597,7 +1724,16 @@ void SimBridge::traceOpen() {
     if (!kPlaybackTrace || workDir_.empty()) return;
     std::string clip = engine_.playback().file();
     if (clip.size() > 4 && clip.compare(clip.size() - 4, 4, ".rpl") == 0) clip.resize(clip.size() - 4);
-    traceName_ = "trace_" + (clip.empty() ? std::string("playback") : clip) + ".csv";
+    // Each replay of a clip gets its own file (trace_<clip>.csv, then _2, _3...), so replays to
+    // compare, e.g. in this flight and the next, don't overwrite each other.
+    const std::string base = "trace_" + (clip.empty() ? std::string("playback") : clip);
+    traceName_ = base + ".csv";
+    for (int n = 2; n < 100; ++n) {
+        FILE* existing = std::fopen((workDir_ + traceName_).c_str(), "rb");
+        if (!existing) break;
+        std::fclose(existing);
+        traceName_ = base + "_" + std::to_string(n) + ".csv";
+    }
     trace_ = std::fopen((workDir_ + traceName_).c_str(), "wb");
     if (!trace_) {
         log::warn("playback: couldn't open %s for the trace", traceName_.c_str());
@@ -1606,7 +1742,9 @@ void SimBridge::traceOpen() {
     std::fputs("ms,clip_t,playing,jumped", trace_);
     for (int c : kTraceWritten) std::fprintf(trace_, ",%s_w,%s_live", kChannels[c].key, kChannels[c].key);
     std::fputs(",tas_live,ias_live,ongnd_live,n1_1_clip,n1_1_live,n2_1_clip,n2_1_live,n1_2_live,n2_2_live,"
-               "thrust_1_live,thrust_2_live,thr_1_clip,thr_1_live,thr_2_live,axis_1_sent,axis_2_sent,sent_now\n",
+               "thrust_1_live,thrust_2_live,thr_1_clip,thr_1_live,thr_2_live,axis_1_sent,axis_2_sent,sent_now,"
+               "wall_dt_ms,step_ms,sim_time,update_dt_ms,updates,g_clip,g_live,elev_live,ail_l_live,rud_live,"
+               "gs_clip,gs_live,agl_live\n",
                trace_);
     traceRows_ = 0;
     traceStartMs_ = utcNowMs();
@@ -1619,11 +1757,21 @@ void SimBridge::traceRow(const Frame& frame, bool jumped) {
     std::fprintf(trace_, "%lld,%.3f,%d,%d", static_cast<long long>(utcNowMs() - traceStartMs_), frame.t,
                  engine_.playback().playing() ? 1 : 0, jumped ? 1 : 0);
     for (int c : kTraceWritten) std::fprintf(trace_, ",%.4f,%.4f", written_[c], live[c]);
-    std::fprintf(trace_, ",%.2f,%.2f,%.0f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.1f,%.3f,%.3f,%.3f,%.0f,%.0f,%d\n",
+    std::fprintf(trace_, ",%.2f,%.2f,%.0f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.1f,%.3f,%.3f,%.3f,%.0f,%.0f,%d",
                  liveTas_, liveIas_, live[kOnGround], frame.v[kEngineN1_1], live[kEngineN1_1], frame.v[kEngineN2_1],
                  live[kEngineN2_1], live[kEngineN1_2], live[kEngineN2_2], liveThrust_[0], liveThrust_[1],
                  frame.v[kThrottle1], live[kThrottle1], live[kThrottle2], driver_.lastSent(Control::Throttle, 0),
                  driver_.lastSent(Control::Throttle, 1), sends - traceSends_);
+    // The replay's clock: the real time since the last frame against the step it took, the sim's
+    // own time, and the module updates (their dTime summed) since the last data frame.
+    std::fprintf(trace_, ",%.3f,%.3f,%.4f,%.3f,%d", engine_.lastWallDt() * 1000.0, engine_.lastPlayDt() * 1000.0,
+                 input_.simTimeSec, input_.fallbackDtSec * 1000.0, traceUpdates_);
+    // What the aircraft feels: g (the clip's and its own), and the control surfaces it moves itself
+    // (left to it once it overrode them).
+    std::fprintf(trace_, ",%.3f,%.3f,%.4f,%.4f,%.4f", frame.v[kGForce], live[kGForce], live[kElevator],
+                 live[kAileronLeft], live[kRudder]);
+    // Ground speed (the clip's and the aircraft's) and height: the A350's cabin sounds follow them.
+    std::fprintf(trace_, ",%.3f,%.3f,%.2f\n", frame.v[kGroundSpeed], live[kGroundSpeed], live[kAgl]);
     traceSends_ = sends;
     ++traceRows_;
 }
@@ -1688,6 +1836,7 @@ void SimBridge::checkInputEvents() {
 void SimBridge::onAircraftChanged() {
     if (throttleViaEvents_) log::info("aircraft changed: trying the throttle simvars first again");
     throttleViaEvents_ = false;
+    directMotion_ = true;
     snapRejected_ = false;
     snapAccepted_ = false;
     cancelRestoreFlaps();
@@ -1705,6 +1854,7 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     logEngines();
     playing_ = false;
     playChannelCount_ = 0;
+    directChannelCount_ = 0;
     driver_.clearAutothrust();  // the snapshot below isn't the clip
     snapFramesLeft_ = 0;
     snapCheckFrames_ = 0;
@@ -1785,6 +1935,7 @@ void SimBridge::writeRestore(const Frame& snapshot) {
         // The profile puts the flaps back once the aircraft has settled (checkRestoreFlaps).
         const bool flaps = c == kFlapsLeft || c == kFlapsRight || c == kFlapsHandleIndex;
         setBuffer_[i] = restoreFlapsPending_ && flaps && std::isfinite(input_.raw.v[c]) ? input_.raw.v[c] : snapshot.v[c];
+        if (isRotation(c)) setBuffer_[i] *= rotationScale_;
     }
     if (restoreFlapsPending_) {
         flapsHoldStartMs_ = utcNowMs();  // from when the aircraft is put back

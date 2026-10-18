@@ -352,18 +352,23 @@ void Engine::onFrame(const FrameInput& in, int64_t utcNowMs) {
     }
     if (!(dt > 0.0)) dt = 0.0;
     if (dt > cfg_.maxFrameDtSec) dt = cfg_.maxFrameDtSec;
-    // A replay moves by the real time between frames, as they're shown. The sim's time steps
-    // unevenly from frame to frame: on the A350 at 36 fps by 18, 27 or 37 ms, and in one or two
-    // frames a second not at all, though every frame took 27 to 28 ms. Stepped by that, a replay
-    // at 140 kt moved the aircraft about a metre unevenly every frame, and the engine sounds
-    // around it (heard in the cabin) fluttered. It holds while the sim is paused, or its time has
-    // stood still for longer than a frame or two.
+    // Replays step from the sim's per-frame update (onUpdate). Without it they move by the real
+    // time between frames, as they're shown: the sim's time steps unevenly from frame to frame (on
+    // the A350 at 36 fps by 18, 27 or 37 ms, though every frame took 27 to 28 ms), and stepped by
+    // that a replay at 140 kt moved the aircraft about a metre unevenly every frame, and the
+    // engine sounds around it (heard in the cabin) fluttered. It holds while the sim is paused, or
+    // its time has stood still for longer than a frame or two.
     const int64_t wallMs = lastUtcMs_ > 0 && utcNowMs > lastUtcMs_ ? utcNowMs - lastUtcMs_ : 0;
     simStillMs_ = dt > 0.0 ? 0 : simStillMs_ + wallMs;
     double playDt = dt;
     const double wallDt = static_cast<double>(wallMs) / 1000.0;
     if (lastUtcMs_ > 0 && wallDt <= cfg_.maxFrameDtSec) playDt = wallDt;
-    if (pauseFlags_ != 0 || simStillMs_ > kSimStillMs) playDt = 0.0;
+    if (playbackHeld()) playDt = 0.0;
+    // Data frames with no update before them: one more within the same frame is normal (the sim
+    // sends one about once a second), more in a row means the updates stopped.
+    if (++framesWithoutUpdate_ >= kUpdateLostFrames) updateDriven_ = false;
+    lastWallDt_ = wallDt;
+    if (!updateDriven_) lastPlayDt_ = playDt;
     facts_ = in.facts;
     lastUtcMs_ = utcNowMs;
     if (!playbackActive_ && restoreSecondsLeft() <= 0.0 && out_ && out_->restoring()) out_->finishRestore();
@@ -391,7 +396,7 @@ void Engine::onFrame(const FrameInput& in, int64_t utcNowMs) {
                                                                           : ResumeKind::Relocate;
         if (kind > pendingResume_) pendingResume_ = kind;
         suspendReason_ = reason;
-        if (playbackActive_) playbackFrame(playDt);
+        if (playbackActive_ && !updateDriven_) playbackFrame(playDt);
         return;
     }
     if (suspendReason_ != nullptr) {
@@ -611,7 +616,9 @@ bool Engine::recordedOnThisAircraft(const ClipMeta& meta, std::string& error) co
             error = "the aircraft isn't identified yet";
             return false;
         }
-        same = aircraftFamily(meta.aircraftPath) == aircraftKey_;
+        // The exact aircraft.cfg, not its family: variants share a control profile but not clips.
+        // Their weights and thrust differ, and the physics fights a replay recorded on another.
+        same = meta.aircraftPath == aircraftPath_;
     } else {
         same = meta.aircraft.empty() || equalsIgnoringCase(meta.aircraft, aircraft_);  // older clips: by title
     }
@@ -667,6 +674,23 @@ bool Engine::stopPlayback(std::string& error) {
     }
     endPlayback(true, "stopped");
     return true;
+}
+
+// The sim's own update, once a frame at the same point in it, with its frame time: on the A350
+// at 36 fps exactly 1/36 s every frame, and a hitch as long as it was. A replay steps and writes
+// the aircraft from here when the module has it. The data frames come at a different point in
+// the sim's frame from one frame to the next (their data was a frame stale every other frame or
+// so, and the physics ran 0 to 3 steps between a write and the next read), and replays written
+// from them squeaked now and then in the A350's internal engine sound, which goes by how the
+// aircraft moves from frame to frame (stepped unevenly, it fluttered).
+void Engine::onUpdate(double frameDtSec) {
+    framesWithoutUpdate_ = 0;
+    updateDriven_ = true;
+    if (!playbackActive_) return;
+    double dt = playbackHeld() || !(frameDtSec > 0.0) ? 0.0 : frameDtSec;
+    if (dt > cfg_.maxFrameDtSec) dt = cfg_.maxFrameDtSec;
+    lastPlayDt_ = dt;
+    playbackFrame(dt);
 }
 
 void Engine::playbackFrame(double dt) {
