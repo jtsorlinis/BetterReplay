@@ -89,6 +89,7 @@ interface ClipInfo {
     utc: string;
     utcMs: number;
     aircraft: string;
+    airport?: string;  // takeoffs and landings: where ("" if not known)
     durationSec: number;
     touchdownVsFpm: number | null;
     peakG: number | null;
@@ -261,10 +262,23 @@ function byId<T extends HTMLElement>(id: string): T {
     return document.getElementById(id) as T;
 }
 
-// A clip's one-line summary: aircraft, length, and for landings the touchdown figures.
+// The aircraft without a note in brackets at the end of its title: "A350-900 (Default Cabin)"
+// is the "A350-900".
+function aircraftName(title: string): string {
+    return title.replace(/\s*\([^()]*\)\s*$/, "") || title;
+}
+
+// A clip's name: the aircraft, and for takeoffs and landings the airport ("A350-900 | YMML").
+function clipTitle(c: ClipInfo): string {
+    const parts: string[] = [];
+    if (c.aircraft) parts.push(aircraftName(c.aircraft));
+    if (c.event !== "manual" && c.airport) parts.push(c.airport);
+    return parts.join(" | ") || eventLabel(c.event);
+}
+
+// A clip's one-line details: when it ended, its length, and for landings the touchdown figures.
 function clipFacts(c: ClipInfo): string[] {
-    const parts = [formatClock(c.durationSec)];
-    if (c.aircraft) parts.unshift(c.aircraft);
+    const parts = [formatLocalDate(clipEndMs(c)), formatClock(c.durationSec)];
     if (c.event === "landing") {
         if (typeof c.touchdownVsFpm === "number") parts.push(Math.round(c.touchdownVsFpm) + " fpm");
         if (typeof c.peakG === "number") parts.push(c.peakG.toFixed(2) + " G");
@@ -1039,10 +1053,10 @@ class BetterReplayPanel extends UIElement {
         const preparing = !!p.preparing;
         byId("br-player").classList.toggle("preparing", preparing);
         byId("br-player-kicker").textContent = preparing ? "Getting ready" : "Replaying";
-        byId("br-now").textContent = clip ? eventLabel(clip.event) + " · " + formatLocalDate(clipEndMs(clip)) : p.file;
+        byId("br-now").textContent = clip ? clipTitle(clip) : p.file;
         const note = this.note && this.note.view === "player" ? this.note.text : "";
         const sub = byId("br-now-sub");
-        sub.textContent = note || (clip ? clipFacts(clip).join(" · ") : "");
+        sub.textContent = note || (clip ? [eventLabel(clip.event)].concat(clipFacts(clip)).join(" · ") : "");
         sub.classList.toggle("failed", !!note);
         if (!this.seekDragging) this.renderSeek(p.dur > 0 ? p.t / p.dur : 0);
 
@@ -1089,7 +1103,7 @@ class BetterReplayPanel extends UIElement {
                 '" data-file="' + file + '">' +
                 '<span class="br-badge ' + escapeHtml(c.event) + '">' + eventLabel(c.event) + "</span>" +
                 '<div class="br-clip-text">' +
-                '<div class="br-clip-title">' + formatLocalDate(clipEndMs(c)) + "</div>" +
+                '<div class="br-clip-title">' + escapeHtml(clipTitle(c)) + "</div>" +
                 '<div class="br-clip-sub">' + (failed ? escapeHtml(failed) : parts.join(" · ")) + "</div>" +
                 "</div>" +
                 '<div class="br-clip-btns">' +

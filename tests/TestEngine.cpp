@@ -206,6 +206,69 @@ TEST(Engine_FullFlightSavesTakeoffAndLanding) {
     CHECK_NEAR(takeoffs[0]->durationSec, to.meta.eventOffsetSec + 120.0, 0.1);
 }
 
+TEST(Engine_TakeoffsAndLandingsRecordTheirAirport) {
+    // Lifts off near YSSY and lands 30 km further south.
+    TraceGen g(true, 0.0, 0.0);
+    g.power = 20.0;
+    g.hold(30.0, true);
+    g.spool(4.0, 90.0, true);
+    g.segment(30.0, 150.0, 0.0, true);
+    const size_t liftoff = g.samples.size();
+    g.segment(100.0, 220.0, 3000.0, false);
+    g.segment(120.0, 120.0, 1500.0, false);
+    const size_t td = landingTrace(g);
+
+    Harness h;
+    const DetectorSample& up = g.samples[liftoff];
+    const DetectorSample& down = g.samples[td];
+    h.engine.addAirport("YSSY", "YM", up.latDeg + 0.01, up.lonDeg);         // 1.1 km
+    h.engine.addAirport("34NS", "YM", up.latDeg, up.lonDeg + 0.005);        // a heliport 460 m away
+    h.engine.addAirport("YSBK", "YM", up.latDeg + 0.03, up.lonDeg - 0.15);  // Bankstown, 14 km
+    h.engine.addAirport("YWOL", "YM", down.latDeg - 0.02, down.lonDeg);     // 2.2 km
+    h.engine.addAirport("YWOL", "YM", down.latDeg - 0.02, down.lonDeg);     // reported again
+    CHECK_EQ(h.engine.airports().size(), 4u);
+    h.feedAll(g.samples);
+    const auto takeoffs = h.clipsOf(EventType::Takeoff);
+    const auto landings = h.clipsOf(EventType::Landing);
+    REQUIRE(takeoffs.size() == 1);
+    REQUIRE(landings.size() == 1);
+    CHECK_EQ(takeoffs[0]->airport, std::string("YSSY"));
+    CHECK_EQ(landings[0]->airport, std::string("YWOL"));
+    Clip clip;
+    REQUIRE(h.load(landings[0]->file, clip));
+    CHECK_EQ(clip.meta.airport, std::string("YWOL"));
+
+    // Manual clips have none; a new flight forgets the airports.
+    std::string err;
+    REQUIRE(h.engine.saveLast(kUtcBase + 900000, err));
+    const auto manual = h.clipsOf(EventType::Manual);
+    REQUIRE(manual.size() == 1);
+    CHECK(manual[0]->airport.empty());
+    h.engine.onFlightLoaded("next flight");
+    CHECK_EQ(h.engine.airports().size(), 0u);
+}
+
+TEST(Airports_NearestWithinReachPreferringIcaoIdents) {
+    AirportList a;
+    CHECK(a.at(-37.67, 144.84).empty());
+    a.add("YMML", "YM", -37.6733, 144.8433);
+    a.add("YMEN", "YM", -37.7281, 144.9019);  // Essendon, 8 km from YMML
+    a.add("0S9", "K1", -37.6800, 144.8433);   // a strip 750 m from YMML
+    CHECK_EQ(a.at(-37.6733, 144.8433), std::string("YMML"));
+    CHECK_EQ(a.at(-37.6900, 144.8433), std::string("YMML"));  // 0S9 is closer, by less than its penalty
+    CHECK_EQ(a.at(-37.7250, 144.8950), std::string("YMEN"));
+    CHECK(a.at(-37.9, 144.8433).empty());  // 25 km from YMML
+    a.add("", "YM", -37.0, 144.0);
+    a.add("YNAN", "YM", NAN, 144.0);
+    CHECK_EQ(a.size(), 3u);
+    // Across the antimeridian.
+    a.add("NFFN", "NF", -17.7554, 177.4434);
+    a.add("XDAT", "NF", -16.0, 179.99);
+    CHECK_EQ(a.at(-16.0, -179.99), std::string("XDAT"));
+    a.clear();
+    CHECK_EQ(a.size(), 0u);
+}
+
 TEST(Engine_LandingEndsTenSecondsOffTheRunway) {
     TraceGen g(false, 1500.0, 120.0);
     g.flapsUp = false;

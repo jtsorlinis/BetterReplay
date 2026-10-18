@@ -69,6 +69,7 @@ void parseMeta(const uint8_t* payload, size_t size, ClipMeta& meta) {
     meta.peakG = r.f32();
     meta.aircraft = r.str();
     if (r.remaining() > 0) meta.aircraftPath = r.str();
+    if (r.remaining() > 0) meta.airport = r.str();
 }
 
 struct ChunkHeader {
@@ -125,6 +126,7 @@ void writeClip(const ClipMeta& meta, const FrameSource& frames, std::vector<uint
     w.f32(meta.peakG);
     w.str(meta.aircraft);
     w.str(meta.aircraftPath);
+    w.str(meta.airport);
     w.endChunk(chunk);
 
     if (!meta.vars.empty()) {

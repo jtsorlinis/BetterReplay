@@ -29,6 +29,7 @@ ClipEntry makeEntry(const std::string& file, const ClipMeta& meta, double durati
     e.event = meta.event;
     e.utcStartMs = meta.utcStartMs;
     e.aircraft = meta.aircraft;
+    e.airport = meta.airport;
     e.durationSec = durationSec;
     e.touchdownVsFpm = meta.touchdownVsFpm;
     e.peakG = meta.peakG;
@@ -98,6 +99,7 @@ void writeClipEntryJson(JsonWriter& w, const ClipEntry& e) {
     w.kv("utc", formatIsoUtc(e.utcStartMs));
     w.kv("utcMs", e.utcStartMs);
     w.kv("aircraft", e.aircraft);
+    w.kv("airport", e.airport);
     w.kv("durationSec", e.durationSec);
     w.kv("touchdownVsFpm", e.touchdownVsFpm);
     w.kv("peakG", e.peakG);
@@ -134,6 +136,7 @@ bool ClipIndex::fromJson(const char* text, size_t length, std::string* error) {
         e.utcStartMs = static_cast<int64_t>(v.getNumber("utcMs", 0.0));
         if (e.utcStartMs == 0) parseIsoUtc(v.getString("utc", ""), e.utcStartMs);
         e.aircraft = v.getString("aircraft", "");
+        e.airport = v.getString("airport", "");
         e.durationSec = v.getNumber("durationSec", 0.0);
         e.touchdownVsFpm = v.getNumber("touchdownVsFpm", NAN);
         e.peakG = v.getNumber("peakG", NAN);

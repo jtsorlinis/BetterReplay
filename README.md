@@ -7,7 +7,7 @@ An in-sim auto replay recorder for Microsoft Flight Simulator 2024. It records y
 - **Toolbar panel:** shows recorder status and the clip list, and has play/pause, seek, speed (0.25x–4x), stop, delete and "save last 10 min".
 - **Control setup:** a guided setup per aircraft that finds out how replays can move its spoilers, flaps, throttle and gear, by watching you move each one and testing ways to replay it. See [Control setup](#control-setup).
 
-> **Status: MVP, early in-sim testing.** The platform-independent core has 146 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. The control setup hasn't run in the sim yet. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
+> **Status: MVP, early in-sim testing.** The platform-independent core has 154 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. The control setup hasn't run in the sim yet. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
 
 ## Requirements
 
@@ -56,10 +56,10 @@ You can also build the package in DevMode: **File → Open project…** → `bui
    - If the flight ends first (main menu, a new flight, slew, a teleport, a replay), a landing in progress and a takeoff past liftoff are saved up to that moment.
 3. Open **BetterReplay** from the toolbar. If the icon is hidden, enable it in the toolbar's settings. The panel shows one screen at a time:
    - **Main:** the recorder's status, large. The dot shows the state: green = recording and armed, amber = arming, grey = paused (the reason is shown), blue = replaying. Below it a bar shows the buffer filling up to its 10 minutes, and **Save last 10 minutes** saves the whole buffer as a manual clip; the button itself shows *Saved* (or *Couldn't save*) for a moment. Under that is the aircraft, with its replay controls *Configured* (green), *Partially configured* (yellow: some controls were skipped, didn't pass, or the gear is still to do) or *Not configured* (red), and **Set up** / **Redo** for the [control setup](#control-setup). **Saved clips** at the bottom, with the clip count, opens the library.
-   - **Saved clips:** the library, newest first by when each clip ends (the time each row shows), with a back arrow. So a "Save last 10 minutes" right after a takeoff lists above the takeoff clip, though it starts earlier. Each clip has a play button and a bin; the bin asks once more ("Delete?").
+   - **Saved clips:** the library, newest first by when each clip ends (the time each row shows), with a back arrow. So a "Save last 10 minutes" right after a takeoff lists above the takeoff clip, though it starts earlier. Each row is named after the aircraft and, for a takeoff or landing, the airport (*A350-900 | YMML*), with when the clip ends and its length underneath, and for a landing its touchdown figures. The aircraft's name is its title without a note in brackets at the end (*A350-900 (Default Cabin)*). The airport is the one nearest the liftoff or touchdown, from the airports the sim lists around the aircraft, within 8 km; idents that aren't four letters (heliports and private strips, like *34CA*) count as 3 km further away, so a heliport by the runway doesn't win. With none near, and on clips from before airports were recorded, the row shows just the aircraft. Each clip has a play button and a bin; the bin asks once more ("Delete?").
    - **Player:** a clip replays on the aircraft it was recorded on or a variant of it; from another aircraft, its row says which one to switch to. Play freezes your aircraft and replays the clip on it, with the player filling the panel: a large seek bar (the amber mark is the touchdown), round play/pause and stop buttons, and the speeds. **Stop** puts the aircraft back exactly where it was, with its velocities, resumes recording and returns to the main screen. On the ground it stays frozen until its gear is back down, 10 s at most; the main screen counts that down (*Unfreezing in N s*).
 
-Recording pauses while the sim is paused, in slew, in the menus, during the sim's own replay, and during BetterReplay playback.
+Recording pauses while the sim is paused, in slew, in the menus, during the sim's own replay, during BetterReplay playback, and while the [control setup](#control-setup) runs.
 
 ### Control setup
 
@@ -82,6 +82,8 @@ Aircraft differ in how their controls can be driven. Many 2024 aircraft keep the
      - **Reverse in replays** follows what the clip's reversers did, however you commanded them. On an aircraft that takes "decrease throttle", the replay holds `THROTTLE_DECR` while the clip's reversers are out and lets go after: that's all or nothing, full reverse while held. On one that takes the reverse events, the replay sends them when the clip's reverse flag does, and puts the reverser in itself when the clip reversed without it ("decrease throttle" held), the amount from the reverse table or the lever simvar. On one that takes "toggle reverse" the replay toggles it when the clip's reversers come out, with the levers at idle and held there until the toggle has settled, then sets the clip's reverse amount (its throttle simvar over `THROTTLE LOWER LIMIT`), so idle reverse replays as idle reverse; when the clip's reversers go in it puts the levers back to idle and toggles out once the reverse amount is gone. Neither the A350 nor the PMDG sets the reverse flag, so "in reverse" means the reversers deployed, in the clip and on the aircraft. The A350 doesn't show reverse at reverse idle (its nozzles and simvar only show the amount), so the replay keeps track of the toggle itself, corrected by what the aircraft shows: a first small amount (20%) that gives forward thrust means the toggle didn't take, and so does reverse where the clip has forward thrust; then it toggles again (three tries each time). Its throttle simvar lags the lever by seconds, so while it's still heading back to idle neither counts. Seeking out of reverse toggles out the same way, and at the end of a replay the throttle is held until reverse is toggled out (10 s at most) before it's let go. Profiles made before this test leave reverse as before: redo the throttle step to get it.
 3. **Replays** then drive each set-up control with its method, through the same code the setup tested. Clips recorded before the setup (or from different variables) fall back to the defaults for that control, and the log says so.
 
+**Recording stops while the setup runs,** from **Start setup** until its results screen, and that includes waiting for the takeoff before the gear step. So its spool-ups and gear cycles never end up in a clip. A takeoff or landing in progress when it starts is saved up to that moment. When the setup finishes, or you pick **Finish later**, recording starts again from an empty buffer, and detection arms 10 s later, as after a teleport. On the flight you set up an aircraft, the takeoff isn't saved but the landing is, with the new profile. The results screen says *Recording starts again now*, and the log `recording starts afresh after the control setup`.
+
 If you skip the gear step or quit before it, the panel offers just the gear once you're airborne again. Profiles are kept per aircraft in `aircraft.json` in the work folder, shared by its variants: the key is the aircraft's folder under `SimObjects` (from its `aircraft.cfg` path), so its presets share it, without the model's variant number (a dash and 3 or 4 digits after the model's own digits). So the PMDG 737-600, -700, -800 and -900 share one profile, and so do the A350-900, -900ULR and -1000. Profiles kept per variant before are moved over at startup (where variants had one each, the newest is kept).
 
 ### Where clips live
@@ -89,7 +91,7 @@ If you skip the gear step or quit before it, the panel offers just the gear once
 `%APPDATA%\Microsoft Flight Simulator 2024\WASM\MSFS2024\betterreplay-recorder\work\` (Steam). That folder holds:
 
 - `YYYY-MM-DD_HHMM_<takeoff|landing|manual>.rpl`: one file per clip, timestamped in **UTC**.
-- `index.json`: the library (event, date, aircraft, duration, touchdown VS, peak G, bounces). If it's lost, it's rebuilt from the clip headers.
+- `index.json`: the library (event, date, aircraft, airport, duration, touchdown VS, peak G, bounces). If it's lost, it's rebuilt from the clip headers.
 - `aircraft.json`: the control profiles, one per aircraft: for each control its state (`ok`, `failed`, `skipped`, `absent`, `pending`), method and variable.
 - `betterreplay.log` and `betterreplay.prev.log`: the module's log for this and the previous sim session.
 
@@ -151,7 +153,7 @@ Two detector rules go slightly beyond the original spec:
 
 **Clip format.** The `.rpl` format is chunked and little-endian:
 
-- `BRPL` + version, then `META` (event, UTC start, sample rate, stats, aircraft), `CHAN` (channel keys and storage) and `SAMP` (frames).
+- `BRPL` + version, then `META` (event, UTC start, sample rate, stats, aircraft, airport), `CHAN` (channel keys and storage) and `SAMP` (frames).
 - `VARS` (optional) lists which aircraft variable each input event and L:var channel recorded, since that depends on the aircraft and its profile.
 - Unknown chunks and channels are skipped, and channels a clip doesn't have are left alone during playback. That leaves room for new channels and a future `LVAR` chunk without breaking old files.
 - See [src/core/ClipFormat.h](src/core/ClipFormat.h).
@@ -193,6 +195,7 @@ None of these could be verified without running the sim. Each is covered by a st
 - **Engine diagnostics.** At the end of each playback the log has a line per engine: `playback: engine N N1 was X% off the clip on average (at most Y%) and changed direction Z times a second (the clip: W)`. If the engine hunts (sound "distorted") its direction changes are well above the clip's.
 - **The replay's clock.** A replay moves by the real time between frames, while the sim's time moves at all (so it holds when paused). The sim's own time steps unevenly from frame to frame: on the A350 at 36 fps by 18, 27 or 37 ms (sometimes 0, then 56) though every frame took 27 to 28 ms, and replays stepped by it moved the aircraft about a metre unevenly every frame at 140 kt. In the cabin near the engines that sounded like the engines spooling up and down two or three times a second; in the cockpit it wasn't heard.
 - **Light key events** are sent with circuit index 0, assumed to mean "all circuits".
+- **Airports** come from `SimConnect_RequestFacilitiesList_EX1` (the sim's facilities cache around the aircraft), asked for every 15 s and at once on liftoff and touchdown, and kept for the whole flight. Look for `airports: N around the aircraft` after a flight loads, and `, at YMML` at the end of a takeoff's or landing's `saved` line. If that never appears, the list isn't reaching the module and rows show the aircraft alone.
 - **Control setup** (untested in the sim). Each of these logs what it found:
   - **Aircraft identity** is the path from `SimConnect_RequestSystemState("AircraftLoaded")`, falling back to the title. Profiles and replays go by its family (see [Control setup](#control-setup)). Look for `aircraft path: …` and `aircraft key …`: if two variants should share a profile but get different keys, their folders are named differently from the PMDG's and A350's. Clips record the path; older clips without it are matched by the aircraft's title.
   - **Watching input events** reads them with `fsVarsBVarGet`. If that can't read them, only L:vars are found by their movement. Look for `setup scan: N input event(s), M of them readable`.
@@ -208,4 +211,4 @@ None of these could be verified without running the sim. Each is covered by a st
 
 - **LVar recording:** a change-only `LVAR` chunk with per-aircraft auto-discovery. The control setup's profiles already record the L:vars it chose for the four controls.
 - **"Take control"** from any point in a replay.
-- Nearest-airport file names, go-around detection, and merging touch-and-goes into one clip.
+- The airport in clip file names, go-around detection, and merging touch-and-goes into one clip.

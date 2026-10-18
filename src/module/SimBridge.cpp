@@ -377,6 +377,8 @@ void SimBridge::dispatch(SIMCONNECT_RECV* p, DWORD size) {
                 inputEventsListed_ = false;
                 enumerateAtFrame_ = frameCount_ + 120;  // list the new aircraft's input events once it's settled
                 requestAircraftPath();
+                nextAirportsMs_ = 0;  // the Engine forgot the last flight's airports
+                airportsLogged_ = false;
             }
             break;
         }
@@ -397,6 +399,9 @@ void SimBridge::dispatch(SIMCONNECT_RECV* p, DWORD size) {
             }
             break;
         }
+        case SIMCONNECT_RECV_ID_AIRPORT_LIST:
+            onAirports(reinterpret_cast<const SIMCONNECT_RECV_AIRPORT_LIST*>(p), size);
+            break;
         case SIMCONNECT_RECV_ID_ENUMERATE_INPUT_EVENTS:
             onInputEvents(reinterpret_cast<const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS*>(p), size);
             break;
@@ -468,6 +473,8 @@ void SimBridge::onFlowEvent(DWORD flow, const char* path) {
         case SIMCONNECT_FLOW_EVENT_FLT_LOADED:
             engine_.onFlightLoaded("FLT_LOADED flow event");
             engine_.setAtMainMenu(false);
+            nextAirportsMs_ = 0;
+            airportsLogged_ = false;
             break;
         case SIMCONNECT_FLOW_EVENT_FLIGHT_START:
             engine_.setAtMainMenu(false);
@@ -581,12 +588,40 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
         track(SimConnect_EnumerateInputEvents(h_, REQ_INPUT_EVENTS), "EnumerateInputEvents");
     }
 
+    requestAirports();
+
     if (frameCount_++ == 0) {
         const double* r = input_.raw.v;
         log::info("first data frame: lat %.5f lon %.5f alt %.0f ft, AGL %.0f ft, on ground %d, sim time %.1f",
                   r[kLat], r[kLon], r[kAlt], r[kAgl], r[kOnGround] >= 0.5 ? 1 : 0, input_.simTimeSec);
     }
     engine_.onFrame(input_, utcNowMs());
+}
+
+void SimBridge::requestAirports() {
+    const bool onGround = input_.raw.v[kOnGround] >= 0.5;
+    const int64_t now = utcNowMs();
+    if (onGround == airportsOnGround_ && now < nextAirportsMs_) return;
+    airportsOnGround_ = onGround;
+    nextAirportsMs_ = now + kAirportsEveryMs;
+    track(SimConnect_RequestFacilitiesList_EX1(h_, SIMCONNECT_FACILITY_LIST_TYPE_AIRPORT, REQ_AIRPORTS),
+          "RequestFacilitiesList_EX1 airports");
+}
+
+void SimBridge::onAirports(const SIMCONNECT_RECV_AIRPORT_LIST* list, DWORD size) {
+    if (list->dwRequestID != REQ_AIRPORTS) return;
+    const size_t offset = reinterpret_cast<const uint8_t*>(list->rgData) - reinterpret_cast<const uint8_t*>(list);
+    size_t n = size > offset ? (size - offset) / sizeof(SIMCONNECT_DATA_FACILITY_AIRPORT) : 0;
+    if (list->dwArraySize < n) n = list->dwArraySize;
+    for (size_t i = 0; i < n; ++i) {
+        const SIMCONNECT_DATA_FACILITY_AIRPORT& a = list->rgData[i];
+        engine_.addAirport(std::string(a.Ident, strnlen(a.Ident, sizeof(a.Ident))),
+                           std::string(a.Region, strnlen(a.Region, sizeof(a.Region))), a.Latitude, a.Longitude);
+    }
+    if (!airportsLogged_ && list->dwEntryNumber + 1 >= list->dwOutOf) {
+        airportsLogged_ = true;
+        log::info("airports: %zu around the aircraft", engine_.airports().size());
+    }
 }
 
 // ---------------------------------------------------------------------------- playback

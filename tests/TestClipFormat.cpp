@@ -36,6 +36,7 @@ ClipMeta makeMeta() {
     m.peakG = 1.31f;
     m.bounces = 2;
     m.aircraftPath = "simobjects/airplanes/asobo_c172sp_as1000/presets/asobo/c172sp/config";
+    m.airport = "YMML";
     m.aircraft = "Cessna 172 Skyhawk \xC3\xA9";
     return m;
 }
@@ -74,6 +75,7 @@ TEST(ClipFormat_RoundTripPreservesMetaAndSamples) {
     CHECK_EQ(clip.meta.bounces, 2);
     CHECK_EQ(clip.meta.aircraft, makeMeta().aircraft);
     CHECK_EQ(clip.meta.aircraftPath, makeMeta().aircraftPath);
+    CHECK_EQ(clip.meta.airport, std::string("YMML"));
     CHECK_EQ(clip.present.count(), static_cast<size_t>(kChannelCount));
 
     REQUIRE(clip.frames.size() == frames.size());
@@ -135,6 +137,7 @@ TEST(ClipFormat_OlderClipsHaveNoAircraftPath) {
     REQUIRE(readClipMeta(bytes.data(), bytes.size(), meta, nullptr));
     CHECK_EQ(meta.aircraft, std::string("Old Jet"));
     CHECK(meta.aircraftPath.empty());
+    CHECK(meta.airport.empty());
 }
 
 TEST(ClipFormat_SkipsUnknownChunks) {

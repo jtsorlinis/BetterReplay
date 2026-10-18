@@ -1897,6 +1897,51 @@ TEST(EngineSetup_StepsAreSavedAndAppliedAndSurviveARestart) {
     CHECK((*again.currentProfile())[Control::Spoilers].method == h.aircraft.spoilersWork);
 }
 
+TEST(EngineSetup_RecordingStopsWhileItRunsAndStartsAfresh) {
+    EngineSetupHarness h;
+    h.run(5.0);
+    CHECK(h.engine.recording());
+    CHECK(h.engine.bufferedFrames() > 100);
+    std::string err;
+    REQUIRE(h.engine.setupStart(err));
+    h.run(0.1);
+    CHECK(!h.engine.recording());
+    CHECK_EQ(std::string(h.engine.suspendReason()), std::string("control setup"));
+    const size_t before = h.engine.bufferedFrames();
+    h.run(30.0, deploySpoilers(h.aircraft, 2.0));
+    CHECK_EQ(h.engine.bufferedFrames(), before);  // the setup's tests aren't recorded
+    REQUIRE(h.engine.setupAnswer("yes", err));
+    REQUIRE(h.engine.setupAnswer("skip", err));  // throttle
+    // Waiting for the takeoff, for the gear: that isn't recorded either.
+    CHECK_EQ(h.setupStatus().getString("phase", ""), std::string("takeoff"));
+    h.run(1.0);
+    CHECK(!h.engine.recording());
+    CHECK_EQ(h.engine.bufferedFrames(), before);
+
+    // Finished (here: the gear left for later), recording starts from scratch, and detection
+    // arms again as after a teleport.
+    REQUIRE(h.engine.setupAnswer("later", err));
+    h.run(2.0);
+    CHECK(h.engine.recording());
+    CHECK(h.engine.bufferedSeconds() < 2.1);
+    CHECK(!h.engine.detector().armed());
+
+    // On the results screen it's finished: recording doesn't wait for "close".
+    EngineSetupHarness g;
+    g.facts.gearRetractable = false;
+    g.run(1.0);
+    REQUIRE(g.engine.setupStart(err));
+    g.run(30.0, deploySpoilers(g.aircraft, 2.0));
+    REQUIRE(g.engine.setupAnswer("yes", err));
+    REQUIRE(g.engine.setupAnswer("skip", err));
+    CHECK_EQ(g.setupStatus().getString("phase", ""), std::string("done"));
+    CHECK(!g.setupStatus().getString("detail", "").empty());
+    g.run(1.0);
+    CHECK(g.engine.setupActive());
+    CHECK(g.engine.recording());
+    CHECK(g.engine.bufferedSeconds() < 1.1);
+}
+
 TEST(EngineSetup_ClipsListTheVariablesTheirChannelsRecorded) {
     MemStore storage;
     Engine engine(storage);

@@ -99,6 +99,7 @@ TEST(ClipIndex_JsonRoundTrip) {
     ClipIndex idx;
     ClipEntry e = entry("2026-10-17_1432_landing.rpl", EventType::Landing, 1792247525000);
     e.aircraft = "Airbus A320neo \"Asobo\"";
+    e.airport = "YMML";
     e.durationSec = 154.25;
     e.touchdownVsFpm = -142.5;
     e.peakG = 1.31;
@@ -117,6 +118,7 @@ TEST(ClipIndex_JsonRoundTrip) {
     CHECK(l->event == EventType::Landing);
     CHECK_EQ(l->utcStartMs, static_cast<int64_t>(1792247525000));
     CHECK_EQ(l->aircraft, e.aircraft);
+    CHECK_EQ(l->airport, std::string("YMML"));
     CHECK_NEAR(l->durationSec, 154.25, 1e-9);
     CHECK_NEAR(l->touchdownVsFpm, -142.5, 1e-9);
     CHECK_NEAR(l->peakG, 1.31, 1e-9);

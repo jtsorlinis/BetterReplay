@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "AircraftProfile.h"
+#include "Airports.h"
 #include "ClipIndex.h"
 #include "ControlSetup.h"
 #include "EventDetector.h"
@@ -109,6 +110,12 @@ public:
     void setAircraftKey(const std::string& path);
     const std::string& aircraftKey() const { return aircraftKey_; }  // the family
     const AircraftProfile* currentProfile() const;
+    // An airport the sim reports around the aircraft. Takeoff and landing clips record the one
+    // they were at.
+    void addAirport(const std::string& ident, const std::string& region, double latDeg, double lonDeg) {
+        airports_.add(ident, region, latDeg, lonDeg);
+    }
+    const AirportList& airports() const { return airports_; }
     // The aircraft variable an input event / L:var channel records from now on ("" = none);
     // saved clips list them.
     void setChannelVar(int channel, const std::string& var);
@@ -162,7 +169,9 @@ public:
     void clipsJson(size_t offset, size_t limit, std::string& out) const;
 
 private:
-    enum class ResumeKind { None, Pause, Relocate };
+    // What resuming recording has to do, weakest first: after a pause nothing, after a relocation
+    // detection re-arms, after the control setup the buffer starts over too.
+    enum class ResumeKind { None, Pause, Relocate, Restart };
 
     const char* computeSuspendReason(bool slewActive) const;
     bool restoringAircraft() const { return settleFrames_ > 0 || (out_ && out_->restoring()); }
@@ -209,6 +218,7 @@ private:
     std::string aircraftPath_;
     std::string aircraftKey_;  // aircraftFamily(aircraftPath_)
     SetupFacts facts_;
+    AirportList airports_;
     int64_t lastUtcMs_ = 0;
 
     // control profiles and setup

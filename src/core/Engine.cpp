@@ -19,6 +19,7 @@ constexpr const char* kIndexTmp = "index.json.tmp";
 constexpr const char* kProfilesFile = "aircraft.json";
 constexpr const char* kProfilesTmp = "aircraft.json.tmp";
 constexpr const char* kReasonPaused = "paused";
+constexpr const char* kReasonSetup = "control setup";
 
 class RingSpan : public FrameSource {
 public:
@@ -236,6 +237,7 @@ void Engine::onFlightLoaded(const char* what) {
     setupSnoozed_ = false;
     finishEvents();
     ring_.clear();
+    airports_.clear();  // the module asks for the new flight's
     prevSimTime_ = NAN;
     detector_.disarm(recTime_, what);
     logf(0, "flight loaded (%s): buffer cleared", what);
@@ -320,6 +322,7 @@ void Engine::setChannelVar(int channel, const std::string& var) {
 const char* Engine::computeSuspendReason(bool slewActive) const {
     if (playbackActive_) return "playback";
     if (restoringAircraft()) return "restoring aircraft";
+    if (setup_.running()) return kReasonSetup;
     if (atMainMenu_) return "main menu";
     if (!simRunning_) return "sim not running";
     if (pauseFlags_ != 0) return kReasonPaused;
@@ -383,15 +386,25 @@ void Engine::onFrame(const FrameInput& in, int64_t utcNowMs) {
             logf(0, "recording suspended: %s", reason);
         }
         // Anything other than a plain pause may have moved the aircraft.
-        const ResumeKind kind = std::strcmp(reason, kReasonPaused) == 0 ? ResumeKind::Pause : ResumeKind::Relocate;
-        if (kind == ResumeKind::Relocate || pendingResume_ == ResumeKind::None) pendingResume_ = kind;
+        const ResumeKind kind = std::strcmp(reason, kReasonSetup) == 0    ? ResumeKind::Restart
+                                : std::strcmp(reason, kReasonPaused) == 0 ? ResumeKind::Pause
+                                                                          : ResumeKind::Relocate;
+        if (kind > pendingResume_) pendingResume_ = kind;
         suspendReason_ = reason;
         if (playbackActive_) playbackFrame(playDt);
         return;
     }
     if (suspendReason_ != nullptr) {
         logf(0, "recording resumed (was: %s)", suspendReason_);
-        if (pendingResume_ == ResumeKind::Relocate) {
+        if (pendingResume_ == ResumeKind::Restart) {
+            // After the control setup nothing from before it belongs in a clip either (it ran
+            // spool-ups on the runway, the takeoff wasn't recorded): an event in progress when it
+            // started is saved up to then, and recording starts from scratch.
+            finishEvents();
+            ring_.clear();
+            detector_.disarm(recTime_, kReasonSetup);
+            logf(0, "recording starts afresh after the control setup");
+        } else if (pendingResume_ == ResumeKind::Relocate) {
             finishEvents();
             detector_.disarm(recTime_, suspendReason_);
         } else if (pendingResume_ == ResumeKind::Pause) {
@@ -471,6 +484,9 @@ bool Engine::saveRange(EventType type, double startT, double endT, const Detecte
         meta.touchdownVsFpm = ev->touchdownVsFpm;
         meta.peakG = ev->peakG;
         meta.bounces = ev->bounces;
+        // Where it lifted off or touched down.
+        const Frame& at = ring_.at(std::min(lowerBoundBy(ring_, ev->eventT, frameTime), ring_.size() - 1));
+        meta.airport = airports_.at(at.v[kLat], at.v[kLon]);
     }
     writeClip(meta, RingSpan(ring_, i0, i1 - i0), scratch_);
 
@@ -496,7 +512,8 @@ bool Engine::saveRange(EventType type, double startT, double endT, const Detecte
     ++clipsRev_;
     lastSaved_ = name;
     lastError_.clear();
-    logf(0, "saved %s: %.1f s, %zu frames, %zu KB", name.c_str(), duration, i1 - i0, scratch_.size() / 1024);
+    logf(0, "saved %s: %.1f s, %zu frames, %zu KB%s%s", name.c_str(), duration, i1 - i0, scratch_.size() / 1024,
+         meta.airport.empty() ? "" : ", at ", meta.airport.c_str());
     if (savedName) *savedName = name;
     return true;
 }

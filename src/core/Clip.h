@@ -28,6 +28,9 @@ struct ClipMeta {
     // The aircraft's identity as Engine::setAircraftKey got it (its aircraft.cfg folder). Empty
     // in clips from before it was recorded: those are matched by `aircraft` (the title).
     std::string aircraftPath;
+    // The ident of the airport a takeoff left from or a landing was at ("" for manual clips, clips
+    // from before it was recorded, or none near).
+    std::string airport;
     // Channel key -> the aircraft variable it recorded, for input event and L:var channels
     // (their names depend on the aircraft and its control profile).
     std::vector<std::pair<std::string, std::string>> vars;

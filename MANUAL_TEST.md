@@ -55,6 +55,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   - on ground = 1
 - [ ] About 2 s after the flight loads: `input event channels: recording ie_thr_1=ENGINE_THROTTLE_1, ie_gear=LANDING_GEAR_GEAR…; not on this aircraft: …`. That says which of the aircraft's own controls get recorded, and from which input event.
 - [ ] `aircraft path: …`, then `aircraft key …: no control profile yet` (or the profile's summary). Note the path and the key: control profiles are stored under the key, which variants share (`…/pmdg 737` for every PMDG 737, `…/a350` for the A350-900, -900ULR and -1000).
+- [ ] Within 15 s: `airports: N around the aircraft`, with N above 0. Clips name their airport from these.
 - [ ] **No clip is created by the spawn**: no `saved` line.
 - [ ] After a minute: `status: recording, phase ground, buffer 60 s, …` (the heartbeat repeats every 60 s).
 
@@ -75,9 +76,10 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   detector: takeoff confirmed (5.0 s airborne, AGL N ft)
   detector: takeoff: flaps up
   detector: takeoff finished: N s clip (liftoff at +N s)
-  saved YYYY-MM-DD_HHMM_takeoff.rpl: N s, N frames, N KB
+  saved YYYY-MM-DD_HHMM_takeoff.rpl: N s, N frames, N KB, at XXXX
   ```
-- [ ] Under **Saved clips**, a green **Takeoff** tag and the local date/time, with the aircraft and duration.
+- [ ] Under **Saved clips**, a green **Takeoff** tag, the aircraft and the departure airport (*A350-900 | YMML*), and underneath the local date/time and duration.
+  - If the `saved` line has no `, at …` (and the row no airport), note the airport and runway: it's further than 8 km from the liftoff, or the sim didn't list it.
 - [ ] Check the clip: `node tools\rpl-dump.mjs "<work folder>\<file>.rpl"`.
   - It starts 10 s before the aircraft rolls onto the runway.
   - `ongnd` goes 1 → 0 at the liftoff offset.
@@ -98,7 +100,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   detector: landing finished: N s clip, VS -N fpm, peak N.NN G, 0 bounce(s)
   saved YYYY-MM-DD_HHMM_landing.rpl: …
   ```
-- [ ] Under **Saved clips**, a blue **Landing** tag, with VS, G and duration (120 s plus the rollout and 10 s past the turn-off).
+- [ ] Under **Saved clips**, a blue **Landing** tag, the aircraft and the airport you landed at, and underneath the date/time, duration (120 s plus the rollout and 10 s past the turn-off), VS and G.
 - [ ] Land again and come to a stop on the runway: `landing: stopped`.
 - [ ] Land, and before the landing clip is saved, go back to the main menu: the landing is saved up to that moment (`landing ends here: the recording stops`).
 - [ ] **Compare the VS with another source** (a landing-rate tool, or the sim's own). The clip uses `PLANE TOUCHDOWN NORMAL VELOCITY`; note its sign and magnitude.
@@ -140,7 +142,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 ## 10. Manual save
 
 - [ ] After at least 10 minutes of flight, click **Save last 10 minutes**.
-  - **Expect** `saved …_manual.rpl`, and the button turning green with a tick and *Saved* for a couple of seconds before going back to **Save last 10 minutes**.
+  - **Expect** `saved …_manual.rpl` (no airport), and the button turning green with a tick and *Saved* for a couple of seconds before going back to **Save last 10 minutes**.
   - The clip is about 10 minutes long (about 5.5 MB), and the sim doesn't stutter noticeably while it saves.
 - [ ] The button is disabled while a clip is playing.
 
@@ -213,7 +215,7 @@ Use an aircraft without a profile; the A320neo V2 is the interesting one. Start 
   - If *On a runway* never ticks on a runway, note the airport and runway: `ON ANY RUNWAY` isn't set there. **Later**, then **Set up** on the aircraft card, starts the setup anyway.
 - [ ] Once all three are ticked, **expect** the page to change to *Set up replay controls for this aircraft?* with **Start setup**, **Later** and **Never for this aircraft**.
   - **Later** goes back to the normal panel until the next flight. The aircraft card under the status then says *Not configured* in red, and **Set up** there still starts it.
-- [ ] Click **Start setup**. The steps show across the top, the current one highlighted. **Expect** `control setup started on the ground: spoilers, flaps, throttle, gear (…)`. For each step, expect `setup scan: N input event(s), K of them readable, and M L:var(s)`.
+- [ ] Click **Start setup**. The steps show across the top, the current one highlighted. **Expect** `control setup started on the ground: spoilers, flaps, throttle, gear (…)` and `recording suspended: control setup`. For each step, expect `setup scan: N input event(s), K of them readable, and M L:var(s)`.
   - **Note K.** If it's 0, input events can't be read this way, and only L:vars can be found by their movement.
 - [ ] **Spoilers:** the panel says *Deploy the spoilers*; deploy them fully and hold. A green tick appears, then *Retract the spoilers*; retract them and wait. Note whether each tick comes at the right moment. **Expect:**
   ```
@@ -247,11 +249,12 @@ Use an aircraft without a profile; the A320neo V2 is the interesting one. Start 
     - **The engine sound isn't distorted.** The first test (N1 1.1% off) sounded distorted, with `controls: 3404 value(s) sent to the throttle` in a 160 s replay, about 20 a second. Now `value(s) sent to the throttle` should be roughly 1 to 3 a second of replay, and N1 still within a few percent. If it's still distorted at that rate, the events aren't the cause: **note it**.
   - To redo only the throttle on an aircraft that's already set up: **Redo**, **Skip this step** on the spoilers and flaps (they keep their earlier setup), do the throttle, then **Finish later** at the gear.
   - Then record a takeoff and play it: **expect** `controls: throttle levers from L:var …` at the start and `controls: N engine frame(s) placed from L:var …` at the end; the levers should sit in the detents you used. Compare the `engine N N1 was X% off the clip …` lines with earlier playbacks.
-- [ ] **Gear:** the panel says *Take off*. Take off, then follow *Raise the gear* and *Lower the gear*, staying slow. The replay raises and lowers it once more. Raise it again afterwards.
-- [ ] **Done:** the panel lists each control's result and method. Click **Done**, then check:
+- [ ] **Gear:** the panel says *Take off*, and that recording is paused until the setup is done. Take off, then follow *Raise the gear* and *Lower the gear*, staying slow. The replay raises and lowers it once more. Raise it again afterwards.
+  - **No takeoff clip** is saved for this takeoff: no `saved …_takeoff.rpl`.
+- [ ] **Done:** the panel lists each control's result and method, under *Recording starts again now, with these controls*. **Expect** `recording resumed (was: control setup)`, `recording starts afresh after the control setup` and the buffer on the main screen starting again from 0:00. Click **Done**, then check:
   - the aircraft card under the status says *Configured* in green, or *Partially configured* in yellow if a step was skipped or didn't pass (hover it to see each control), and **Redo** replaces **Set up**
   - `aircraft.json` in the work folder
-- [ ] Fly a pattern, land, then play the landing clip. **Expect** `playback: spoilers via … (control profile)`, and the same for each set-up control. Note whether each control follows the clip now.
+- [ ] Fly a pattern and land: the landing is saved as usual (it's after the setup). Play the landing clip. **Expect** `playback: spoilers via … (control profile)`, and the same for each set-up control. Note whether each control follows the clip now.
   - Clips from before the setup may log `… profile method … doesn't fit this clip …; using the defaults` instead. That's expected.
 - [ ] Restart the flight: no setup screen, since the profile is known. **Redo** runs the setup again.
 

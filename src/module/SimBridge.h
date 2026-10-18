@@ -68,6 +68,7 @@ private:
         REQ_TITLE = 2,
         REQ_INPUT_EVENTS = 3,
         REQ_AIRCRAFT_PATH = 4,  // RequestSystemState("AircraftLoaded"): the aircraft's profile key
+        REQ_AIRPORTS = 5,       // RequestFacilitiesList_EX1: the airports around the aircraft
         REQ_INPUT_VALUE_FIRST = 100,  // + channel index: GetInputEvent for an input event channel
     };
     enum SysEvent : DWORD {
@@ -178,6 +179,15 @@ private:
     void onInputEvents(const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS* list, DWORD size);
     void onAircraftChanged();
     double liveGearExtension() const;
+    // The airports in the sim's facilities cache (around the aircraft), for the Engine to name
+    // takeoff and landing clips after: asked for every kAirportsEveryMs, and at once on liftoff and
+    // touchdown.
+    void requestAirports();
+    void onAirports(const SIMCONNECT_RECV_AIRPORT_LIST* list, DWORD size);
+    static constexpr int64_t kAirportsEveryMs = 15000;
+    int64_t nextAirportsMs_ = 0;
+    bool airportsOnGround_ = false;
+    bool airportsLogged_ = false;  // once per flight: how many there are
 
     // Remembers what each SimConnect call was so exceptions can be logged meaningfully.
     void track(HRESULT hr, const char* what);

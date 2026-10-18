@@ -51,6 +51,11 @@ window.harnessSetup = (function () {
       "up against the parking brake for a few seconds.",
     sweep: "Keep your hands off the throttle while BetterReplay tries reverse thrust.",
   };
+  // Recording stops while the setup runs (ControlSetup.cpp: kTakeoffDetail, kDoneDetail).
+  const PAUSE_TEXT = {
+    takeoff: "Recording is paused until the setup is done, so this takeoff isn't saved.",
+    done: "Recording starts again now, with these controls.",
+  };
   const SWEEP_SEC = 8;
   const TASK_SEC = 1.6;   // the pilot does each instruction in this long, once started
   const HOLD_SEC = 3.2;   // a hold: half a second to get there, then the ring fills
@@ -253,7 +258,7 @@ window.harnessSetup = (function () {
       phase: s.phase, step: done ? "" : c, title: done ? "Done" : TITLE[c], stepNo: done ? s.plan.length : s.step + 1,
       steps: s.plan.length, prompt: prompts[s.phase] || "", note: s.note,
       detail: s.reverseOnly && REVERSE_TEXT[s.phase] ? REVERSE_TEXT[s.phase] :
-        LEVER_TEXT[s.phase] ? LEVER_TEXT[s.phase][1] : s.phase === "user" && holding ? HOLD_DETAIL : "",
+        LEVER_TEXT[s.phase] ? LEVER_TEXT[s.phase][1] : s.phase === "user" && holding ? HOLD_DETAIL : PAUSE_TEXT[s.phase] || "",
       progress: s.phase === "sweep" ? Math.min(1, s.t / SWEEP_SEC) : 0,
       task: pilot ? s.task : 0, tasks: done ? 0 : s.phase === "positions" ? POSITION_TASKS.length : TASKS[c].length,
       taskDone: pilot && s.taskDone, holdTask: holding, hold: holding ? s.hold : 0,

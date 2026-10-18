@@ -50,8 +50,10 @@ while (pos + 8 <= buf.length) {
       touchdownVsFpm: view.getFloat32(p + 24, true),
       peakG: view.getFloat32(p + 28, true),
       aircraft,
-      aircraftPath: afterAircraft + 2 <= p + size ? readStr(afterAircraft)[0] : '',
     };
+    const [aircraftPath, afterPath] = afterAircraft + 2 <= p + size ? readStr(afterAircraft) : ['', afterAircraft];
+    meta.aircraftPath = aircraftPath;
+    meta.airport = afterPath + 2 <= p + size ? readStr(afterPath)[0] : '';
   } else if (id === 'CHAN') {
     const count = view.getUint16(p, true);
     let q = p + 2;

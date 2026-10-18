@@ -16,6 +16,7 @@ struct ClipEntry {
     EventType event = EventType::Manual;
     int64_t utcStartMs = 0;
     std::string aircraft;
+    std::string airport;  // takeoffs and landings ("" if not known)
     double durationSec = 0.0;
     double touchdownVsFpm = NAN;
     double peakG = NAN;

@@ -185,6 +185,10 @@ const char* const kReverseNoticeDetail =
     "up against the parking brake for up to half a minute.";
 const char* const kReverseSweepDetail = "Keep your hands off the throttle while BetterReplay tries reverse thrust.";
 
+// Recording stops while the setup runs (SetupFlow::running), so its tests stay out of clips.
+const char* const kTakeoffDetail = "Recording is paused until the setup is done, so this takeoff isn't saved.";
+const char* const kDoneDetail = "Recording starts again now, with these controls.";
+
 const char* question(Control c) {
     switch (c) {
         case Control::Spoilers: return "Did the spoilers come up and go back down?";
@@ -1915,6 +1919,8 @@ void SetupFlow::statusJson(JsonWriter& w) const {
         case Phase::Positions: detail = kPositionsDetail; break;
         case Phase::Notice: detail = reverseOnly_ ? kReverseNoticeDetail : kNoticeDetail; break;
         case Phase::Sweep: detail = reverseOnly_ ? kReverseSweepDetail : kSweepDetail; break;
+        case Phase::Takeoff: detail = kTakeoffDetail; break;
+        case Phase::Done: detail = kDoneDetail; break;
         default: break;
     }
     w.kv("detail", detail);

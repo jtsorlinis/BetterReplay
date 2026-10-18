@@ -177,6 +177,9 @@ public:
     // begin (the throttle sweep), later, cancel, close.
     bool answer(const std::string& a, std::string& error);
     bool active() const { return phase_ != Phase::Idle; }
+    // Active and not yet on its results screen: it's teaching or testing controls (and waiting
+    // for the takeoff in between). Recording stops meanwhile.
+    bool running() const { return phase_ != Phase::Idle && phase_ != Phase::Done; }
 
     // Every sim frame while active. dt = 0 while the sim is paused.
     void onFrame(double dt, const Frame& live, const SetupFacts& facts);
