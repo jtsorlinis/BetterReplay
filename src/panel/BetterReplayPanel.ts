@@ -287,10 +287,21 @@ function clipFacts(c: ClipInfo): string[] {
     return parts;
 }
 
+// Status arrives 4 times a second, so what it shows is written only when it changed: the sim's
+// browser drops a click when the node under the cursor is replaced between press and release
+// (setting the same text still swaps the text node).
+function updateText(el: HTMLElement, text: string): void {
+    if (el.textContent !== text) el.textContent = text;
+}
+
+function updateClass(el: HTMLElement, className: string): void {
+    if (el.className !== className) el.className = className;
+}
+
 // Sets an element's text, hiding it when empty.
 function setText(id: string, text: string): void {
     const el = byId(id);
-    el.textContent = text;
+    updateText(el, text);
     el.classList.toggle("hidden", !text);
 }
 
@@ -761,10 +772,10 @@ class BetterReplayPanel extends UIElement {
     // ---- rendering
 
     renderOffline(): void {
-        byId("br-dot").className = "br-dot offline";
-        byId("br-main").className = "br-main offline";
-        byId("br-state").textContent = "No response from the recorder";
-        byId("br-detail").textContent = "Is the betterreplay-recorder package installed?";
+        updateClass(byId("br-dot"), "br-dot offline");
+        updateClass(byId("br-main"), "br-main offline");
+        updateText(byId("br-state"), "No response from the recorder");
+        updateText(byId("br-detail"), "Is the betterreplay-recorder package installed?");
     }
 
     renderStatus(s: Status): void {
@@ -789,25 +800,23 @@ class BetterReplayPanel extends UIElement {
             state = "Recording paused";
             detail = capitalize(s.why);
         }
-        byId("br-dot").className = "br-dot " + dot;
+        updateClass(byId("br-dot"), "br-dot " + dot);
         const restoreMax = s.restoreMax || 0;
         const left = dot === "restoring" && restoreMax > 0 ? Math.min(1, restoreIn / restoreMax) : 1;
         byId("br-dot-drain").style.transform = "scale(" + left.toFixed(3) + ")";
-        byId("br-main").className = "br-main " + (dot || "paused");  // colours the buffer meter
-        byId("br-state").textContent = state;
-        byId("br-detail").textContent = detail;
+        updateClass(byId("br-main"), "br-main " + (dot || "paused"));  // colours the buffer meter
+        updateText(byId("br-state"), state);
+        updateText(byId("br-detail"), detail);
         // The buffer fills up to what it holds, then rolls.
         const max = s.bufferMax || 0;
-        byId("br-buffer").textContent = formatClock(s.bufferSec);
-        byId("br-buffer-max").textContent = max > 0 ? "of " + formatClock(max) : "";
+        updateText(byId("br-buffer"), formatClock(s.bufferSec));
+        updateText(byId("br-buffer-max"), max > 0 ? "of " + formatClock(max) : "");
         byId("br-buffer-fill").style.width = (max > 0 ? Math.min(1, s.bufferSec / max) * 100 : 0).toFixed(1) + "%";
         this.renderSave();
-        byId("br-open-count").textContent = String(s.clipCount);
-        byId("br-clips-count").textContent = String(s.clipCount);
+        updateText(byId("br-open-count"), String(s.clipCount));
+        updateText(byId("br-clips-count"), String(s.clipCount));
 
-        const error = byId("br-error");
-        error.textContent = s.error;
-        error.classList.toggle("hidden", !s.error);
+        setText("br-error", s.error);
     }
 
     // The save button tells how the save went, in place: "Saving...", then "Saved" (or "Couldn't
@@ -835,14 +844,15 @@ class BetterReplayPanel extends UIElement {
         if (state === "saving") label = "Saving...";
         else if (state === "saved") label = "Saved";
         else if (state === "failed") label = "Couldn't save";
-        byId("br-save-label").textContent = label;
+        updateText(byId("br-save-label"), label);
         if (button.getAttribute("data-state") !== state) {
             button.setAttribute("data-state", state);
             button.className = "br-btn br-save" + (state ? " " + state : "");
             byId("br-save-icon").innerHTML = state === "saved" ? ICON_CHECK : state === "failed" ? ICON_CROSS : ICON_SAVE;
         }
         // Not disabled while it shows the outcome, so it keeps its colour.
-        button.disabled = !state && (!this.status || this.status.play.active || this.status.bufferSec < 1);
+        const disabled = !state && (!this.status || this.status.play.active || this.status.bufferSec < 1);
+        if (button.disabled !== disabled) button.disabled = disabled;
     }
 
     // While the setup is offered or running it takes the whole panel.
@@ -917,11 +927,11 @@ class BetterReplayPanel extends UIElement {
 
         const show = !!prompt;
         byId("br-root").classList.toggle("setup-mode", show);
-        byId("br-setup").className = "br-setup phase-" + (phase || "none") + (setup && setup.active ? " stepping" : "") +
-            (show ? "" : " hidden");
+        updateClass(byId("br-setup"), "br-setup phase-" + (phase || "none") + (setup && setup.active ? " stepping" : "") +
+            (show ? "" : " hidden"));
         if (show) {
-            byId("br-setup-kicker").textContent = kicker;
-            byId("br-setup-aircraft").textContent = s.aircraft || "";
+            updateText(byId("br-setup-kicker"), kicker);
+            updateText(byId("br-setup-aircraft"), s.aircraft || "");
             setHtml("br-setup-steps", stepsHtml(plan));
             setHtml("br-setup-phase", phaseHtml(SETUP_PHASES[phase] || "", setup));
             this.renderPrompt(prompt, !!(setup && setup.active && setup.taskDone));
@@ -1005,7 +1015,7 @@ class BetterReplayPanel extends UIElement {
     renderPlane(s: Status): void {
         const setup = s.setup;
         byId("br-plane").classList.toggle("hidden", !s.aircraft && !setup);
-        byId("br-aircraft").textContent = s.aircraft || "Unknown aircraft";
+        updateText(byId("br-aircraft"), s.aircraft || "Unknown aircraft");
         byId("br-controls-pill").classList.toggle("hidden", !setup);
         byId("br-setup-run").classList.toggle("hidden", !setup);
         if (!setup) return;
@@ -1025,13 +1035,14 @@ class BetterReplayPanel extends UIElement {
         }
         const level = !profile ? "missing" : ok === present ? "ok" : ok > 0 ? "partial" : "missing";
         const pill = byId("br-controls-pill");
-        pill.className = "br-pill " + level;
-        pill.textContent = level === "ok" ? "Configured" : level === "partial" ? "Partially configured" : "Not configured";
-        pill.title = lines.join("\n");
+        updateClass(pill, "br-pill " + level);
+        updateText(pill, level === "ok" ? "Configured" : level === "partial" ? "Partially configured" : "Not configured");
+        const title = lines.join("\n");
+        if (pill.title !== title) pill.title = title;
         const run = byId<HTMLButtonElement>("br-setup-run");
-        run.textContent = profile ? "Redo" : "Set up";
+        updateText(run, profile ? "Redo" : "Set up");
         run.classList.toggle("br-primary", level !== "ok");
-        run.disabled = s.play.active;
+        if (run.disabled !== s.play.active) run.disabled = s.play.active;
     }
 
     renderSeek(fraction: number): void {
@@ -1052,11 +1063,11 @@ class BetterReplayPanel extends UIElement {
         // Until the replay starts (the gear going down first), a big message instead of the controls.
         const preparing = !!p.preparing;
         byId("br-player").classList.toggle("preparing", preparing);
-        byId("br-player-kicker").textContent = preparing ? "Getting ready" : "Replaying";
-        byId("br-now").textContent = clip ? clipTitle(clip) : p.file;
+        updateText(byId("br-player-kicker"), preparing ? "Getting ready" : "Replaying");
+        updateText(byId("br-now"), clip ? clipTitle(clip) : p.file);
         const note = this.note && this.note.view === "player" ? this.note.text : "";
         const sub = byId("br-now-sub");
-        sub.textContent = note || (clip ? [eventLabel(clip.event)].concat(clipFacts(clip)).join(" · ") : "");
+        updateText(sub, note || (clip ? [eventLabel(clip.event)].concat(clipFacts(clip)).join(" · ") : ""));
         sub.classList.toggle("failed", !!note);
         if (!this.seekDragging) this.renderSeek(p.dur > 0 ? p.t / p.dur : 0);
 
@@ -1064,8 +1075,8 @@ class BetterReplayPanel extends UIElement {
         marker.classList.toggle("hidden", !(p.eventT > 0 && p.dur > 0));
         if (p.dur > 0) marker.style.left = ((p.eventT / p.dur) * 100).toFixed(2) + "%";
 
-        byId("br-time").textContent = formatClock(p.t);
-        byId("br-dur").textContent = formatClock(p.dur);
+        updateText(byId("br-time"), formatClock(p.t));
+        updateText(byId("br-dur"), formatClock(p.dur));
         // The big button: pause while playing, play when paused, replay at the end.
         const atEnd = p.dur > 0 && p.t >= p.dur - 0.05;
         const mode = p.playing ? "pause" : atEnd ? "replay" : "play";
@@ -1084,10 +1095,11 @@ class BetterReplayPanel extends UIElement {
         }
     }
 
+    // Rebuilt only when it changed (the list is fetched again every time the panel opens), so a
+    // click on a row isn't lost to a re-render.
     renderList(): void {
-        const list = byId("br-list");
         if (this.clips.length === 0) {
-            list.innerHTML = '<div class="br-empty">No clips yet. Takeoffs and landings are saved automatically.</div>';
+            setHtml("br-list", '<div class="br-empty">No clips yet. Takeoffs and landings are saved automatically.</div>');
             return;
         }
         const playing = this.status && this.status.play.active ? this.status.play.file : "";
@@ -1116,7 +1128,7 @@ class BetterReplayPanel extends UIElement {
                       ICON_TRASH + "</button>") +
                 "</div></div>";
         }
-        list.innerHTML = html;
+        setHtml("br-list", html);
     }
 }
 

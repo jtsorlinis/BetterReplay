@@ -1256,6 +1256,11 @@ button {
   color: #04121f;
 }
 
+.br-icon-btn.br-play:hover {
+  border-color: #8cc8ff;
+  background: #6bb8ff;
+}
+
 .br-icon-btn.br-delete {
   color: var(--br-muted);
 }
