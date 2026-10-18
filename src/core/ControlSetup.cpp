@@ -109,6 +109,12 @@ const char* const kSpoilerWords[] = {"SPOILER", "SPEED_BRAKE", "SPEEDBRAKE", "SP
 const char* const kFlapWords[] = {"FLAP", nullptr};
 const char* const kThrottleWords[] = {"THROTTLE", "THRUST_LEVER", "TLA", "LEVER", nullptr};
 const char* const kGearWords[] = {"GEAR", nullptr};
+// Among variables that held as still as each other, the throttle lever's own position over what
+// the autothrust asks for or the thrust it makes: the A350's INI_AUTOTHROTTLE_ENGINE1_AT_REQUEST
+// holds with the lever on the ground, but in reverse it reads part throttle (and in flight it's
+// the autothrust's); its INI_ENGINE1_TLA_N1 is an N1, its INI_3D_THROTTLE_LEVER_POSITION_1 the lever.
+const char* const kLeverPositionWords[] = {"LEVER", "TLA", nullptr};
+const char* const kLeverDemandWords[] = {"REQUEST", "COMMAND", "CMD", "TARGET", "TGT", "DEMAND", "_N1", nullptr};
 
 const char* const* wordsFor(Control c) {
     switch (c) {
@@ -1331,17 +1337,20 @@ bool SetupFlow::findLever() {
     double bestScore = 0.0;
     for (const auto& f : found) {
         const CandidateTracker::Holds hd = tracker_.holds(f.index, from, t_, kLeverPositionSec, kLeverStillFraction);
-        logf(0, "control setup:   L:var %s held %d position(s), still %.1f s of %.1f, %d values (score %.2f)",
-             tracker_.var(f.index).name.c_str(), hd.levels, hd.stillSec, t_ - from, hd.values, f.score);
+        const std::string& name = tracker_.var(f.index).name;
+        const double score = f.score + (hasWord(name, kLeverPositionWords) ? 0.1 : 0.0) -
+                             (hasWord(name, kLeverDemandWords) ? 0.1 : 0.0);
+        logf(0, "control setup:   L:var %s held %d position(s), still %.1f s of %.1f, %d values (score %.2f)", name.c_str(),
+             hd.levels, hd.stillSec, t_ - from, hd.values, score);
         // Flags and detent indexes hold still too, but don't say where between detents the lever is.
         if (hd.levels < kLeverLevels || hd.values < kLeverMinValues) continue;
         const bool better = !have || hd.stillSec > bestHolds.stillSec + 0.5 ||
-                            (hd.stillSec > bestHolds.stillSec - 0.5 && f.score > bestScore);
+                            (hd.stillSec > bestHolds.stillSec - 0.5 && score > bestScore);
         if (!better) continue;
         have = true;
         best = f.index;
         bestHolds = hd;
-        bestScore = f.score;
+        bestScore = score;
     }
     if (!have) {
         logf(1, "control setup: no L:var held still at the throttle positions (%zu moved with it)", found.size());

@@ -61,6 +61,7 @@ struct FakeAircraft : IControlSim {
     double demandLagSec = 1.2;    // 0: the demand settles at once (no creep to see)
     double demandCreepPct = 0.0;  // and it keeps creeping up this much a second while off idle
     bool hideLeverVars = false;   // the INI_ L:vars don't move (the lever can't be found from them)
+    bool atRequest = false;       // and an autothrust request that reads the same as the lever (the A350)
     double axis[2] = {0.0, 0.0};
     double out[2] = {0.0, 0.0};
     double creep[2] = {0.0, 0.0};
@@ -170,6 +171,10 @@ struct FakeAircraft : IControlSim {
             vars.insert(vars.end(), {{"INI_ENG1_THROTTLE_POS", true}, {"INI_ENG2_THROTTLE_POS", true},
                                      {"INI_LEVER_IN_TOGA", true},     {"INI_THROTTLE_OUTPUT_ENGINE1", true},
                                      {"INI_THROTTLE_OUTPUT_ENGINE2", true}});
+            if (atRequest) {
+                vars.insert(vars.end(), {{"INI_AUTOTHROTTLE_ENGINE1_AT_REQUEST", true},
+                                         {"INI_AUTOTHROTTLE_ENGINE2_AT_REQUEST", true}});
+            }
         }
         return vars;
     }
@@ -179,6 +184,7 @@ struct FakeAircraft : IControlSim {
         if (hideThrottleVars) v[1] = v[2] = 16.7;
         if (airbus && hideLeverVars) v.insert(v.end(), {0.0, 0.0, 0.0, 0.0, 0.0});
         else if (airbus) v.insert(v.end(), {leverVar(0), leverVar(1), tla(0) >= 44.9 ? 1.0 : 0.0, out[0], out[1]});
+        if (airbus && atRequest) v.insert(v.end(), {leverVar(0), leverVar(1)});
         return v;
     }
     void scanBegin(std::vector<ScanVar>& vars) override {
@@ -648,6 +654,7 @@ TEST(Setup_ThrottleLeverFoundAndCalibratedWhenTheSimvarCreeps) {
     SetupHarness h;
     throttleOnly(h);
     h.aircraft.airbus = true;
+    h.aircraft.atRequest = true;  // holds exactly as still as the lever: the lever's name wins
     h.facts.hasReverse = true;
     REQUIRE(h.start());
     ThrottlePilot p = throttlePilot(h);

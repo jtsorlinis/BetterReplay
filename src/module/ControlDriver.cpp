@@ -333,6 +333,12 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                         fraction = pct / 100.0;
                     }
                 }
+                if (by == ReverseBy::Hold && s.holding) {
+                    // Held in reverse: the forward levers at idle, whatever the lever variable reads
+                    // (the A350's reads part throttle in reverse).
+                    fraction = 0.0;
+                    lever = true;
+                }
                 if (by == ReverseBy::Events) {
                     if (clipReverse != liveReverse) {
                         fraction = 0.0;  // idle in whichever mode the aircraft is in, until it matches
