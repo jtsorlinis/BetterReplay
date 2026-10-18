@@ -38,6 +38,7 @@ constexpr double kLeverStillFraction = 0.005;
 constexpr double kLeverHoldSec = 2.0;
 constexpr double kLeverSettleSec = 0.75;
 constexpr double kLeverCreepPct = 0.5;
+constexpr double kLeverMaxCreep = 0.5;  // of the movement: more, and the still variable wasn't the lever
 constexpr double kLeverFullPct = 95.0;  // the simvar at full; a thrust demand reads less (TOGA ~85)
 constexpr int kLeverLevels = 3;           // the lever variable holds at idle, halfway and full
 constexpr double kLeverPositionSec = 1.5; // the lever variable holding this long is a position
@@ -292,7 +293,7 @@ double CandidateTracker::firstChange(size_t index) const {
 
 CandidateTracker::HoldCheck CandidateTracker::holdCheck(double from, double to, const std::vector<size_t>& candidates,
                                                         double rest, double away, double tol, double holdSec,
-                                                        double settleSec) const {
+                                                        double settleSec, double maxCreep) const {
     HoldCheck out;
     const long k0 = static_cast<long>(std::lower_bound(times_.begin(), times_.end(), from) - times_.begin());
     const long k1 = static_cast<long>(std::upper_bound(times_.begin(), times_.end(), to) - times_.begin()) - 1;
@@ -351,7 +352,7 @@ CandidateTracker::HoldCheck CandidateTracker::holdCheck(double from, double to, 
                     hlo = h < hlo ? h : hlo;
                     hhi = h > hhi ? h : hhi;
                 }
-                if (hhi - hlo > out.creep) {
+                if (hhi - hlo > out.creep && hhi - hlo <= maxCreep) {
                     out.creep = hhi - hlo;
                     out.by = idx;
                 }
@@ -851,6 +852,9 @@ void SetupFlow::resetHolds() {
 // still works: the second hold is then halfway.
 void SetupFlow::trackHolds(double h, double dh, bool enough) {
     const Tuning tu = tuning(Control::Throttle);
+    // A jump since the last sample (some aircraft move the simvar in steps) is movement at once.
+    const double last = holdSamples_ > 0 ? holdPast_[(holdSamples_ - 1) % kHoldPast] : NAN;
+    if (!std::isfinite(last) || !std::isfinite(h) || std::fabs(h - last) > kHoldTolPct) holdSince_ = t_;
     if (t_ + 1e-9 >= holdNext_) {
         holdNext_ = t_ + kHoldSampleSec;
         double& past = holdPast_[holdSamples_++ % kHoldPast];  // a second ago
@@ -1148,9 +1152,12 @@ SetupFlow::LeverVerdict SetupFlow::checkLever() {
             candidates.push_back(f.index);
         }
     }
-    // Held still by itself: within twice the creep, for a hardware lever that jitters a little.
-    const CandidateTracker::HoldCheck hc = tracker_.holdCheck(windowFrom_, t_, candidates, handleRest_, 0.5 * tu.handleNeed,
-                                                              2.0 * kLeverCreepPct, kLeverHoldSec, kLeverSettleSec);
+    // Held still by itself: within twice the creep, for a hardware lever that jitters a little. A
+    // creep is the simvar catching up or drifting after the lever stopped; one that held still
+    // while the simvar moved half the movement or more isn't the lever (a switch nearby).
+    const CandidateTracker::HoldCheck hc =
+        tracker_.holdCheck(windowFrom_, t_, candidates, handleRest_, 0.5 * tu.handleNeed, 2.0 * kLeverCreepPct,
+                           kLeverHoldSec, kLeverSettleSec, kLeverMaxCreep * handlePeak_);
     if (hc.creep > kLeverCreepPct) {
         const ScanVar& v = tracker_.var(hc.by);
         logf(0, "control setup: the throttle lever simvar moved %.2g%% while %s %s held still: it isn't the lever here",

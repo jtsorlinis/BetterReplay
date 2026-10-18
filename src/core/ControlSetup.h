@@ -105,14 +105,15 @@ public:
     // from and to. A lever-like variable (one of `candidates` that took many values) holding
     // still for `holdSec` is the hand being still; `creep` is the most the handle moved during
     // such a hold (its first `settleSec` left out), and `steady` whether the handle itself held
-    // within `tol` for `holdSec` at least `away` from `rest`.
+    // within `tol` for `holdSec` at least `away` from `rest`. A variable that held still while the
+    // handle moved more than `maxCreep` wasn't following the hand at all, so that doesn't count.
     struct HoldCheck {
         double creep = 0.0;
         size_t by = 0;  // the variable that held still while the handle crept
         bool steady = false;
     };
     HoldCheck holdCheck(double from, double to, const std::vector<size_t>& candidates, double rest, double away,
-                        double tol, double holdSec, double settleSec) const;
+                        double tol, double holdSec, double settleSec, double maxCreep = INFINITY) const;
     // The variable's holds between from and to: stretches of at least `holdSec` within
     // `stillFraction` of its range. `levels` counts the distinct values held, `stillSec` their
     // total length.

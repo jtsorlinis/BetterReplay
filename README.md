@@ -7,7 +7,7 @@ An in-sim auto replay recorder for Microsoft Flight Simulator 2024. It records y
 - **Toolbar panel:** shows recorder status and the clip list, and has play/pause, seek, speed (0.25x–4x), stop, delete and "save last 5 min".
 - **Control setup:** a guided setup per aircraft that finds out how replays can move its spoilers, flaps, throttle and gear, by watching you move each one and testing ways to replay it. See [Control setup](#control-setup).
 
-> **Status: MVP, early in-sim testing.** The platform-independent core has 117 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. The control setup hasn't run in the sim yet. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
+> **Status: MVP, early in-sim testing.** The platform-independent core has 118 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. The control setup hasn't run in the sim yet. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
 
 ## Requirements
 

@@ -817,11 +817,11 @@ TEST(Setup_SkippingAStepOnALaterRunKeepsItsEarlierSetup) {
 
 TEST(Setup_TrackerHoldCheckSeesASimvarCreepWhileTheLeverHolds) {
     // The lever goes to 45 over 1 s and stays; the simvar follows with a lag (still creeping
-    // seconds later), or exactly.
+    // seconds later), or exactly. A switch nearby settles before the throttle moves and stays put.
     for (const bool lag : {true, false}) {
         CandidateTracker t;
-        t.begin({{"LEVER", true}, {"FLAG", true}});
-        std::vector<double> v(2);
+        t.begin({{"LEVER", true}, {"FLAG", true}, {"SWITCH", true}});
+        std::vector<double> v(3);
         double simvar = 0.0;
         for (int s = 0; s <= 120; ++s) {
             const double time = s * 0.1;
@@ -829,9 +829,10 @@ TEST(Setup_TrackerHoldCheckSeesASimvarCreepWhileTheLeverHolds) {
             simvar = lag ? simvar + (lever / 45.0 * 85.0 - simvar) * 0.08 : lever / 45.0 * 85.0;
             v[0] = lever;
             v[1] = lever > 40.0 ? 1.0 : 0.0;
+            v[2] = std::round(std::min(time, 1.5) * 10.0);
             t.sample(time, v, simvar, simvar);
         }
-        const CandidateTracker::HoldCheck hc = t.holdCheck(0.0, 12.0, {0, 1}, 0.0, 20.0, 0.5, 2.0, 0.75);
+        const CandidateTracker::HoldCheck hc = t.holdCheck(0.0, 12.0, {0, 1, 2}, 0.0, 20.0, 0.5, 2.0, 0.75, 42.5);
         if (lag) {
             CHECK(hc.creep > 0.5);
             CHECK_EQ(hc.by, size_t(0));  // the flag takes two values: not a lever
@@ -839,7 +840,29 @@ TEST(Setup_TrackerHoldCheckSeesASimvarCreepWhileTheLeverHolds) {
             CHECK(hc.creep < 0.5);
             CHECK(hc.steady);
         }
+        // Without the limit the switch, still through the whole movement, looks like a creep.
+        CHECK(t.holdCheck(0.0, 12.0, {2}, 0.0, 20.0, 0.5, 2.0, 0.75).creep > 80.0);
     }
+}
+
+// A simvar that jumps (some aircraft move it in steps) isn't held until it's been still for the
+// hold's time after the jump, whenever it lands between the setup's samples.
+TEST(Setup_ThrottleHoldStartsAfterAJump) {
+    SetupHarness h;
+    throttleOnly(h);
+    REQUIRE(h.start());
+    double jumpAt = -1.0, tickAt = -1.0;
+    auto pilot = [&](double s) {
+        if (s >= 3.05 && jumpAt < 0.0) {
+            h.aircraft.thr[0] = h.aircraft.thr[1] = 50.0;
+            jumpAt = h.t;
+        }
+        if (tickAt < 0.0 && h.status().getNumber("task", 0) >= 1.0) tickAt = h.t;
+    };
+    h.run(8.0, pilot);
+    REQUIRE(jumpAt > 0.0 && tickAt > 0.0);
+    CHECK(tickAt - jumpAt >= 2.0);
+    CHECK(tickAt - jumpAt < 3.5);
 }
 
 TEST(Profile_LeverCalibrationTables) {
