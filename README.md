@@ -2,12 +2,12 @@
 
 An in-sim auto replay recorder for Microsoft Flight Simulator 2024. It records your flight continuously, saves every takeoff and landing as a clip automatically, and lets you browse and replay clips from a toolbar panel. Everything runs inside the sim, with no external app.
 
-- **Recorder:** a standalone WASM module. It keeps a 5-minute ring buffer at 30 Hz and runs whether or not the panel is open.
+- **Recorder:** a standalone WASM module. It keeps a 10-minute ring buffer at 30 Hz (about 12 MB) and runs whether or not the panel is open.
 - **Auto clips:** takeoffs and landings, including touchdown vertical speed, peak G and bounce count. They're written to disk as soon as each event finishes.
-- **Toolbar panel:** shows recorder status and the clip list, and has play/pause, seek, speed (0.25x–4x), stop, delete and "save last 5 min".
+- **Toolbar panel:** shows recorder status and the clip list, and has play/pause, seek, speed (0.25x–4x), stop, delete and "save last 10 min".
 - **Control setup:** a guided setup per aircraft that finds out how replays can move its spoilers, flaps, throttle and gear, by watching you move each one and testing ways to replay it. See [Control setup](#control-setup).
 
-> **Status: MVP, early in-sim testing.** The platform-independent core has 137 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. The control setup hasn't run in the sim yet. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
+> **Status: MVP, early in-sim testing.** The platform-independent core has 146 unit tests and the module builds and links against the MSFS 2024 SDK. A few in-sim test runs so far have led to the playback fixes for airspeed, gear and throttle. The control setup hasn't run in the sim yet. Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
 
 ## Requirements
 
@@ -50,12 +50,13 @@ You can also build the package in DevMode: **File → Open project…** → `bui
 
 1. Start a flight. Recording starts once the sim is running. Event detection arms 10 s after the flight loads, so spawning on a runway or in the air never creates a clip.
 2. Take off and land. Clips appear in the panel within a few seconds of the end of each event:
-   - **Takeoff:** starts 5 s before the engines start spooling up for it, and ends 2 minutes after liftoff (or when back on the ground, if sooner). The spool-up is the last moment before liftoff that N1 (RPM on pistons) was at idle: the lowest it held steady for 5 s, within 3% of takeoff power. A 40% N1 stabilisation hold or a breakaway bump while taxiing doesn't count as idle, and neither does the engine start. Without engine readings it starts at the last moment you were below 10 kt on the ground.
-   - **Landing:** starts 2 minutes before the first touchdown. Ends at a complete stop (below 1 kt), once you're off the runway with the flaps and spoilers retracted, or once airborne again for more than 15 s (a touch-and-go or go-around); shorter hops are bounces of the same landing. At most 170 s after touchdown, to fit the buffer.
+   - **Takeoff:** starts 10 s before you roll onto the runway (the last runway you entered, so crossing another on the way out doesn't count). If you then wait on it, the clip starts no earlier than 30 s before the engines spool up. Ends 5 s after the flaps are fully up (lever and surfaces), or when back on the ground if that's sooner. If the flaps were already up at liftoff, it ends 2 minutes after liftoff, and if they're still out 5 minutes after liftoff (circuits, forgotten flaps), then.
+     - Without a runway entry (spawned on the runway, or a strip the sim doesn't flag as one) it starts 5 s before the engines start spooling up: the last moment before liftoff that N1 (RPM on pistons) was at idle, the lowest it held steady for 5 s, within 3% of takeoff power. A 40% N1 stabilisation hold, a breakaway bump while taxiing or the engine start doesn't count as idle. Without engine readings either, it starts at the last moment you were below 10 kt on the ground.
+   - **Landing:** starts 2 minutes before the first touchdown. Ends at a complete stop (below 1 kt), 10 s after you leave the runway (crossing another one on the way starts the count again), or once airborne again for more than 15 s (a touch-and-go or go-around); shorter hops are bounces of the same landing. At most 170 s after touchdown, in case you never stop or leave the runway.
    - If the flight ends first (main menu, a new flight, slew, a teleport, a replay), a landing in progress and a takeoff past liftoff are saved up to that moment.
 3. Open **BetterReplay** from the toolbar. If the icon is hidden, enable it in the toolbar's settings. The panel shows one screen at a time:
-   - **Main:** the recorder's status, large. The dot shows the state: green = recording and armed, amber = arming, grey = paused (the reason is shown), blue = replaying. Below it a bar shows the buffer filling up to its 5 minutes, and **Save last 5 minutes** saves the whole buffer as a manual clip; the button itself shows *Saved* (or *Couldn't save*) for a moment. Under that is the aircraft, with its replay controls *Configured* (green), *Partially configured* (yellow: some controls were skipped, didn't pass, or the gear is still to do) or *Not configured* (red), and **Set up** / **Redo** for the [control setup](#control-setup). **Saved clips** at the bottom, with the clip count, opens the library.
-   - **Saved clips:** the library, newest first by when each clip ends (the time each row shows), with a back arrow. So a "Save last 5 minutes" right after a takeoff lists above the takeoff clip, though it starts earlier. Each clip has a play button and a bin; the bin asks once more ("Delete?").
+   - **Main:** the recorder's status, large. The dot shows the state: green = recording and armed, amber = arming, grey = paused (the reason is shown), blue = replaying. Below it a bar shows the buffer filling up to its 10 minutes, and **Save last 10 minutes** saves the whole buffer as a manual clip; the button itself shows *Saved* (or *Couldn't save*) for a moment. Under that is the aircraft, with its replay controls *Configured* (green), *Partially configured* (yellow: some controls were skipped, didn't pass, or the gear is still to do) or *Not configured* (red), and **Set up** / **Redo** for the [control setup](#control-setup). **Saved clips** at the bottom, with the clip count, opens the library.
+   - **Saved clips:** the library, newest first by when each clip ends (the time each row shows), with a back arrow. So a "Save last 10 minutes" right after a takeoff lists above the takeoff clip, though it starts earlier. Each clip has a play button and a bin; the bin asks once more ("Delete?").
    - **Player:** a clip replays on the aircraft it was recorded on or a variant of it; from another aircraft, its row says which one to switch to. Play freezes your aircraft and replays the clip on it, with the player filling the panel: a large seek bar (the amber mark is the touchdown), round play/pause and stop buttons, and the speeds. **Stop** puts the aircraft back exactly where it was, with its velocities, resumes recording and returns to the main screen.
 
 Recording pauses while the sim is paused, in slew, in the menus, during the sim's own replay, and during BetterReplay playback.
@@ -91,7 +92,7 @@ If you skip the gear step or quit before it, the panel offers just the gear once
 - `aircraft.json`: the control profiles, one per aircraft: for each control its state (`ok`, `failed`, `skipped`, `absent`, `pending`), method and variable.
 - `betterreplay.log` and `betterreplay.prev.log`: the module's log for this and the previous sim session.
 
-Only the newest 20 auto clips (takeoffs and landings) are retained; older ones are deleted when a new one is saved, and at startup. "Save last 5 min" clips are never deleted automatically.
+Only the newest 20 auto clips (takeoffs and landings) are retained; older ones are deleted when a new one is saved, and at startup. "Save last 10 min" clips (about 5.5 MB each) are never deleted automatically.
 
 To inspect a clip outside the sim:
 

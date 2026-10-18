@@ -89,7 +89,8 @@ size_t firstBelow(const TraceGen& g, size_t i, double kt) {
 
 // ---------------------------------------------------------------------------- takeoff
 
-TEST(Detector_TakeoffStartsFiveSecondsBeforeTheSpoolUp) {
+TEST(Detector_TakeoffWithoutARunwayEntryStartsFiveSecondsBeforeTheSpoolUp) {
+    // TraceGen starts on a runway, so it never rolls onto one (as if spawned there).
     TraceGen g(true, 0.0, 0.0);
     const SpoolTimes st = poweredDeparture(g);
     EventDetector d = makeDetector();
@@ -101,7 +102,7 @@ TEST(Detector_TakeoffStartsFiveSecondsBeforeTheSpoolUp) {
     CHECK(e.startT >= st.spool - 5.0 - kTol);
     CHECK(e.startT <= st.spool - 5.0 + kSpoolTol);
     CHECK_NEAR(e.eventT, st.liftoff, kTol);
-    CHECK_NEAR(e.endT, st.liftoff + 120.0, kTol);
+    CHECK_NEAR(e.endT, st.liftoff + 120.0, kTol);  // flaps up at liftoff
 }
 
 TEST(Detector_TakeoffSpoolUpFromATurbopropsHighIdle) {
@@ -136,10 +137,10 @@ TEST(Detector_TakeoffWithoutEngineReadingsStartsAtTheRoll) {
     CHECK(e.type == EventType::Takeoff);
     CHECK_NEAR(e.startT, tt.lastSlow, kTol);
     CHECK_NEAR(e.eventT, tt.liftoff, kTol);
-    CHECK_NEAR(e.endT, tt.liftoff + 120.0, kTol);  // well past 1,000 ft by then
+    CHECK_NEAR(e.endT, tt.liftoff + 120.0, kTol);
 }
 
-TEST(Detector_TakeoffEndsTwoMinutesAfterLiftoffWhenClimbingSlowly) {
+TEST(Detector_TakeoffWithFlapsUpEndsTwoMinutesAfterLiftoff) {
     TraceGen g(true, 0.0, 0.0);
     g.hold(15.0, true);
     g.segment(25.0, 60.0, 0.0, true);
@@ -172,6 +173,77 @@ TEST(Detector_TakeoffEndsWhenBackOnTheGroundSooner) {
     CHECK_NEAR(r.events[1].eventT, g.samples[td].t, 1e-9);
 }
 
+TEST(Detector_TakeoffStartsTenSecondsBeforeEnteringTheRunwayAndEndsClean) {
+    // Taxiing out across another runway, onto the departure runway, lined up briefly, off with
+    // the flaps out and cleaned up 90 s after liftoff.
+    TraceGen g(true, 0.0, 0.0);
+    g.onRunway = false;
+    g.flapsUp = false;
+    g.power = 20.0;
+    g.hold(20.0, true);
+    g.segment(5.0, 12.0, 0.0, true);
+    g.onRunway = true;  // crossing
+    g.hold(6.0, true);
+    g.onRunway = false;
+    g.hold(30.0, true);
+    const double entry = g.now() + g.dt;
+    g.onRunway = true;
+    g.segment(5.0, 0.0, 0.0, true);
+    g.hold(5.0, true);
+    g.spool(4.0, 95.0, true);
+    g.segment(30.0, 150.0, 0.0, true);
+    const double liftoff = g.now() + g.dt;
+    g.segment(90.0, 220.0, 3000.0, false);
+    g.flapsUp = true;
+    const double clean = g.now() + g.dt;
+    g.segment(60.0, 250.0, 5000.0, false);
+
+    EventDetector d = makeDetector();
+    const RunResult r = runAll(d, g.samples);
+    REQUIRE(r.events.size() == 1);
+    const DetectedEvent& e = r.events[0];
+    CHECK(e.type == EventType::Takeoff);
+    CHECK_NEAR(e.startT, entry - 10.0, 1e-6);
+    CHECK_NEAR(e.eventT, liftoff, kTol);
+    CHECK_NEAR(e.endT, clean + 5.0, kTol);
+}
+
+TEST(Detector_TakeoffAfterALongWaitOnTheRunwayStartsThirtySecondsBeforeTheSpoolUp) {
+    TraceGen g(true, 0.0, 0.0);
+    g.onRunway = false;
+    g.power = 20.0;
+    g.hold(15.0, true);
+    g.segment(5.0, 10.0, 0.0, true);
+    g.onRunway = true;
+    g.segment(5.0, 0.0, 0.0, true);
+    g.hold(120.0, true);  // lined up and waiting
+    const double spool = g.now();
+    g.spool(4.0, 95.0, true);
+    g.segment(30.0, 150.0, 0.0, true);
+    const double liftoff = g.now() + g.dt;
+    g.segment(130.0, 200.0, 3000.0, false);
+
+    EventDetector d = makeDetector();
+    const RunResult r = runAll(d, g.samples);
+    REQUIRE(r.events.size() == 1);
+    CHECK(r.events[0].startT >= spool - 30.0 - kTol);
+    CHECK(r.events[0].startT <= spool - 30.0 + kSpoolTol);
+    CHECK_NEAR(r.events[0].endT, liftoff + 120.0, kTol);
+}
+
+TEST(Detector_TakeoffNeverCleanEndsFiveMinutesAfterLiftoff) {
+    TraceGen g(true, 0.0, 0.0);
+    g.flapsUp = false;
+    g.hold(15.0, true);
+    g.segment(25.0, 60.0, 0.0, true);
+    const double liftoff = g.now() + g.dt;
+    g.segment(320.0, 90.0, 3000.0, false);
+    EventDetector d = makeDetector();
+    const RunResult r = runAll(d, g.samples);
+    REQUIRE(r.events.size() == 1);
+    CHECK_NEAR(r.events[0].endT, liftoff + 300.0, kTol);
+}
+
 // ---------------------------------------------------------------------------- landing
 
 TEST(Detector_NormalLandingEndsAtTheStop) {
@@ -196,17 +268,13 @@ TEST(Detector_NormalLandingEndsAtTheStop) {
     CHECK_EQ(e.bounces, 0);
 }
 
-TEST(Detector_LandingEndsOffTheRunwayOnceFlapsAndSpoilersAreUp) {
-    // Flaps and spoilers retracted on the runway: it ends as the aircraft leaves it.
+TEST(Detector_LandingEndsTenSecondsOffTheRunway) {
+    // Turned off with the flaps still out.
     {
         TraceGen g(false, 1500.0, 120.0);
         g.flapsUp = false;
         const size_t td = approachAndTouchdown(g, 115.0);
-        g.spoilersDown = false;
         g.segment(25.0, 15.0, 0.0, true);
-        g.flapsUp = true;
-        g.spoilersDown = true;
-        g.hold(10.0, true);  // clean, but still on the runway
         g.onRunway = false;
         const size_t exit = g.index();
         g.hold(30.0, true);
@@ -214,26 +282,24 @@ TEST(Detector_LandingEndsOffTheRunwayOnceFlapsAndSpoilersAreUp) {
         const RunResult r = runAll(d, g.samples);
         REQUIRE(r.events.size() == 1);
         CHECK_NEAR(r.events[0].eventT, g.samples[td].t, 1e-9);
-        CHECK_NEAR(r.events[0].endT, g.samples[exit].t, 1e-9);
+        CHECK_NEAR(r.events[0].endT, g.samples[exit].t + 10.0, kTol);
     }
-    // Off the runway first: it ends once the spoilers and then the flaps are up.
+    // Across another runway on the way: 10 s after leaving that one.
     {
         TraceGen g(false, 1500.0, 120.0);
-        g.flapsUp = false;
         approachAndTouchdown(g, 115.0);
-        g.spoilersDown = false;
         g.segment(25.0, 15.0, 0.0, true);
         g.onRunway = false;
-        g.hold(10.0, true);
-        g.spoilersDown = true;
-        g.hold(10.0, true);
-        g.flapsUp = true;
-        const size_t clean = g.index();
+        g.hold(5.0, true);
+        g.onRunway = true;
+        g.hold(4.0, true);
+        g.onRunway = false;
+        const size_t exit = g.index();
         g.hold(30.0, true);
         EventDetector d = makeDetector();
         const RunResult r = runAll(d, g.samples);
         REQUIRE(r.events.size() == 1);
-        CHECK_NEAR(r.events[0].endT, g.samples[clean].t, 1e-9);
+        CHECK_NEAR(r.events[0].endT, g.samples[exit].t + 10.0, kTol);
     }
 }
 
@@ -250,13 +316,11 @@ TEST(Detector_LandingAwayFromARunwayEndsAtTheStop) {
     CHECK_NEAR(r.events[0].endT, g.samples[firstBelow(g, td, 1.0)].t, 1e-9);
 }
 
-TEST(Detector_LandingEndsAtTheTimeLimitWhenTaxiingOn) {
-    // Off the runway with the flaps still out, taxiing without stopping.
+TEST(Detector_LandingEndsAtTheTimeLimitWhenRollingOn) {
+    // Rolling on along the runway without stopping (a long backtrack).
     TraceGen g(false, 1500.0, 120.0);
-    g.flapsUp = false;
     const size_t td = approachAndTouchdown(g, 115.0);
     g.segment(25.0, 15.0, 0.0, true);
-    g.onRunway = false;
     g.hold(200.0, true);
     EventDetector d = makeDetector();
     const RunResult r = runAll(d, g.samples);

@@ -63,39 +63,42 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 - [ ] The BetterReplay icon (circular arrow with a play triangle) is in the toolbar. If not, look in the toolbar settings list.
 - [ ] Open it:
   - The status dot is green, with **Recording** and *On ground* under it, and the aircraft's name on the card below.
-  - The buffer counts up and its bar fills towards 5:00. **Saved clips** at the bottom opens the library ("No clips yet" at first); the back arrow returns.
+  - The buffer counts up and its bar fills towards 10:00. **Saved clips** at the bottom opens the library ("No clips yet" at first); the back arrow returns.
 - [ ] Close and reopen the panel. The state is the same; the panel holds no state.
 - [ ] If the panel says *"No response from the recorder"*: note whether section 1's lines appeared. This means CommBus isn't reaching the module.
 
 ## 4. Takeoff
 
-- [ ] Taxi to the runway, stop briefly, then take off normally and keep climbing for 2 minutes. **Expect:**
+- [ ] Taxi to the runway, line up, then take off normally with flaps out and climb until they're up. **Expect:**
   ```
-  detector: liftoff: takeoff candidate (engines spooled up N s earlier)
+  detector: liftoff: takeoff candidate (onto the runway N s earlier, flaps out)
   detector: takeoff confirmed (5.0 s airborne, AGL N ft)
+  detector: takeoff: flaps up
   detector: takeoff finished: N s clip (liftoff at +N s)
   saved YYYY-MM-DD_HHMM_takeoff.rpl: N s, N frames, N KB
   ```
 - [ ] Under **Saved clips**, a green **Takeoff** tag and the local date/time, with the aircraft and duration.
 - [ ] Check the clip: `node tools\rpl-dump.mjs "<work folder>\<file>.rpl"`.
-  - It starts with the engines at idle (`n1_1`), 5 s before they spool up for the takeoff, not at the engine start or a taxi bump.
+  - It starts 10 s before the aircraft rolls onto the runway.
   - `ongnd` goes 1 → 0 at the liftoff offset.
-  - It ends 120 s after liftoff.
+  - It ends 5 s after the flaps are fully up (`flap_idx` 0, `flap_l` near 0).
+- [ ] Line up and wait a couple of minutes before taking off: the clip starts about 30 s before the engines spool up, not at the line-up.
+- [ ] Take off with the flaps up: the clip ends 2 minutes after liftoff (`takeoff: flaps were up at liftoff`).
 
 ## 5. Landing
 
-- [ ] Fly a pattern and make a normal landing, then vacate the runway with the flaps out. **Expect:**
+- [ ] Fly a pattern, make a normal landing and vacate the runway without stopping. **Expect:**
   ```
   detector: touchdown: landing candidate (VS -N fpm, GS N kt)
   detector: landing confirmed (3.0 s on the ground, 0 bounce(s))
   ```
-  and nothing more until you retract the spoilers and flaps (or stop), then:
+  then, 10 s after leaving the runway:
   ```
-  detector: landing: off the runway with the flaps and spoilers retracted
+  detector: landing: off the runway
   detector: landing finished: N s clip, VS -N fpm, peak N.NN G, 0 bounce(s)
   saved YYYY-MM-DD_HHMM_landing.rpl: …
   ```
-- [ ] Under **Saved clips**, a blue **Landing** tag, with VS, G and duration (120 s plus the rollout and taxi off).
+- [ ] Under **Saved clips**, a blue **Landing** tag, with VS, G and duration (120 s plus the rollout and 10 s past the turn-off).
 - [ ] Land again and come to a stop on the runway: `landing: stopped`.
 - [ ] Land, and before the landing clip is saved, go back to the main menu: the landing is saved up to that moment (`landing ends here: the recording stops`).
 - [ ] **Compare the VS with another source** (a landing-rate tool, or the sim's own). The clip uses `PLANE TOUCHDOWN NORMAL VELOCITY`; note its sign and magnitude.
@@ -111,7 +114,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 
 - [ ] Land, stay on the ground for a few seconds without stopping, then take off again.
   - **Expect** `landing: airborne again N s after touchdown`, then 15 s later `landing: airborne again for 15 s` and a landing clip that ends there.
-  - Then, 2 minutes after the liftoff, a takeoff clip that starts 5 s before the engines spooled up again on the runway.
+  - Then, once the flaps are up again (or 2 minutes after the liftoff if they stayed up), a takeoff clip that starts 5 s before the engines spooled up again on the runway (it never rolled onto it).
 
 ## 8. Pause mid-landing
 
@@ -136,9 +139,9 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 
 ## 10. Manual save
 
-- [ ] After at least 5 minutes of flight, click **Save last 5 minutes**.
-  - **Expect** `saved …_manual.rpl`, and the button turning green with a tick and *Saved* for a couple of seconds before going back to **Save last 5 minutes**.
-  - The clip is about 5 minutes long.
+- [ ] After at least 10 minutes of flight, click **Save last 10 minutes**.
+  - **Expect** `saved …_manual.rpl`, and the button turning green with a tick and *Saved* for a couple of seconds before going back to **Save last 10 minutes**.
+  - The clip is about 10 minutes long (about 5.5 MB), and the sim doesn't stutter noticeably while it saves.
 - [ ] The button is disabled while a clip is playing.
 
 ## 11. Playback

@@ -21,7 +21,6 @@ struct TraceGen {
     double power = NAN;  // engine power (N1 %); NaN: no engine readings
     bool onRunway = true;
     bool flapsUp = true;
-    bool spoilersDown = true;
     std::vector<br::DetectorSample> samples;
 
     TraceGen(bool onGround, double agl, double gs) : aglFt(agl), gsKt(gs) { push(onGround); }
@@ -41,7 +40,6 @@ struct TraceGen {
         s.enginePower = power;
         s.onRunway = onRunway;
         s.flapsRetracted = flapsUp;
-        s.spoilersRetracted = spoilersDown;
         samples.push_back(s);
     }
 

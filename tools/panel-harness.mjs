@@ -51,7 +51,7 @@ const commBusMock = `
   setInterval(() => {
     window.harnessSetup.tick(0.1);
     if (!state.play.active) {
-      state.buffer = Math.min(300, state.buffer + 0.1);
+      state.buffer = Math.min(600, state.buffer + 0.1);
       state.armIn = Math.max(0, state.armIn - 0.1);
       if (state.armIn === 0) { state.armed = true; state.phase = 'airborne'; }
     } else if (state.play.preparing) {
@@ -68,7 +68,7 @@ const commBusMock = `
   }
   function status() {
     return { v: 1, rec: state.rec && !state.play.active, why: state.play.active ? 'playback' : state.why,
-      armed: state.armed, armIn: state.armIn, phase: state.phase, bufferSec: state.buffer, bufferMax: 300,
+      armed: state.armed, armIn: state.armIn, phase: state.phase, bufferSec: state.buffer, bufferMax: 600,
       aircraft: state.aircraft, clipsRev: state.rev, clipCount: clips.length, lastSaved: '', error: '',
       play: Object.assign({}, state.play), setup: window.harnessSetup.status() };
   }

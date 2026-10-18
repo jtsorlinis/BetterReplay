@@ -79,7 +79,6 @@ DetectorSample toDetectorSample(const Frame& f, const FrameInput& in) {
     s.onRunway = in.facts.onRunway;
     s.flapsRetracted = retracted(f.v[kFlapsHandleIndex], 0.5) && retracted(f.v[kFlapsLeft], 0.02) &&
                        retracted(f.v[kFlapsRight], 0.02);
-    s.spoilersRetracted = retracted(f.v[kSpoilersHandle], 0.02) && retracted(f.v[kSpoilersLeft], 0.02);
     return s;
 }
 

@@ -62,7 +62,7 @@ public:
 struct EngineConfig {
     DetectorConfig detector;
     double sampleRateHz = 30.0;
-    double bufferSeconds = 300.0;
+    double bufferSeconds = 600.0;  // about 12 MB of frames
     size_t maxAutoClips = 20;  // newest takeoff/landing clips kept; manual saves are never auto-deleted
     double maxFrameDtSec = 0.5;  // longer gaps (hitches, loading) are clamped
 };

@@ -55,6 +55,7 @@ void EventDetector::disarm(double t, const char* reason) {
     groundRunStart_ = NAN;
     airRunStart_ = NAN;
     lastSlowGround_ = NAN;
+    runwayEntry_ = NAN;
     gHistory_.clear();
     power_.clear();
     if (reason) {
@@ -118,17 +119,21 @@ int EventDetector::update(const DetectorSample& s, DetectedEvent out[2]) {
     }
 
     const bool onGround = s.onGround;
+    const bool tracked = haveTrack_;
     if (!haveTrack_) {
         haveTrack_ = true;
         prevOnGround_ = onGround;
         groundRunStart_ = onGround ? s.t : NAN;
         airRunStart_ = onGround ? NAN : s.t;
         lastSlowGround_ = NAN;
+        runwayEntry_ = NAN;  // already on one (spawned there) isn't entering it
     }
     const bool wasOnGround = prevOnGround_;
     if (onGround && !wasOnGround) groundRunStart_ = s.t;
     if (!onGround && wasOnGround) airRunStart_ = s.t;
     if (onGround && s.groundSpeedKt < cfg_.takeoffSlowGroundSpeedKt) lastSlowGround_ = s.t;
+    // Rolled onto a runway (landing on one doesn't count).
+    if (tracked && onGround && wasOnGround && s.onRunway && !last_.onRunway) runwayEntry_ = s.t;
 
     if (!armed_) {
         if (s.t >= armAt_) {
@@ -171,9 +176,15 @@ void EventDetector::onLiftoff(const DetectorSample& s) {
         const double ground = std::isnan(groundRunStart_) ? s.t : groundRunStart_;
         const double earliest = s.t - cfg_.takeoffMaxPreRollSec;
         const double spool = spoolUpStart(std::max(earliest + cfg_.takeoffPreSpoolSec, ground), s.t);
-        double start = spool - cfg_.takeoffPreSpoolSec;
-        if (std::isnan(spool)) {
-            // No engine readings to go by: from the last moment below takeoffSlowGroundSpeedKt.
+        const bool entered = !std::isnan(runwayEntry_) && runwayEntry_ >= ground;  // in this ground run
+        double start;
+        if (entered) {
+            start = runwayEntry_ - cfg_.takeoffPreRunwaySec;
+            if (!std::isnan(spool)) start = std::max(start, spool - cfg_.takeoffMaxWaitBeforeSpoolSec);
+        } else if (!std::isnan(spool)) {
+            start = spool - cfg_.takeoffPreSpoolSec;
+        } else {
+            // Nothing else to go by: from the last moment below takeoffSlowGroundSpeedKt.
             start = ground;
             if (!std::isnan(lastSlowGround_) && lastSlowGround_ > start) start = lastSlowGround_;
         }
@@ -182,11 +193,15 @@ void EventDetector::onLiftoff(const DetectorSample& s) {
         takeoff_.active = true;
         takeoff_.liftoffT = s.t;
         takeoff_.startT = start;
+        takeoff_.flapsOut = !s.flapsRetracted;
         if (landing_.active) return;
-        if (std::isnan(spool)) {
-            logf("liftoff: takeoff candidate (no engine readings; roll began %.1f s earlier)", s.t - start);
+        const char* flaps = takeoff_.flapsOut ? "flaps out" : "flaps up";
+        if (entered) {
+            logf("liftoff: takeoff candidate (onto the runway %.1f s earlier, %s)", s.t - runwayEntry_, flaps);
+        } else if (!std::isnan(spool)) {
+            logf("liftoff: takeoff candidate (engines spooled up %.1f s earlier, %s)", s.t - spool, flaps);
         } else {
-            logf("liftoff: takeoff candidate (engines spooled up %.1f s earlier)", s.t - spool);
+            logf("liftoff: takeoff candidate (roll began %.1f s earlier, %s)", s.t - start, flaps);
         }
     }
 }
@@ -293,7 +308,23 @@ void EventDetector::airborneTick(const DetectorSample& s, DetectedEvent* out, in
             return;
         }
     }
-    if (takeoff_.confirmed && sinceLiftoff >= cfg_.takeoffAfterLiftoffSec) finishTakeoff(s.t, out, n);
+    if (!takeoff_.confirmed) return;
+    const char* end = nullptr;
+    if (takeoff_.flapsOut) {
+        if (!s.flapsRetracted) {
+            takeoff_.cleanT = NAN;  // (out again)
+        } else if (std::isnan(takeoff_.cleanT)) {
+            takeoff_.cleanT = s.t;
+        }
+        if (!std::isnan(takeoff_.cleanT) && s.t - takeoff_.cleanT >= cfg_.takeoffAfterCleanSec) end = "flaps up";
+    } else if (sinceLiftoff >= cfg_.takeoffAfterLiftoffSec) {
+        end = "flaps were up at liftoff: the time after it is up";
+    }
+    if (!end && sinceLiftoff >= cfg_.takeoffMaxAfterLiftoffSec) end = "flaps still out at the time limit";
+    if (end) {
+        logf("takeoff: %s", end);
+        finishTakeoff(s.t, out, n);
+    }
 }
 
 void EventDetector::groundTick(const DetectorSample& s, DetectedEvent* out, int& n) {
@@ -313,12 +344,17 @@ void EventDetector::groundTick(const DetectorSample& s, DetectedEvent* out, int&
         logf("landing confirmed (%.1f s on the ground, %u bounce(s))", s.t - groundRunStart_,
              static_cast<unsigned>(landing_.bounces));
     }
-    if (s.onRunway) landing_.runwaySeen = true;
+    if (s.onRunway) {
+        landing_.runwaySeen = true;
+        landing_.offRunwayT = NAN;  // (crossing another one starts the count again)
+    } else if (landing_.runwaySeen && std::isnan(landing_.offRunwayT)) {
+        landing_.offRunwayT = s.t;
+    }
     const char* end = nullptr;
     if (s.groundSpeedKt < cfg_.landingStopGroundSpeedKt) {
         end = "stopped";
-    } else if (landing_.runwaySeen && !s.onRunway && s.flapsRetracted && s.spoilersRetracted) {
-        end = "off the runway with the flaps and spoilers retracted";
+    } else if (!std::isnan(landing_.offRunwayT) && s.t - landing_.offRunwayT >= cfg_.landingOffRunwaySec) {
+        end = "off the runway";
     } else if (sinceTouchdown >= cfg_.landingMaxAfterTouchdownSec) {
         end = "still rolling at the time limit";
     }

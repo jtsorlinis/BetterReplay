@@ -78,7 +78,6 @@ FrameInput toInput(const DetectorSample& s) {
     in.facts.onRunway = s.onRunway;
     in.raw.v[kFlapsHandleIndex] = s.flapsRetracted ? 0.0 : 2.0;
     in.raw.v[kFlapsLeft] = in.raw.v[kFlapsRight] = s.flapsRetracted ? 0.0 : 0.4;
-    in.raw.v[kSpoilersHandle] = in.raw.v[kSpoilersLeft] = s.spoilersRetracted ? 0.0 : 1.0;
     return in;
 }
 
@@ -207,24 +206,49 @@ TEST(Engine_FullFlightSavesTakeoffAndLanding) {
     CHECK_NEAR(takeoffs[0]->durationSec, to.meta.eventOffsetSec + 120.0, 0.1);
 }
 
-TEST(Engine_LandingEndsOffTheRunwayCleanedUp) {
+TEST(Engine_LandingEndsTenSecondsOffTheRunway) {
     TraceGen g(false, 1500.0, 120.0);
     g.flapsUp = false;
     const size_t td = approachAndTouchdown(g, 115.0);
-    g.spoilersDown = false;
     g.segment(25.0, 15.0, 0.0, true);
     g.onRunway = false;
-    g.hold(5.0, true);
-    g.spoilersDown = true;
-    g.flapsUp = true;
-    const double clean = g.now() + g.dt;
+    const double exit = g.now() + g.dt;
     g.hold(20.0, true);
 
     Harness h;
     h.feedAll(g.samples);
     const auto landings = h.clipsOf(EventType::Landing);
     REQUIRE(landings.size() == 1);
-    CHECK_NEAR(landings[0]->durationSec, 120.0 + (clean - g.samples[td].t), 0.1);
+    CHECK_NEAR(landings[0]->durationSec, 120.0 + (exit + 10.0 - g.samples[td].t), 0.1);
+}
+
+TEST(Engine_TakeoffFromTheRunwayEntryUntilClean) {
+    // ON ANY RUNWAY and the flap readings, as the module passes them.
+    TraceGen g(true, 0.0, 0.0);
+    g.onRunway = false;
+    g.flapsUp = false;
+    g.power = 20.0;
+    g.hold(20.0, true);
+    g.segment(5.0, 10.0, 0.0, true);
+    const double entry = g.now() + g.dt;
+    g.onRunway = true;
+    g.segment(5.0, 0.0, 0.0, true);
+    g.spool(4.0, 95.0, true);
+    g.segment(30.0, 150.0, 0.0, true);
+    const double liftoff = g.now() + g.dt;
+    g.segment(100.0, 220.0, 3000.0, false);
+    g.flapsUp = true;
+    const double clean = g.now() + g.dt;
+    g.segment(30.0, 250.0, 4000.0, false);
+
+    Harness h;
+    h.feedAll(g.samples);
+    const auto takeoffs = h.clipsOf(EventType::Takeoff);
+    REQUIRE(takeoffs.size() == 1);
+    Clip to;
+    REQUIRE(h.load(takeoffs[0]->file, to));
+    CHECK_NEAR(to.meta.eventOffsetSec, liftoff - (entry - 10.0), 0.1);
+    CHECK_NEAR(takeoffs[0]->durationSec, clean + 5.0 - (entry - 10.0), 0.1);
 }
 
 TEST(Engine_LandingInProgressIsSavedWhenTheFlightEnds) {
@@ -519,13 +543,13 @@ TEST(Engine_DecimatesToSampleRate) {
     }
 }
 
-TEST(Engine_BufferHoldsAboutFiveMinutes) {
+TEST(Engine_BufferHoldsAboutTenMinutes) {
     Harness h;
     TraceGen g(false, 30000.0, 450.0);
     g.hold(1200.0, false);  // 20 minutes
     h.feedAll(g.samples);
-    CHECK(h.engine.bufferedSeconds() >= 300.0);
-    CHECK(h.engine.bufferedSeconds() <= 320.0);
+    CHECK(h.engine.bufferedSeconds() >= 600.0);
+    CHECK(h.engine.bufferedSeconds() <= 640.0);
 }
 
 TEST(Engine_StatusAndClipsJson) {

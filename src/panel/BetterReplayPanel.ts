@@ -801,7 +801,7 @@ class BetterReplayPanel extends UIElement {
     renderSave(): void {
         const button = byId<HTMLButtonElement>("br-save");
         const state = this.saveState;
-        let label = "Save last 5 minutes";
+        let label = "Save last 10 minutes";
         const max = this.status ? this.status.bufferMax || 0 : 0;
         if (max > 0) {
             const minutes = Math.round(max / 60);
