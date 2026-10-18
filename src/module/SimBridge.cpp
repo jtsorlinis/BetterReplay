@@ -564,6 +564,7 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     if (!playing_ && snapFramesLeft_ > 0) writeSnap(restoreSnap_);
     if (restoreWaitFrames_ > 0) checkRestoreGear();
     if (restoreFlapsPending_ && !restoreDeferred_) checkRestoreFlaps();
+    if (restoreThrottleFrames_ > 0) checkRestoreThrottle();
     if (gearCheckFrames_ > 0 && --gearCheckFrames_ == 0) checkGearResponse();
     if (frameCount_ == enumerateAtFrame_) {
         inputEventsLogged_ = 0;
@@ -879,6 +880,7 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     snapCheckFrames_ = 0;
     flapsHold_ = false;
     cancelRestoreFlaps();
+    finishRestoreThrottle();
     engineStartMs_ = 0;
     engineLastMs_ = 0;
     for (int e = 0; e < 4; ++e) {
@@ -1163,6 +1165,25 @@ void SimBridge::cancelRestoreFlaps() {
     if (!restoreFlapsPending_) return;
     restoreFlapsPending_ = false;
     driver_.end(Control::Flaps);
+}
+
+void SimBridge::checkRestoreThrottle() {
+    // Where the throttle was before playback; it toggles reverse back out once the levers are at idle.
+    driver_.apply(Control::Throttle, restoreSnap_, false);
+    const bool out = !driver_.reverseToggled();
+    if (!out && restoreThrottleFrames_ > 1) {
+        --restoreThrottleFrames_;
+        return;
+    }
+    if (!out) log::warn("playback: reverse still toggled in after 10 s; toggling it out anyway");
+    finishRestoreThrottle();
+}
+
+void SimBridge::finishRestoreThrottle() {
+    if (restoreThrottleFrames_ <= 0) return;
+    restoreThrottleFrames_ = 0;
+    if (!driver_.reverseToggled()) driver_.apply(Control::Throttle, restoreSnap_, true);
+    driver_.end(Control::Throttle);  // (toggles reverse out if it's still in)
 }
 
 void SimBridge::trackEngines(const Frame& frame, bool jumped) {
@@ -1576,6 +1597,11 @@ void SimBridge::onAircraftChanged() {
     snapRejected_ = false;
     snapAccepted_ = false;
     cancelRestoreFlaps();
+    if (restoreThrottleFrames_ > 0) {
+        restoreThrottleFrames_ = 0;
+        driver_.forgetReverse();  // that was the other aircraft
+        driver_.end(Control::Throttle);
+    }
 }
 
 void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
@@ -1589,18 +1615,27 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     flapsHold_ = false;
     setInputMasking(false);
     // Profile-driven controls back to where they were, the same way; the flaps once the aircraft
-    // is back where it was (see flapsSettled).
+    // is back where it was (see flapsSettled), and a throttle still toggled into reverse once
+    // it's out (checkRestoreThrottle). Without a restore the aircraft was reset (flight loaded,
+    // main menu): out of any reverse.
     const bool deferFlaps = restore && profileDrives_[static_cast<int>(Control::Flaps)];
+    if (!restore) driver_.forgetReverse();
+    const bool deferThrottle = restore && profileDrives_[static_cast<int>(Control::Throttle)] && driver_.reverseToggled();
     for (int i = 0; i < kControlCount; ++i) {
         const Control c = controlAt(i);
+        const bool defer = (deferFlaps && c == Control::Flaps) || (deferThrottle && c == Control::Throttle);
         if (profileDrives_[i] && restore && !(deferFlaps && c == Control::Flaps)) driver_.apply(c, snapshot, true);
         profileDrives_[i] = false;
-        if (!(deferFlaps && c == Control::Flaps)) driver_.end(c);
+        if (!defer) driver_.end(c);
     }
     if (deferFlaps) {
         restoreFlapsPending_ = true;
         flapsHoldStartMs_ = utcNowMs();
         flapsMatchSinceMs_ = 0;
+    }
+    if (deferThrottle) {
+        restoreThrottleFrames_ = kRestoreThrottleMaxFrames;
+        log::info("playback: taking the throttle out of reverse before letting go of it");
     }
     throttleByProfile_ = false;
     if (!restore) {
@@ -1747,6 +1782,7 @@ bool SimBridge::beginControl(Control c, const ControlMethod& m, std::string& why
         return false;
     }
     cancelRestoreFlaps();
+    finishRestoreThrottle();
     if (!driver_.begin(c, m, why)) return false;
     if (c == Control::Throttle && driver_.wantsThrottleMask()) {
         setInputMasking(true);  // the simvars only hold with the hardware throttle blocked
@@ -1786,6 +1822,10 @@ void SimBridge::setReverser(bool on) {
 
 void SimBridge::throttleDecrease() {
     if (!playing_) driver_.throttleDecrease();
+}
+
+void SimBridge::toggleReverse() {
+    if (!playing_) driver_.toggleReverse();
 }
 
 void SimBridge::onTitleData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size) {

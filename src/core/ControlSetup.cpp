@@ -59,10 +59,21 @@ constexpr double kSweepMaxHoldSec = 1.0;
 constexpr double kSweepReverserSec = 1.5;
 constexpr double kSweepMaxSec = 150.0;
 // Reverse: the reverse events, the axis then stepping the amount; an aircraft they don't reverse
-// (the PMDG 737 moves its forward levers instead) is let off at half the axis. Then, if they
-// didn't work, "decrease throttle" held at idle until the reversers deploy (at most 4 s), and
-// let go: 6 s for them to stow.
+// (the PMDG 737 moves its forward levers instead) is let off at half the axis. If they didn't
+// work, "toggle reverse" the same way, once the throttle simvar is back at idle (at most 6 s: the
+// A350's lags its lever by seconds), each step at least 0.5 s, until the reversers are out and
+// the simvar has gone 5% further into reverse than at reverse idle. Then back to idle until the
+// reverse amount is gone, toggled back, and checked with a little forward thrust (at most 3 s):
+// still in reverse, it's toggled again, twice at most. If the toggle didn't work either,
+// "decrease throttle" held at idle until the reversers deploy (at most 4 s), and let go: 6 s for
+// them to stow.
 constexpr double kSweepGiveUpAxis = 0.5;
+constexpr double kSweepToggleStepSec = 0.5;
+constexpr double kSweepToggleFollowPct = 5.0;
+constexpr double kSweepToggleIdleSec = 6.0;
+constexpr double kSweepStowCheckAxis = 0.15;
+constexpr double kSweepStowCheckSec = 3.0;
+constexpr int kSweepToggleAgain = 2;
 constexpr double kSweepHoldSec = 4.0;
 constexpr double kSweepStowSec = 6.0;
 
@@ -167,11 +178,11 @@ const char* const kPositionsAgain = "Couldn't find the lever's own position in t
 const char* const kNoticeDetail =
     "BetterReplay now moves the throttle itself, from idle to full and back, to learn where the lever's positions "
     "are, then tries reverse thrust if the aircraft has it. The engines spool up against the parking brake for "
-    "about 20 seconds.";
+    "20 to 40 seconds.";
 const char* const kSweepDetail = "Keep your hands off the throttle while BetterReplay learns where the lever's positions are.";
 const char* const kReverseNoticeDetail =
     "BetterReplay now tries reverse thrust itself, to learn how to replay it on this aircraft. The engines spool "
-    "up against the parking brake for a few seconds.";
+    "up against the parking brake for up to half a minute.";
 const char* const kReverseSweepDetail = "Keep your hands off the throttle while BetterReplay tries reverse thrust.";
 
 const char* question(Control c) {
@@ -1409,6 +1420,9 @@ void SetupFlow::beginSweep() {
     sweepAt_ = 0;
     sweepExtended_ = false;
     reverseZone_ = reverseSeen_ = holdTried_ = holdSeen_ = false;
+    toggleTried_ = toggleSeen_ = toggleFollows_ = toggledOn_ = false;
+    toggleAgain_ = 0;
+    toggleIdle_ = toggleDeep_ = NAN;
     sweepForward_.clear();
     sweepReverse_.clear();
     reverserOn_ = false;
@@ -1430,13 +1444,22 @@ void SetupFlow::beginSweep() {
 }
 
 // The reverse test's moves: the reverse events and the amount stepped up the axis, then back to
-// idle and stowed ("decrease throttle" held is added after that if they didn't work).
+// idle and stowed ("toggle reverse" is added after that if they didn't work).
 void SetupFlow::planReverse() {
     sweep_.push_back({0.0, 0, -1});
     sweep_.push_back({0.0, 2, 1});
     for (int i = 1; i <= kSweepReverseSteps; ++i) sweep_.push_back({static_cast<double>(i) / kSweepReverseSteps, 2, -1});
     sweep_.push_back({0.0, 0, -1});
     sweep_.push_back({0.0, 0, 0});
+}
+
+// The toggle test's moves, next: toggled at idle and the amount stepped up the axis, then back to
+// idle, toggled back and checked ("decrease throttle" held is added after that if it didn't work).
+void SetupFlow::planToggle() {
+    std::vector<SweepMove> moves = {{0.0, 7, -1}, {0.0, 5, 2}};
+    for (int i = 1; i <= kSweepReverseSteps; ++i) moves.push_back({static_cast<double>(i) / kSweepReverseSteps, 5, -1});
+    moves.insert(moves.end(), {{0.0, 7, -1}, {0.0, 0, 2}, {kSweepStowCheckAxis, 6, -1}, {0.0, 0, -1}});
+    sweep_.insert(sweep_.begin() + static_cast<std::ptrdiff_t>(sweepAt_), moves.begin(), moves.end());
 }
 
 void SetupFlow::sweepTo(double axis, bool force) {
@@ -1466,8 +1489,40 @@ void SetupFlow::sweepFrame(double dt, const Frame& live) {
     const SweepMove m = sweep_[sweepAt_];  // (a copy: the plan can grow below)
     bool reversingNow = false;
     for (int e = 0; e < engineCount(facts_); ++e) reversingNow |= reversing(live, e);
+    const double thrNow = meanOf(live, kThrottle1, engineCount(facts_));
     if (m.record == 2 && reversingNow) reverseSeen_ = true;
-    if (m.record == 3) {
+    if (m.record == 5 && reversingNow) toggleSeen_ = true;
+    if (m.record == 6) {
+        // Out of reverse again? A little forward thrust shows it; in reverse it's a reverse amount.
+        const bool forward = std::isfinite(thrNow) && thrNow > ReverseToggle::kForwardPct;
+        if (sweepHeld_ < 0.5 || (!reversingNow && !forward && sweepHeld_ < kSweepStowCheckSec)) return;
+        if (reversingNow) {
+            toggledOn_ = true;
+            if (toggleAgain_ >= kSweepToggleAgain) {
+                logf(2, "control setup: still in reverse after toggling reverse %d more time(s)", toggleAgain_);
+                stopSweep("Couldn't get out of reverse thrust. Press your \"toggle reverse\" key or button.");
+                return;
+            }
+            ++toggleAgain_;
+            logf(1, "control setup: still in reverse after toggling back (throttle %.1f%%); toggling again", thrNow);
+            const SweepMove again[] = {{0.0, 7, -1}, {0.0, 0, 2}, {kSweepStowCheckAxis, 6, -1}};
+            sweep_.insert(sweep_.begin() + static_cast<std::ptrdiff_t>(sweepAt_ + 1), again, again + 3);
+        } else {
+            logf(0, "control setup: out of reverse again (throttle %.1f%% at axis %.2f)", thrNow, m.axis);
+            if (!(toggleSeen_ && toggleFollows_) && !holdTried_) {
+                // The toggle didn't work: try "decrease throttle" held at idle, after the idle move.
+                holdTried_ = true;
+                const SweepMove hold[] = {{0.0, 3, -1}, {0.0, 4, -1}};
+                sweep_.insert(sweep_.begin() + static_cast<std::ptrdiff_t>(std::min(sweepAt_ + 2, sweep_.size())), hold,
+                              hold + 2);
+            }
+        }
+    } else if (m.record == 7) {
+        // At idle before a toggle: until the throttle simvar is back there, out of reverse or not.
+        const bool atIdle = !reversingNow && !(thrNow > ReverseToggle::kForwardPct);
+        if (sweepHeld_ < kSweepMinHoldSec || (!atIdle && sweepHeld_ < kSweepToggleIdleSec)) return;
+        if (!atIdle) logf(1, "control setup: the throttle simvar didn't come back to idle (%.1f%%); toggling anyway", thrNow);
+    } else if (m.record == 3) {
         // "Decrease throttle" held at idle: a held key sends it every frame.
         holdSeen_ |= reversingNow;
         if (!holdSeen_ && sweepHeld_ < kSweepHoldSec) {
@@ -1481,11 +1536,17 @@ void SetupFlow::sweepFrame(double dt, const Frame& live) {
         if (reversingNow && sweepHeld_ < kSweepStowSec) return;
         if (reversingNow) logf(1, "control setup: the reversers were still out %.0f s after letting go", sweepHeld_);
     } else {
-        const double minHold = m.reverser >= 0 ? kSweepReverserSec : kSweepMinHoldSec;
-        const double maxHold = m.reverser >= 0 ? kSweepReverserSec + 1.5 : kSweepMaxHoldSec;
+        const double minHold = m.reverser >= 0 ? kSweepReverserSec : m.record == 5 ? kSweepToggleStepSec : kSweepMinHoldSec;
+        const double maxHold = m.reverser >= 0 ? kSweepReverserSec + 1.5 : std::max(kSweepMaxHoldSec, minHold);
         if (!(sweepHeld_ >= minHold && sweepSteady_ >= kSweepSteadySec) && sweepHeld_ < maxHold) return;
         if (m.record == 1) sweepForward_.push_back({m.axis, v});
         if (m.record == 2) sweepReverse_.push_back({m.axis, v});
+        if (m.record == 5 && std::isfinite(thrNow)) {
+            // The reverse amount, on the throttle simvar (what replays set it from).
+            if (m.axis <= 0.0) toggleIdle_ = thrNow;
+            else toggleDeep_ = std::isfinite(toggleDeep_) ? std::min(toggleDeep_, thrNow) : thrNow;
+            toggleFollows_ = std::isfinite(toggleIdle_) && toggleDeep_ <= toggleIdle_ - kSweepToggleFollowPct;
+        }
     }
     ++sweepAt_;
     if (m.record == 2 && m.axis >= kSweepGiveUpAxis - 1e-9 && !reverseSeen_) {
@@ -1494,11 +1555,23 @@ void SetupFlow::sweepFrame(double dt, const Frame& live) {
         while (sweepAt_ < sweep_.size() && sweep_[sweepAt_].record == 2) ++sweepAt_;
         logf(0, "control setup: the reverse thrust events didn't deploy the reversers (axis up to %.2f)", m.axis);
     }
-    if (m.reverser == 0 && !reverseSeen_ && !holdTried_) {
-        // Stowed after the reverse events, which didn't work: try "decrease throttle" held at idle.
-        holdTried_ = true;
-        const SweepMove hold[] = {{0.0, 3, -1}, {0.0, 4, -1}};
-        sweep_.insert(sweep_.begin() + static_cast<std::ptrdiff_t>(sweepAt_), hold, hold + 2);
+    if (m.record == 5 && m.axis > 0.0) {
+        // Enough once the reversers are out and the amount follows the axis; given up at half the
+        // axis if they aren't out. Then back to idle and toggled back.
+        if ((toggleSeen_ && toggleFollows_) || (m.axis >= kSweepGiveUpAxis - 1e-9 && !toggleSeen_)) {
+            while (sweepAt_ < sweep_.size() && sweep_[sweepAt_].record == 5) ++sweepAt_;
+        }
+        if (sweepAt_ >= sweep_.size() || sweep_[sweepAt_].record != 5) {
+            logf(toggleSeen_ && !toggleFollows_ ? 1 : 0,
+                 "control setup: toggle reverse %s (axis up to %.2f; throttle %.1f%% at reverse idle, %.1f%% at most)%s",
+                 toggleSeen_ ? "deployed the reversers" : "didn't deploy the reversers", m.axis, toggleIdle_, toggleDeep_,
+                 toggleSeen_ && !toggleFollows_ ? ", but the axis didn't set the reverse amount" : "");
+        }
+    }
+    if (m.reverser == 0 && !reverseSeen_ && !toggleTried_) {
+        // Stowed after the reverse events, which didn't work: try "toggle reverse".
+        toggleTried_ = true;
+        planToggle();
     }
     if (sweepAt_ >= sweep_.size() && !sweepExtended_) {
         // The forward pass is done. Unless the axis has its own reverse zone (the lever went
@@ -1526,7 +1599,11 @@ void SetupFlow::sweepFrame(double dt, const Frame& live) {
         return;
     }
     const SweepMove& next = sweep_[sweepAt_];
-    if (next.reverser >= 0) {
+    if (next.reverser == 2) {
+        toggledOn_ = !toggledOn_;
+        sim_->toggleReverse();
+        logf(0, "control setup: toggle reverse (THROTTLE_REVERSE_THRUST_TOGGLE) %s", toggledOn_ ? "in" : "back out");
+    } else if (next.reverser >= 0) {
         reverserOn_ = next.reverser == 1;
         sim_->setReverser(reverserOn_);
     }
@@ -1551,9 +1628,17 @@ void SetupFlow::finishSweep() {
         return;
     }
     // How reverse thrust is commanded here: the axis itself, the reverse events (with a table of
-    // the lever under them, if it moved), or "decrease throttle" held at idle.
+    // the lever under them, if it moved), "toggle reverse", or "decrease throttle" held at idle
+    // (which beats a toggle whose amount didn't follow the axis: both would replay all or nothing).
     ReverseBy by = ReverseBy::None;
-    if (facts_.hasReverse) by = reverseZone_ ? ReverseBy::Axis : reverseSeen_ ? ReverseBy::Events : holdSeen_ ? ReverseBy::Hold : ReverseBy::None;
+    if (facts_.hasReverse) {
+        by = reverseZone_                     ? ReverseBy::Axis
+             : reverseSeen_                   ? ReverseBy::Events
+             : toggleSeen_ && toggleFollows_  ? ReverseBy::Toggle
+             : holdSeen_                      ? ReverseBy::Hold
+             : toggleSeen_                    ? ReverseBy::Toggle
+                                              : ReverseBy::None;
+    }
     double rlo = 0.0, rhi = 0.0;
     for (size_t i = 0; i < rev.size(); ++i) {
         rlo = i == 0 || rev[i].lever < rlo ? rev[i].lever : rlo;
@@ -1572,6 +1657,10 @@ void SetupFlow::finishSweep() {
         logf(by == ReverseBy::None ? 1 : 0, "control setup: reverse thrust: %s",
              by == ReverseBy::Axis     ? "on the throttle axis"
              : by == ReverseBy::Events ? "with the reverse thrust events, the axis setting the amount"
+             : by == ReverseBy::Toggle ? (toggleFollows_ ? "with toggle reverse (THROTTLE_REVERSE_THRUST_TOGGLE), the axis "
+                                                           "setting the amount"
+                                                         : "with toggle reverse (THROTTLE_REVERSE_THRUST_TOGGLE), though "
+                                                           "the axis didn't set the amount")
              : by == ReverseBy::Hold   ? "by holding THROTTLE_DECR (\"decrease throttle\") at idle"
                                        : "nothing tried deployed the reversers; replays leave reverse out");
     }
@@ -1615,6 +1704,13 @@ void SetupFlow::parkThrottle() {
     if (reverserOn_) {
         reverserOn_ = false;
         sim_->setReverser(false);
+    }
+    if (toggledOn_) {
+        // Toggled into reverse: back out, with the levers at idle (axis 0 in reverse).
+        toggledOn_ = false;
+        sweepTo(0.0, true);
+        sim_->toggleReverse();
+        logf(1, "control setup: toggled reverse back out while stopping; check that the reversers are stowed");
     }
     const std::vector<LeverPoint> fwd = leverTable(sweepForward_);
     sweepTo(fwd.size() >= 2 && std::isfinite(leverIdle_) ? invertLever(fwd, leverIdle_) : 0.0, true);
