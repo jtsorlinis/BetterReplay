@@ -29,6 +29,7 @@ ClipEntry makeEntry(const std::string& file, const ClipMeta& meta, double durati
     e.event = meta.event;
     e.utcStartMs = meta.utcStartMs;
     e.aircraft = meta.aircraft;
+    e.aircraftPath = meta.aircraftPath;
     e.airport = meta.airport;
     e.durationSec = durationSec;
     e.touchdownVsFpm = meta.touchdownVsFpm;
@@ -94,6 +95,12 @@ std::vector<std::string> ClipIndex::enforceRetention(size_t maxAuto) {
 
 void writeClipEntryJson(JsonWriter& w, const ClipEntry& e) {
     w.beginObject();
+    writeClipFields(w, e);
+    w.kv("aircraftPath", e.aircraftPath);
+    w.endObject();
+}
+
+void writeClipFields(JsonWriter& w, const ClipEntry& e) {
     w.kv("file", e.file);
     w.kv("event", eventName(e.event));
     w.kv("utc", formatIsoUtc(e.utcStartMs));
@@ -105,13 +112,12 @@ void writeClipEntryJson(JsonWriter& w, const ClipEntry& e) {
     w.kv("peakG", e.peakG);
     w.kv("bounces", e.bounces);
     w.kv("auto", e.autoClip);
-    w.endObject();
 }
 
 void ClipIndex::toJson(std::string& out) const {
     JsonWriter w(out);
     w.beginObject();
-    w.kv("version", 1);
+    w.kv("version", 2);  // 2: entries have their aircraftPath
     w.key("clips").beginArray();
     for (const ClipEntry& e : clips_) writeClipEntryJson(w, e);
     w.endArray();
@@ -136,6 +142,7 @@ bool ClipIndex::fromJson(const char* text, size_t length, std::string* error) {
         e.utcStartMs = static_cast<int64_t>(v.getNumber("utcMs", 0.0));
         if (e.utcStartMs == 0) parseIsoUtc(v.getString("utc", ""), e.utcStartMs);
         e.aircraft = v.getString("aircraft", "");
+        e.aircraftPath = v.getString("aircraftPath", "");
         e.airport = v.getString("airport", "");
         e.durationSec = v.getNumber("durationSec", 0.0);
         e.touchdownVsFpm = v.getNumber("touchdownVsFpm", NAN);
@@ -146,6 +153,7 @@ bool ClipIndex::fromJson(const char* text, size_t length, std::string* error) {
     }
     std::sort(loaded.begin(), loaded.end(), newerFirst);
     clips_.swap(loaded);
+    pathsKnown_ = root.getNumber("version", 1.0) >= 2.0;
     return true;
 }
 

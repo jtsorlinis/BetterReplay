@@ -118,6 +118,7 @@ void Engine::setupLog(void* ctx, int level, const char* msg) { static_cast<Engin
 void Engine::init() {
     loadIndex();
     reconcileWithDisk();
+    fillAircraftPaths();
     // Also applies a lowered limit to an existing library.
     const std::vector<std::string> removed = index_.enforceRetention(cfg_.maxAutoClips);
     for (const std::string& f : removed) {
@@ -221,6 +222,27 @@ void Engine::reconcileWithDisk() {
     if (changed) saveIndex();
 }
 
+void Engine::fillAircraftPaths() {
+    if (index_.pathsKnown()) return;
+    std::vector<std::string> files;
+    for (const ClipEntry& e : index_.clips()) {
+        if (e.aircraftPath.empty()) files.push_back(e.file);
+    }
+    std::vector<uint8_t> buf;
+    size_t found = 0;
+    for (const std::string& f : files) {
+        ClipMeta meta;
+        if (!storage_.readFile(f, buf) || !readClipMeta(buf.data(), buf.size(), meta, nullptr)) continue;
+        if (meta.aircraftPath.empty()) continue;  // recorded before the path was: goes by its title
+        index_.find(f)->aircraftPath = meta.aircraftPath;
+        ++found;
+    }
+    // Saved as version 2 from now on, so this happens once (a clip without a path stays without).
+    index_.setPathsKnown();
+    saveIndex();
+    logf(0, "index: aircraft paths read from %zu of %zu clip(s)", found, files.size());
+}
+
 void Engine::saveIndex() {
     json_.clear();
     index_.toJson(json_);
@@ -284,12 +306,17 @@ void Engine::setRelocating(bool relocating) {
     relocating_ = relocating;
 }
 
+// Which clips replay here changes with the aircraft (recordedOnThisAircraft), so the panel gets
+// the list again.
 void Engine::setAircraftTitle(const std::string& title) {
-    if (title != aircraft_) logf(0, "aircraft: %s", title.c_str());
+    if (title == aircraft_) return;
+    logf(0, "aircraft: %s", title.c_str());
     aircraft_ = title;
+    ++clipsRev_;
 }
 
 void Engine::setAircraftKey(const std::string& path) {
+    if (path != aircraftPath_) ++clipsRev_;  // (also another variant: the same family, other clips)
     aircraftPath_ = path;
     const std::string key = aircraftFamily(path);
     if (key == aircraftKey_) return;
@@ -588,7 +615,7 @@ bool Engine::play(const std::string& file, std::string& error) {
         error = "clip is empty";
         return false;
     }
-    if (!recordedOnThisAircraft(clip.meta, error)) {
+    if (!recordedOnThisAircraft(clip.meta.aircraft, clip.meta.aircraftPath, &error)) {
         logf(0, "playback of %s refused: recorded in %s (%s), this is %s (%s)", file.c_str(), clip.meta.aircraft.c_str(),
              clip.meta.aircraftPath.c_str(), aircraft_.c_str(), aircraftPath_.c_str());
         return false;
@@ -610,23 +637,25 @@ bool Engine::play(const std::string& file, std::string& error) {
     return true;
 }
 
-bool Engine::recordedOnThisAircraft(const ClipMeta& meta, std::string& error) const {
+bool Engine::recordedOnThisAircraft(const std::string& title, const std::string& path, std::string* error) const {
     bool same = false;
-    if (!meta.aircraftPath.empty() && aircraftKey_.empty()) {
-        error = "the aircraft isn't identified yet";
+    if (!path.empty() && aircraftKey_.empty()) {
+        if (error) *error = "the aircraft isn't identified yet";
         return false;
     }
-    if (!meta.aircraftPath.empty() && !isTitleKey(meta.aircraftPath) && !isTitleKey(aircraftPath_)) {
+    if (!path.empty() && !isTitleKey(path) && !isTitleKey(aircraftPath_)) {
         // The exact aircraft.cfg, not its family: variants share a control profile but not clips.
         // Their weights and thrust differ, and the physics fights a replay recorded on another.
-        same = meta.aircraftPath == aircraftPath_;
+        same = path == aircraftPath_;
     } else {
         // Older clips, and an aircraft whose path wasn't known then or isn't now: by title.
-        same = meta.aircraft.empty() || equalsIgnoringCase(meta.aircraft, aircraft_);
+        same = title.empty() || equalsIgnoringCase(title, aircraft_);
     }
     if (same) return true;
-    error = meta.aircraft.empty() ? "recorded in another aircraft: switch to it to replay this clip"
-                                  : "recorded in the " + meta.aircraft + ": switch to that aircraft to replay it";
+    if (error) {
+        *error = title.empty() ? "recorded in another aircraft: switch to it to replay this clip"
+                               : "recorded in the " + title + ": switch to that aircraft to replay it";
+    }
     return false;
 }
 
@@ -964,8 +993,14 @@ void Engine::clipsJson(size_t offset, size_t limit, std::string& out) const {
     w.kv("rev", clipsRev_);
     w.kv("total", static_cast<int>(clips.size()));
     w.kv("offset", static_cast<int>(offset));
+    w.kv("aircraftKnown", !aircraftKey_.empty());
     w.key("clips").beginArray();
-    for (size_t i = offset; i < clips.size() && i < offset + limit; ++i) writeClipEntryJson(w, clips[i]);
+    for (size_t i = offset; i < clips.size() && i < offset + limit; ++i) {
+        w.beginObject();
+        writeClipFields(w, clips[i]);
+        w.kv("playable", recordedOnThisAircraft(clips[i].aircraft, clips[i].aircraftPath, nullptr));
+        w.endObject();
+    }
     w.endArray();
     w.endObject();
 }

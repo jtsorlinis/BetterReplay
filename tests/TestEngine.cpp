@@ -638,6 +638,10 @@ TEST(Engine_StatusAndClipsJson) {
     CHECK_NEAR(v.getNumber("total", 0), 1.0, 0);
     REQUIRE(v.get("clips") && v.get("clips")->array.size() == 1);
     CHECK_EQ(v.get("clips")->array[0].getString("event", ""), std::string("manual"));
+    // The aircraft goes by its title until its path is known, and the clip was recorded in it.
+    CHECK(!v.getBool("aircraftKnown", true));
+    CHECK(v.get("clips")->array[0].getBool("playable", false));
+    CHECK(v.get("clips")->array[0].get("aircraftPath") == nullptr);  // index.json's, not the panel's
     h.engine.clipsJson(1, 20, json);
     REQUIRE(parseJson(json.data(), json.size(), v, &err));
     CHECK(v.get("clips")->array.empty());

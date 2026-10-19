@@ -95,10 +95,33 @@ TEST(ClipIndex_OldKeepFlagIsIgnored) {
     CHECK(out.find("keep") == std::string::npos);
 }
 
+TEST(ClipIndex_OldIndexHasNoAircraftPaths) {
+    // Version 1 (or none): the entries' paths are yet to be read from the clips.
+    const std::string v1 = "{\"version\":1,\"clips\":[{\"file\":\"a.rpl\",\"event\":\"landing\",\"utcMs\":2}]}";
+    ClipIndex idx;
+    REQUIRE(idx.fromJson(v1.data(), v1.size(), nullptr));
+    CHECK(!idx.pathsKnown());
+    CHECK(idx.find("a.rpl")->aircraftPath.empty());
+    idx.setPathsKnown();
+    std::string out;
+    idx.toJson(out);
+    CHECK(out.find("\"version\":2") != std::string::npos);
+    ClipIndex back;
+    REQUIRE(back.fromJson(out.data(), out.size(), nullptr));
+    CHECK(back.pathsKnown());
+
+    const std::string unversioned = "{\"clips\":[]}";
+    REQUIRE(back.fromJson(unversioned.data(), unversioned.size(), nullptr));
+    CHECK(!back.pathsKnown());
+    back.clear();  // a new library
+    CHECK(back.pathsKnown());
+}
+
 TEST(ClipIndex_JsonRoundTrip) {
     ClipIndex idx;
     ClipEntry e = entry("2026-10-17_1432_landing.rpl", EventType::Landing, 1792247525000);
     e.aircraft = "Airbus A320neo \"Asobo\"";
+    e.aircraftPath = "simobjects/airplanes/asobo_a320_neo";
     e.airport = "YMML";
     e.durationSec = 154.25;
     e.touchdownVsFpm = -142.5;
@@ -118,6 +141,8 @@ TEST(ClipIndex_JsonRoundTrip) {
     CHECK(l->event == EventType::Landing);
     CHECK_EQ(l->utcStartMs, static_cast<int64_t>(1792247525000));
     CHECK_EQ(l->aircraft, e.aircraft);
+    CHECK_EQ(l->aircraftPath, e.aircraftPath);
+    CHECK(back.pathsKnown());
     CHECK_EQ(l->airport, std::string("YMML"));
     CHECK_NEAR(l->durationSec, 154.25, 1e-9);
     CHECK_NEAR(l->touchdownVsFpm, -142.5, 1e-9);

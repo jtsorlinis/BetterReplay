@@ -34,10 +34,10 @@ Nothing is detected for the first 10 seconds of a flight, so spawning on a runwa
 Open **BetterReplay** from the toolbar.
 
 - **Main screen:** the recorder's status. The dot is green when recording, amber while getting ready, grey when paused (with the reason) and blue while replaying. **Save last 10 minutes** saves the last 10 minutes as a clip. Below that is your aircraft and whether its controls are set up.
-- **Saved clips:** your clips, newest first, named after the aircraft and airport (*A350-900 | YMML*), with landing stats. Each has a play button and a delete button.
+- **Saved clips:** your clips, newest first, named after the aircraft and airport (*A350-900 | YMML*), with landing stats. Each has a play button and a delete button. It lists the clips for the aircraft you're in; **All aircraft** at the top shows every one, other aircraft's dimmed.
 - **Player:** Play freezes your aircraft and replays the clip on it. Drag the seek bar (the amber mark is the touchdown), change the speed, or press **Stop** to put the aircraft back where it was and carry on flying. On the ground it may stay frozen for up to 10 seconds while the gear comes back down.
 
-A clip only replays on the aircraft it was recorded on, down to the variant (an A350-900 clip won't play on the -1000). From another aircraft, the clip says which one to switch to.
+A clip only replays on the aircraft it was recorded on, down to the variant (an A350-900 clip won't play on the -1000). Under **All aircraft**, pressing play on another aircraft's clip says which one to switch to.
 
 ### Control setup
 

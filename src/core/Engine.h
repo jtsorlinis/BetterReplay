@@ -204,6 +204,8 @@ public:
     const EventDetector& detector() const { return detector_; }
 
     void statusJson(std::string& out) const;
+    // A page of the library, each clip with whether it replays on this aircraft ("playable"), and
+    // "aircraftKnown": false until the aircraft is identified (the panel then lists every clip).
     void clipsJson(size_t offset, size_t limit, std::string& out) const;
 
 private:
@@ -217,9 +219,10 @@ private:
     // The flight ends or the aircraft is moved: a landing or takeoff in progress is saved up to
     // the last recorded moment rather than lost.
     void finishEvents();
-    // A clip replays only on the aircraft.cfg it was recorded on, not on another variant that shares
-    // its control profile; otherwise `error` asks to switch to it.
-    bool recordedOnThisAircraft(const ClipMeta& meta, std::string& error) const;
+    // A clip replays only on the aircraft.cfg it was recorded on (`path`), not on another variant
+    // that shares its control profile; otherwise `error` asks to switch to it. Clips from before
+    // the path was recorded go by `title`. Play and the clip list's "playable" both ask this.
+    bool recordedOnThisAircraft(const std::string& title, const std::string& path, std::string* error) const;
     void playbackFrame(double dt);
     void endPlayback(bool restore, const char* why);
     bool saveRange(EventType type, double startT, double endT, const DetectedEvent* ev, int64_t utcNowMs,
@@ -227,6 +230,7 @@ private:
     void saveIndex();
     void loadIndex();
     void reconcileWithDisk();
+    void fillAircraftPaths();  // once, for an index from before it stored them: from the clips
     void loadProfiles();
     void saveProfiles();
     void storeSetupProfile();  // the setup's profile -> profiles_, aircraft.json and the sim

@@ -212,7 +212,9 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 - [ ] Play a clip, then play a **different** clip without stopping, then Stop. You're returned to the position from *before the first* clip.
 - [ ] While a clip plays, pause the sim. Playback holds, then continues when you unpause.
 - [ ] Note whether crash detection ever triggered during playback (e.g. near the ground).
-- [ ] **Another variant:** in the A350-900ULR, play a clip recorded in the -900 (or the other way round). **Expect** it to be refused (*Recorded in the A350-900 (Default Cabin): switch to that aircraft to replay it*, and `playback of … refused` in the log), while the control profile stays shared: the log shows the same `aircraft key simobjects/airplanes/a350` for both.
+- [ ] **This aircraft / All aircraft:** with clips from more than one aircraft, open **Saved clips**. **Expect** **This aircraft** lit, listing only this aircraft's clips, with each choice's count beside it; the **Saved clips** button on the main screen shows the same count. **All aircraft** lists every clip, the other aircraft's dimmed with a grey play button. In an aircraft with no clips: *No clips for the …* and **Show all aircraft (N)**. Switch aircraft (or variant) with the list open: it changes to the new aircraft's clips.
+- [ ] **First start after updating:** with clips saved by an earlier build, the log shows `index: aircraft paths read from N of M clip(s)` once (not on the next start), and the list matches what Play allows.
+- [ ] **Another variant:** in the A350-900ULR, show **All aircraft** and play a clip recorded in the -900 (or the other way round). **Expect** it to be refused (*Recorded in the A350-900 (Default Cabin): switch to that aircraft to replay it*, and `playback of … refused` in the log), while the control profile stays shared: the log shows the same `aircraft key simobjects/airplanes/a350` for both.
 
 ## 12. Control setup
 

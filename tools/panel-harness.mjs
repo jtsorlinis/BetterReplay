@@ -42,16 +42,23 @@ const commBusMock = `
       bounces: ev === 'landing' ? i % 3 : 0, auto: ev !== 'manual' });
   }
   const state = { rev: 1, rec: true, why: '', armed: false, armIn: 6, phase: 'disarmed', buffer: 0,
-    aircraft: 'Airbus A320neo', restoreLeft: 0,
+    aircraft: 'Airbus A320neo', aircraftKnown: true, restoreLeft: 0,
     play: { active: false, file: '', t: 0, dur: 0, speed: 1, playing: false, eventT: 0 } };
   const listeners = {};
   // gearSec, flapsSec, enginesSec: Play first holds, frozen, until each has taken that long
   // ("lowering the gear", "extending the flaps", "spooling up the engines", together; 0: not part
   // of it); restoreSec: Stop keeps the aircraft frozen that long, "waiting for the gear" (10 s at
   // most, like EngineConfig::restoreMaxSec); fail: { op: 'error' } fails the next command of that
-  // op with that error.
+  // op with that error. setAircraft(title, known): another aircraft (known false: not identified
+  // yet), which clips replay changing with it.
   window.harness = { state: state, clips: clips, log: [], setup: window.harnessSetup, gearSec: 0, flapsSec: 0,
-    enginesSec: 0, restoreSec: 10, fail: {} };
+    enginesSec: 0, restoreSec: 10, fail: {},
+    setAircraft: (title, known) => {
+      state.aircraft = title;
+      state.aircraftKnown = known !== false;
+      state.rev++;
+    } };
+  const playable = (c) => state.aircraftKnown && c.aircraft === state.aircraft;
   const noPrep = { gear: '', flaps: '', flapsIn: false, engines: '', enginesDown: false };
   const prepSteps = ['gear', 'flaps', 'engines'];
 
@@ -102,18 +109,22 @@ const commBusMock = `
     switch (cmd.op) {
       case 'status': return emit('BetterReplay.Status', status());
       case 'clips': {
+        // playable: like Engine::recordedOnThisAircraft (here by title alone).
         const off = cmd.offset || 0;
-        return emit('BetterReplay.Clips', { rev: state.rev, total: clips.length, offset: off, clips: clips.slice(off, off + 20) });
+        const page = clips.slice(off, off + 20).map((c) => Object.assign({}, c, { playable: playable(c) }));
+        return emit('BetterReplay.Clips', { rev: state.rev, total: clips.length, offset: off,
+          aircraftKnown: state.aircraftKnown, clips: page });
       }
       case 'saveLast':
         clips.unshift({ file: 'manual_' + Date.now() + '.rpl', event: 'manual', utc: '', utcMs: Date.now(),
-          aircraft: 'Cessna 172 Skyhawk', airport: '', durationSec: state.buffer, touchdownVsFpm: null, peakG: null, bounces: 0, auto: false });
+          aircraft: state.aircraft, airport: '', durationSec: state.buffer, touchdownVsFpm: null, peakG: null, bounces: 0, auto: false });
         state.rev++; return reply(cmd.id, cmd.op, true);
       case 'delete': { const i = find(cmd.file); if (i < 0) return reply(cmd.id, cmd.op, false, 'unknown clip');
         clips.splice(i, 1); state.rev++; if (state.play.file === cmd.file) state.play.active = false; return reply(cmd.id, cmd.op, true); }
       case 'play': { const i = find(cmd.file); if (i < 0) return reply(cmd.id, cmd.op, false, 'unknown clip');
         // Like Engine::play: only on the aircraft the clip was recorded on (harness.state.aircraft).
-        if (clips[i].aircraft !== state.aircraft) {
+        if (!state.aircraftKnown) return reply(cmd.id, cmd.op, false, "the aircraft isn't identified yet");
+        if (!playable(clips[i])) {
           return reply(cmd.id, cmd.op, false, 'recorded in the ' + clips[i].aircraft + ': switch to that aircraft to replay it');
         }
         state.restoreLeft = 0;

@@ -102,6 +102,16 @@
             <strong>Saved clips</strong>
             <span class="br-clips-count" id="br-clips-count"></span>
           </div>
+          <!-- the clips that replay on this aircraft, or every aircraft's (shown once the aircraft is
+               identified) -->
+          <div class="br-filter hidden" id="br-filter">
+            <button type="button" class="br-btn active" id="br-filter-here">
+              This aircraft<span class="br-filter-count" id="br-count-here"></span>
+            </button>
+            <button type="button" class="br-btn" id="br-filter-all">
+              All aircraft<span class="br-filter-count" id="br-count-all"></span>
+            </button>
+          </div>
           <div class="br-clips-note hidden" id="br-clips-note"></div>
           <div class="br-list" id="br-list">
             <div class="br-empty">No clips yet. Takeoffs and landings are saved automatically.</div>

@@ -1538,6 +1538,33 @@ button {
   font-size: 18px;
 }
 
+/* This aircraft / All aircraft: the one listed lit, each with its count. */
+.br-filter {
+  display: flex;
+  margin-bottom: 10px;
+}
+
+.br-filter .br-btn {
+  flex: 1 1 auto;
+  width: 50%;
+  padding: 10px 12px;
+  font-size: 15px;
+}
+
+.br-filter .br-btn + .br-btn {
+  margin-left: 8px;
+}
+
+.br-filter-count {
+  margin-left: 8px;
+  color: var(--br-muted);
+  pointer-events: none;  /* clicks land on the button */
+}
+
+.br-filter .br-btn.active .br-filter-count {
+  color: var(--br-text);
+}
+
 .br-list {
   flex: 1 1 auto;
   min-height: 0;
@@ -1549,6 +1576,13 @@ button {
   color: var(--br-muted);
   font-size: 16px;
   text-align: center;
+}
+
+/* No clips for this aircraft: the way to the others', on its own line. */
+.br-empty .br-show-all {
+  display: block;
+  margin: 10px auto 0;
+  font-size: 16px;
 }
 
 .br-clip {
@@ -1623,6 +1657,29 @@ button {
 .br-clip-btns .br-delete,
 .br-clip-btns .br-confirm-delete {
   margin-left: 8px;
+}
+
+/* Under All aircraft, another aircraft's clip: dimmed, its Play no longer the blue one (pressed,
+   it says which aircraft to switch to). */
+.br-clip.elsewhere .br-badge,
+.br-clip.elsewhere .br-clip-text {
+  opacity: 0.5;
+}
+
+.br-clip.elsewhere.failed .br-clip-text {
+  opacity: 1;
+}
+
+.br-clip.elsewhere .br-play {
+  border-color: var(--br-line);
+  background: var(--br-surface-2);
+  color: var(--br-muted);
+}
+
+.br-clip.elsewhere .br-play:hover {
+  border-color: var(--br-blue);
+  background: var(--br-surface-2);
+  color: var(--br-text);
 }
 
 /* A play or delete that failed says so on its row for a few seconds. */

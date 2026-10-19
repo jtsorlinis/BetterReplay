@@ -126,7 +126,8 @@ Recording pauses while the sim is paused, in slew, in the menus, during the sim'
 
 - **Order:** newest first by when each clip ends (the time each row shows). So a "Save last 10 minutes" right after a takeoff lists above the takeoff clip, though it starts earlier.
 - **Names:** each row is named after the aircraft and, for a takeoff or landing, the airport (*A350-900 | YMML*). The aircraft's name is its title without a note in brackets at the end (*A350-900 (Default Cabin)*). The airport is the one nearest the liftoff or touchdown, from the airports the sim lists around the aircraft, within 8 km; idents that aren't four letters (heliports and private strips, like *34CA*) count as 3 km further away, so a heliport by the runway doesn't win. With none near, and on clips from before airports were recorded, the row shows just the aircraft.
-- **Aircraft match:** a clip replays only on the `aircraft.cfg` it was recorded with, down to the variant (an A350-900 clip doesn't play on the -900ULR or -1000); from another aircraft, its row says which one to switch to.
+- **Aircraft match:** a clip replays only on the `aircraft.cfg` it was recorded with, down to the variant (an A350-900 clip doesn't play on the -900ULR or -1000). Clips from before the path was recorded go by the aircraft's title.
+- **This aircraft / All aircraft:** the list shows the clips that replay on this aircraft, or with **All aircraft** every one, other aircraft's dimmed (their play button says which one to switch to). `clipsJson` marks each clip `playable` by the same check as Play (`Engine::recordedOnThisAircraft`), and the list is sent again when the aircraft's title or path changes, a variant included. Until the aircraft is identified (`aircraftKnown: false`), the panel lists every clip, without the choice.
 - **Stop** puts the aircraft back exactly where it was, with its velocities, resumes recording and returns to the main screen. On the ground it stays frozen until its gear is back down, 10 s at most; the main screen counts that down (*Unfreezing in N s*).
 - **Retention:** only the newest 20 auto clips (takeoffs and landings) are retained; older ones are deleted when a new one is saved, and at startup. "Save last 10 min" clips (about 5.5 MB each) are never deleted automatically.
 
@@ -166,7 +167,7 @@ If you skip the gear step or quit before it, the panel offers just the gear once
 `%APPDATA%\Microsoft Flight Simulator 2024\WASM\MSFS2024\betterreplay-recorder\work\` (Steam). That folder holds:
 
 - `YYYY-MM-DD_HHMM_<takeoff|landing|manual>.rpl`: one file per clip, timestamped in **UTC**.
-- `index.json`: the library (event, date, aircraft, airport, duration, touchdown VS, peak G, bounces). If it's lost, it's rebuilt from the clip headers.
+- `index.json`: the library (event, date, aircraft and its `aircraft.cfg` path, airport, duration, touchdown VS, peak G, bounces). If it's lost, it's rebuilt from the clip headers. An index from before it stored the paths (version 1) gets them from the clips once, at startup (`index: aircraft paths read from N of M clip(s)`).
 - `aircraft.json`: the control profiles, one per aircraft: for each control its state (`ok`, `failed`, `skipped`, `absent`, `pending`), method and variable, and where one method doesn't do both ways, each direction's ways in the order they're tried (see [Control setup](#control-setup)).
 - `betterreplay.log` and `betterreplay.prev.log`: the module's log for this and the previous sim session.
 

@@ -5,6 +5,7 @@
 
 #include "ClipFormat.h"
 #include "Engine.h"
+#include "Json.h"
 #include "PlaybackController.h"
 #include "TestHarness.h"
 
@@ -546,6 +547,118 @@ TEST(EnginePlayback_OnlyOnTheAircraftItWasRecordedOn) {
     CHECK(!h.engine.play(h.clipFile, err));
     h.engine.setAircraftTitle("a350-900 (default cabin)");
     CHECK(h.engine.play(h.clipFile, err));
+}
+
+namespace {
+
+const char* const kA350900 = "simobjects/airplanes/a350/presets/inibuilds/a350-900_default_cabin/config";
+const char* const kA350Ulr = "simobjects/airplanes/a350/presets/inibuilds/a350-900_default_cabin_ulr/config";
+const char* const kB738 = "simobjects/airplanes/pmdg 737-800/presets/pmdg/pmdg 737-800 bw tc/config";
+
+void putClip(MemStorage& storage, const std::string& file, const std::string& title, const std::string& path) {
+    Clip clip = makeClip(3.0);
+    clip.meta.aircraft = title;
+    clip.meta.aircraftPath = path;
+    std::vector<uint8_t> bytes;
+    writeClip(clip.meta, VectorFrameSource(clip.frames), bytes);
+    storage.files[file] = bytes;
+}
+
+// The clip list as the panel gets it: file -> "playable", and the page's "aircraftKnown".
+std::map<std::string, bool> playableClips(const Engine& e, bool* aircraftKnown) {
+    std::string json;
+    e.clipsJson(0, 20, json);
+    JsonValue v;
+    std::string err;
+    std::map<std::string, bool> out;
+    if (!parseJson(json.data(), json.size(), v, &err) || !v.get("clips")) return out;
+    if (aircraftKnown) *aircraftKnown = v.getBool("aircraftKnown", false);
+    for (const JsonValue& c : v.get("clips")->array) out[c.getString("file", "")] = c.getBool("playable", false);
+    return out;
+}
+
+}  // namespace
+
+TEST(Engine_ClipListSaysWhichClipsReplayOnThisAircraft) {
+    MemStorage storage;
+    putClip(storage, "a350.rpl", "A350-900 (Default Cabin)", kA350900);
+    putClip(storage, "b738.rpl", "737-800 PAX BW TC", kB738);
+    putClip(storage, "old.rpl", "A350-900 (Default Cabin)", "");  // from before paths were recorded
+    Engine e{storage};
+    e.init();
+    REQUIRE(e.index().size() == 3);
+
+    // Not identified yet: only a clip going by its title could match, and there's no title yet.
+    bool known = true;
+    std::map<std::string, bool> p = playableClips(e, &known);
+    CHECK(!known);
+    CHECK(!p["a350.rpl"] && !p["b738.rpl"] && !p["old.rpl"]);
+
+    // The -900ULR shares the -900's control profile, not its clips; the list comes again.
+    int rev = e.clipsRevision();
+    e.setAircraftTitle("A350-900 ULR");
+    CHECK(e.clipsRevision() != rev);
+    rev = e.clipsRevision();
+    e.setAircraftKey(kA350Ulr);
+    CHECK(e.clipsRevision() != rev);
+    p = playableClips(e, &known);
+    CHECK(known);
+    CHECK(!p["a350.rpl"] && !p["b738.rpl"] && !p["old.rpl"]);
+
+    // The -900: same family, but another aircraft.cfg, so the list comes again for it too.
+    rev = e.clipsRevision();
+    e.setAircraftKey(kA350900);
+    CHECK(e.clipsRevision() != rev);
+    e.setAircraftTitle("A350-900 (Default Cabin)");
+    p = playableClips(e, nullptr);
+    CHECK(p["a350.rpl"]);
+    CHECK(!p["b738.rpl"]);
+    CHECK(p["old.rpl"]);
+
+    // The same aircraft again: nothing to refresh.
+    rev = e.clipsRevision();
+    e.setAircraftKey(kA350900);
+    e.setAircraftTitle("A350-900 (Default Cabin)");
+    CHECK_EQ(e.clipsRevision(), rev);
+}
+
+TEST(Engine_OldIndexGetsAircraftPathsFromItsClips) {
+    MemStorage storage;
+    putClip(storage, "a350.rpl", "A350-900 (Default Cabin)", kA350900);
+    putClip(storage, "old.rpl", "A350-900 (Default Cabin)", "");
+    const std::string v1 =
+        "{\"version\":1,\"clips\":[{\"file\":\"a350.rpl\",\"event\":\"landing\",\"utcMs\":2,\"aircraft\":\"A350-900 (Default Cabin)\"},"
+        "{\"file\":\"old.rpl\",\"event\":\"landing\",\"utcMs\":1,\"aircraft\":\"A350-900 (Default Cabin)\"}]}";
+    storage.files["index.json"].assign(v1.begin(), v1.end());
+    {
+        Engine e{storage};
+        e.init();
+        REQUIRE(e.index().find("a350.rpl") && e.index().find("old.rpl"));
+        CHECK_EQ(e.index().find("a350.rpl")->aircraftPath, std::string(kA350900));
+        CHECK(e.index().find("old.rpl")->aircraftPath.empty());  // goes by its title
+
+        // So the list agrees with Play: not on the -900ULR, whose title isn't the clip's either.
+        e.setAircraftTitle("A350-900 ULR");
+        e.setAircraftKey(kA350Ulr);
+        std::map<std::string, bool> p = playableClips(e, nullptr);
+        CHECK(!p["a350.rpl"]);
+        CHECK(!p["old.rpl"]);
+    }
+    const std::vector<uint8_t>& saved = storage.files["index.json"];
+    const std::string json(saved.begin(), saved.end());
+    CHECK(json.find("\"version\":2") != std::string::npos);
+    CHECK(json.find(kA350900) != std::string::npos);
+
+    // Read once: the saved index has them, and a clip without one isn't read again.
+    storage.files.erase("a350.rpl");
+    storage.files.erase("old.rpl");
+    putClip(storage, "a350.rpl", "A350-900 (Default Cabin)", kA350900);
+    putClip(storage, "old.rpl", "A350-900 (Default Cabin)", kA350Ulr);  // (would be picked up if read)
+    Engine again{storage};
+    again.init();
+    CHECK(again.index().pathsKnown());
+    CHECK_EQ(again.index().find("a350.rpl")->aircraftPath, std::string(kA350900));
+    CHECK(again.index().find("old.rpl")->aircraftPath.empty());
 }
 
 TEST(EnginePlayback_EventChannelsSendStateChangesOnly) {

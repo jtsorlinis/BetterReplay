@@ -107,11 +107,13 @@ interface ClipInfo {
     peakG: number | null;
     bounces: number;
     auto: boolean;
+    playable: boolean;  // replays on this aircraft (it was recorded on it)
 }
 interface ClipsPage {
     rev: number;
     total: number;
     offset: number;
+    aircraftKnown: boolean;  // false until the aircraft is identified: then every clip is listed
     clips: ClipInfo[];
 }
 interface Reply {
@@ -463,6 +465,8 @@ class BetterReplayPanel extends UIElement {
     declare active: boolean;
     declare status: Status | null;
     declare clips: ClipInfo[];
+    declare aircraftKnown: boolean;
+    declare allAircraft: boolean;  // the clips screen lists every aircraft's, not just this one's
     declare pending: ClipInfo[];
     declare clipsRev: number;
     declare loadingRev: number;
@@ -499,6 +503,8 @@ class BetterReplayPanel extends UIElement {
         this.active = false;
         this.status = null;
         this.clips = [];
+        this.aircraftKnown = false;
+        this.allAircraft = false;
         this.pending = [];
         this.clipsRev = -1;
         this.loadingRev = -1;
@@ -638,6 +644,7 @@ class BetterReplayPanel extends UIElement {
             return;
         }
         this.clips = this.pending;
+        this.aircraftKnown = !!page.aircraftKnown;
         this.pending = [];
         this.clipsRev = page.rev;
         this.loadingRev = -1;
@@ -669,6 +676,8 @@ class BetterReplayPanel extends UIElement {
         });
         byId("br-open-clips").addEventListener("click", () => this.showView("clips"));
         byId("br-back").addEventListener("click", () => this.showView("main"));
+        byId("br-filter-here").addEventListener("click", () => this.showAllAircraft(false));
+        byId("br-filter-all").addEventListener("click", () => this.showAllAircraft(true));
         const stop = () => {
             this.send({ op: "stop" });
             this.showView("main");  // stopping goes back to the main screen
@@ -729,6 +738,8 @@ class BetterReplayPanel extends UIElement {
                 this.send({ op: "play", file: file });
             } else if (act === "delete") {
                 this.confirmDelete(file);
+            } else if (act === "all") {
+                this.showAllAircraft(true);
             }
         });
     }
@@ -736,6 +747,21 @@ class BetterReplayPanel extends UIElement {
     showView(view: string): void {
         this.view = view;
         this.renderView();
+    }
+
+    // Kept while the panel is closed, like the screen showing.
+    showAllAircraft(all: boolean): void {
+        if (this.allAircraft === all) return;
+        this.allAircraft = all;
+        this.renderList();
+    }
+
+    // The clips screen lists this aircraft's clips (the ones that replay on it), or with "All
+    // aircraft" every one; every one too until the aircraft is identified. The one playing stays.
+    listedClips(): ClipInfo[] {
+        if (!this.aircraftKnown || this.allAircraft) return this.clips;
+        const playing = this.status && this.status.play.active ? this.status.play.file : "";
+        return this.clips.filter((c) => c.playable || c.file === playing);
     }
 
     // One screen at a time: the player while a clip plays, else the main screen or the clips.
@@ -851,8 +877,6 @@ class BetterReplayPanel extends UIElement {
         updateText(byId("br-buffer-max"), max > 0 ? "of " + formatClock(max) : "");
         byId("br-buffer-fill").style.width = (max > 0 ? Math.min(1, s.bufferSec / max) * 100 : 0).toFixed(1) + "%";
         this.renderSave();
-        updateText(byId("br-open-count"), String(s.clipCount));
-        updateText(byId("br-clips-count"), String(s.clipCount));
 
         setText("br-error", s.error);
     }
@@ -1141,28 +1165,40 @@ class BetterReplayPanel extends UIElement {
     // Rebuilt only when it changed (the list is fetched again every time the panel opens), so a
     // click on a row isn't lost to a re-render.
     renderList(): void {
+        const listed = this.listedClips();
+        this.renderCounts(listed.length);
         if (this.clips.length === 0) {
             setHtml("br-list", '<div class="br-empty">No clips yet. Takeoffs and landings are saved automatically.</div>');
             return;
         }
+        if (listed.length === 0) {
+            const aircraft = this.status && this.status.aircraft ? "the " + aircraftName(this.status.aircraft) : "this aircraft";
+            setHtml("br-list", '<div class="br-empty">No clips for ' + escapeHtml(aircraft) + " yet." +
+                '<button type="button" class="br-btn br-link br-show-all" data-act="all">Show all aircraft (' +
+                this.clips.length + ")</button></div>");
+            return;
+        }
         const playing = this.status && this.status.play.active ? this.status.play.file : "";
         let html = "";
-        for (let i = 0; i < this.clips.length; ++i) {
-            const c = this.clips[i];
+        for (let i = 0; i < listed.length; ++i) {
+            const c = listed[i];
             const file = escapeHtml(c.file);
             const parts = clipFacts(c).map(escapeHtml);
             const confirming = this.confirmFile === c.file;
             const failed = this.note && this.note.view === "clips" && this.note.file === c.file ? this.note.text : "";
+            // Under "All aircraft", another aircraft's: dimmed, and Play says which one to switch to.
+            const elsewhere = this.aircraftKnown && !c.playable;
             html +=
                 '<div class="br-clip' + (c.file === playing ? " playing" : "") + (failed ? " failed" : "") +
-                '" data-file="' + file + '">' +
+                (elsewhere ? " elsewhere" : "") + '" data-file="' + file + '">' +
                 '<span class="br-badge ' + escapeHtml(c.event) + '">' + eventLabel(c.event) + "</span>" +
                 '<div class="br-clip-text">' +
                 '<div class="br-clip-title">' + escapeHtml(clipTitle(c)) + "</div>" +
                 '<div class="br-clip-sub">' + (failed ? escapeHtml(failed) : parts.join(" · ")) + "</div>" +
                 "</div>" +
                 '<div class="br-clip-btns">' +
-                '<button type="button" class="br-icon-btn br-play" title="Play" data-act="play" data-file="' + file + '">' +
+                '<button type="button" class="br-icon-btn br-play" title="' + (elsewhere ? "Recorded in another aircraft" : "Play") +
+                '" data-act="play" data-file="' + file + '">' +
                 ICON_PLAY + "</button>" +
                 // Delete asks once more: the bin turns into a red "Delete?".
                 (confirming
@@ -1172,6 +1208,21 @@ class BetterReplayPanel extends UIElement {
                 "</div></div>";
         }
         setHtml("br-list", html);
+    }
+
+    // This aircraft / All aircraft, each with its count, once the aircraft is identified (else the
+    // count beside the heading); on the main screen, what the clips screen lists.
+    renderCounts(listed: number): void {
+        const filter = this.aircraftKnown && this.clips.length > 0;
+        let here = 0;
+        for (let i = 0; i < this.clips.length; ++i) if (this.clips[i].playable) here += 1;
+        byId("br-filter").classList.toggle("hidden", !filter);
+        byId("br-filter-here").classList.toggle("active", !this.allAircraft);
+        byId("br-filter-all").classList.toggle("active", this.allAircraft);
+        updateText(byId("br-count-here"), String(here));
+        updateText(byId("br-count-all"), String(this.clips.length));
+        setText("br-clips-count", filter ? "" : String(this.clips.length));
+        updateText(byId("br-open-count"), String(listed));
     }
 }
 
