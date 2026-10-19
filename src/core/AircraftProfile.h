@@ -479,10 +479,10 @@ public:
     int64_t offForMs(int64_t nowMs) const { return offSinceMs_ < 0 ? 0 : nowMs - offSinceMs_; }
     int64_t firedMs() const { return firedMs_; }  // the last Disconnect, -1 before any
 
-    static constexpr double kOffAxis = 0.05;
-    static constexpr int64_t kOffMs = 1500;
+    static constexpr double kOffAxis = 0.03;
+    static constexpr int64_t kOffMs = 500;
     static constexpr int64_t kBackMs = 1000;
-    static constexpr int64_t kRetryMs = 5000;
+    static constexpr int64_t kRetryMs = 3000;
     static constexpr int kTries = 10;
 
 private:

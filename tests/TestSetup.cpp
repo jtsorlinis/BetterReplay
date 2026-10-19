@@ -1732,22 +1732,25 @@ TEST(Playback_LeverWatchCatchesAnAutothrottleBackOn) {
         }
         return w.tries();
     };
+    const double offSec = LeverWatch::kOffMs / 1000.0;
+    const double retrySec = LeverWatch::kRetryMs / 1000.0;
     std::vector<double> d, b;
     // Following the replay: a little off, and further for a moment when the clip's lever moves
-    // fast (the lever a second behind), or nothing to tell (reverse).
-    run(60.0, [](double t) { return t > 20.0 && t < 21.2 ? 0.3 : (t > 30.0 && t < 40.0 ? NAN : 0.02); }, d, b);
+    // fast (the lever behind), or nothing to tell (reverse).
+    run(60.0, [&](double t) { return t > 20.0 && t < 19.9 + offSec ? 0.3 : (t > 30.0 && t < 40.0 ? NAN : 0.01); }, d, b);
     CHECK(d.empty());
     CHECK(b.empty());
     // The autothrottle engaged at 100 s, the levers 10% off; the disconnect takes at the second
-    // try, and they're back at 107.
+    // try, and they're back a second after it.
     d.clear();
     b.clear();
-    run(120.0, [](double t) { return t >= 100.0 && t < 107.0 ? 0.1 : 0.01; }, d, b);
+    const double backAt = 100.0 + offSec + retrySec + 1.0;
+    run(120.0, [&](double t) { return t >= 100.0 && t < backAt ? 0.1 : 0.01; }, d, b);
     REQUIRE(d.size() == 2u);
-    CHECK_NEAR(d[0], 100.0 + LeverWatch::kOffMs / 1000.0, 0.05);
-    CHECK_NEAR(d[1], d[0] + LeverWatch::kRetryMs / 1000.0, 0.05);
+    CHECK_NEAR(d[0], 100.0 + offSec, 0.05);
+    CHECK_NEAR(d[1], d[0] + retrySec, 0.05);
     REQUIRE(b.size() == 1u);
-    CHECK_NEAR(b[0], 107.0 + LeverWatch::kBackMs / 1000.0, 0.05);
+    CHECK_NEAR(b[0], backAt + LeverWatch::kBackMs / 1000.0, 0.05);
     // The replay's sends pull a lever back for a moment (0.3 s a second) before the autothrottle
     // has it again: still off.
     d.clear();
@@ -1763,9 +1766,10 @@ TEST(Playback_LeverWatchCatchesAnAutothrottleBackOn) {
     // Off, then nothing to tell (reverse) for a moment: the time off starts again after it.
     d.clear();
     b.clear();
-    run(5.0, [](double t) { return t >= 1.0 && t < 1.2 ? NAN : (t >= 0.5 ? 0.1 : 0.0); }, d, b);
+    const double nanFrom = 1.0 + offSec - 0.1, nanTo = nanFrom + 0.2;
+    run(nanTo + offSec + 1.0, [&](double t) { return t >= nanFrom && t < nanTo ? NAN : (t >= 1.0 ? 0.1 : 0.0); }, d, b);
     REQUIRE(d.size() == 1u);
-    CHECK_NEAR(d[0], 1.2 + LeverWatch::kOffMs / 1000.0, 0.05);
+    CHECK_NEAR(d[0], nanTo + offSec, 0.05);
 }
 
 TEST(Setup_ThrottleReplayStopsWhenTheAircraftRolls) {
