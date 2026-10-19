@@ -6,15 +6,11 @@ I made it because the replay tools I'd used needed an external helper running al
 
 The other big reason was getting the animations right. Other replay tools didn't handle flaps, gear, spoilers and reversers well. Many aircraft work these controls their own way, so BetterReplay learns each aircraft. In a short guided control setup you move each control, BetterReplay replays your movement and asks whether it worked, and it remembers what did. That way you can "teach" it aircraft I haven't made a profile for.
 
-> **Early testing.** BetterReplay works in the sim but is still being tested, and replays may not get every control right on every aircraft. See [Known gaps](DEVELOPMENT.md#known-gaps).
-
 ## Features
 
-- **Always recording** the last 10 minutes of your flight, whether or not the panel is open.
 - **Automatic clips** of every takeoff and landing. Landings show touchdown vertical speed, peak G and bounces.
-- **Replays on your own aircraft,** with play/pause, seek, 0.25x–4x speed, and Stop, which puts you back exactly where you were.
-- **Learns new aircraft:** a short guided setup per aircraft teaches it how to move its spoilers, flaps, throttle, reversers and gear, so replays look right even on aircraft without a profile. Variants (like the PMDG 737-700 and -800) share one setup.
-- **Save the last 10 minutes** as a clip any time.
+- **Always recording** the last 10 minutes of your flight, whether or not the panel is open.
+- **Learns new aircraft:** a short guided setup per aircraft teaches it how to move its spoilers, flaps, throttle, reversers and gear, so replays look right even on 3rd party aircraft with custom animations.
 
 ## Install
 
