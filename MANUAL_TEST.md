@@ -81,7 +81,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 - [ ] Under **Saved clips**, a green **Takeoff** tag, the aircraft and the departure airport (*A350-900 | YMML*), and underneath the local date/time and duration.
   - If the `saved` line has no `, at …` (and the row no airport), note the airport and runway: it's further than 8 km from the liftoff, or the sim didn't list it.
 - [ ] Check the clip: `node tools\rpl-dump.mjs "<work folder>\<file>.rpl"`.
-  - It starts 10 s before the aircraft rolls onto the runway.
+  - It starts 30 s before the aircraft rolls onto the runway.
   - `ongnd` goes 1 → 0 at the liftoff offset.
   - It ends 5 s after the flaps are fully up (`flap_idx` 0, `flap_l` near 0).
 - [ ] Line up and wait a couple of minutes before taking off: the clip starts about 30 s before the engines spool up, not at the line-up.
@@ -100,7 +100,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   detector: landing finished: N s clip, VS -N fpm, peak N.NN G, 0 bounce(s)
   saved YYYY-MM-DD_HHMM_landing.rpl: …
   ```
-- [ ] Under **Saved clips**, a blue **Landing** tag, the aircraft and the airport you landed at, and underneath the date/time, duration (120 s plus the rollout and 10 s past the turn-off), VS and G.
+- [ ] Under **Saved clips**, a blue **Landing** tag, the aircraft and the airport you landed at, and underneath the date/time, duration (300 s plus the rollout and 10 s past the turn-off), VS and G.
 - [ ] Land again and come to a stop on the runway: `landing: stopped`.
 - [ ] Land, and before the landing clip is saved, go back to the main menu: the landing is saved up to that moment (`landing ends here: the recording stops`).
 - [ ] **Compare the VS with another source** (a landing-rate tool, or the sim's own). The clip uses `PLANE TOUCHDOWN NORMAL VELOCITY`; note its sign and magnitude.
@@ -165,7 +165,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 - [ ] The aircraft jumps to the clip start and flies the recorded path smoothly. Note any jitter, drift or stutter.
 - [ ] The log has `playback: position, attitude and velocities set directly every frame (N of 60 frames off)` with N near 0, and `playback: the rotation rates follow the clip (written x0.305)` a few seconds in.
 - [ ] The engine sound stays steady at speed, in the cabin near the engines too: no flutter, and no squeaks when the sim stutters for a frame. If you hear one, note roughly when in the clip, and replay it with the trace on (`kPlaybackTrace`): its `wall_dt_ms` and `step_ms` columns show the frame times and the step the replay took for each. On the A350, small pitch jitters in the fan's whine on FLX takeoffs from about 80 kt are a known open issue (see *A350 engine whine in replays* in [Known gaps](DEVELOPMENT.md#known-gaps)).
-- [ ] The panel switches to the player: the clip's name, a large seek bar with the amber touchdown mark at 2:00, round play/pause and stop buttons, and Hide panel.
+- [ ] The panel switches to the player: the clip's name, a large seek bar with the amber touchdown mark at 5:00, round play/pause and stop buttons, and Hide panel.
 - [ ] The PFD airspeed and vertical speed follow the clip (body velocities are written every frame), not the speed you had before pressing Play.
 - [ ] **Throttle** (clips recorded with throttle support): the thrust levers follow the clip.
   - Simvar mode: moving your hardware throttle has no effect while it plays. On Stop you'll see `playback: hardware throttle input released (N input event(s) were blocked)`.

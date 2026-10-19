@@ -18,9 +18,10 @@ struct DetectorConfig {
     // the flaps are up, or back on the ground if that's sooner.
     double takeoffMinAirborneSec = 5.0;
     double takeoffMinAglFt = 50.0;
-    double takeoffPreRunwaySec = 10.0;
-    // Lined up and waiting: the clip starts no earlier than this before the engines spool up.
-    double takeoffMaxWaitBeforeSpoolSec = 30.0;
+    double takeoffPreRunwaySec = 30.0;
+    // Lined up and waiting: the clip starts no earlier than this before the engines spool up (so
+    // the whole takeoffPreRunwaySec stays for a wait of up to 30 s).
+    double takeoffMaxWaitBeforeSpoolSec = 60.0;
     // Entered the runway before the recording (spawned on it), or on a strip the sim doesn't flag
     // as one: from this long before the spool-up.
     double takeoffPreSpoolSec = 5.0;
@@ -44,11 +45,11 @@ struct DetectorConfig {
     // is a bounce).
     double landingMinAirborneSec = 5.0;  // a touchdown after a shorter hop isn't a landing
     double landingMinGroundSec = 3.0;    // then "landing-rollout" (status only)
-    double landingPreRollSec = 120.0;
+    double landingPreRollSec = 300.0;
     double landingStopGroundSpeedKt = 1.0;
     double landingOffRunwaySec = 10.0;
     double landingGoAroundSec = 15.0;
-    double landingMaxAfterTouchdownSec = 170.0;  // with the pre-roll, a clip of 5 minutes at most
+    double landingMaxAfterTouchdownSec = 170.0;  // with the pre-roll, a clip of 7:50 at most
     double touchdownVsReadDelaySec = 0.25;       // when to read PLANE TOUCHDOWN NORMAL VELOCITY
     double peakGWindowBeforeTouchdownSec = 1.0;
 

@@ -173,7 +173,7 @@ TEST(Detector_TakeoffEndsWhenBackOnTheGroundSooner) {
     CHECK_NEAR(r.events[1].eventT, g.samples[td].t, 1e-9);
 }
 
-TEST(Detector_TakeoffStartsTenSecondsBeforeEnteringTheRunwayAndEndsClean) {
+TEST(Detector_TakeoffStartsThirtySecondsBeforeEnteringTheRunwayAndEndsClean) {
     // Taxiing out across another runway, onto the departure runway, lined up briefly, off with
     // the flaps out and cleaned up 90 s after liftoff.
     TraceGen g(true, 0.0, 0.0);
@@ -203,12 +203,12 @@ TEST(Detector_TakeoffStartsTenSecondsBeforeEnteringTheRunwayAndEndsClean) {
     REQUIRE(r.events.size() == 1);
     const DetectedEvent& e = r.events[0];
     CHECK(e.type == EventType::Takeoff);
-    CHECK_NEAR(e.startT, entry - 10.0, 1e-6);
+    CHECK_NEAR(e.startT, entry - 30.0, 1e-6);
     CHECK_NEAR(e.eventT, liftoff, kTol);
     CHECK_NEAR(e.endT, clean + 5.0, kTol);
 }
 
-TEST(Detector_TakeoffAfterALongWaitOnTheRunwayStartsThirtySecondsBeforeTheSpoolUp) {
+TEST(Detector_TakeoffAfterALongWaitOnTheRunwayStartsSixtySecondsBeforeTheSpoolUp) {
     TraceGen g(true, 0.0, 0.0);
     g.onRunway = false;
     g.power = 20.0;
@@ -226,8 +226,8 @@ TEST(Detector_TakeoffAfterALongWaitOnTheRunwayStartsThirtySecondsBeforeTheSpoolU
     EventDetector d = makeDetector();
     const RunResult r = runAll(d, g.samples);
     REQUIRE(r.events.size() == 1);
-    CHECK(r.events[0].startT >= spool - 30.0 - kTol);
-    CHECK(r.events[0].startT <= spool - 30.0 + kSpoolTol);
+    CHECK(r.events[0].startT >= spool - 60.0 - kTol);
+    CHECK(r.events[0].startT <= spool - 60.0 + kSpoolTol);
     CHECK_NEAR(r.events[0].endT, liftoff + 120.0, kTol);
 }
 
@@ -261,7 +261,7 @@ TEST(Detector_NormalLandingEndsAtTheStop) {
     const double tdT = g.samples[td].t;
     CHECK(e.type == EventType::Landing);
     CHECK_NEAR(e.eventT, tdT, 1e-9);
-    CHECK_NEAR(e.startT, tdT - 120.0, 1e-9);
+    CHECK_NEAR(e.startT, tdT - 300.0, 1e-9);
     CHECK_NEAR(e.endT, g.samples[firstBelow(g, td, 1.0)].t, 1e-9);
     CHECK_NEAR(e.touchdownVsFpm, -150.0, 1.0);  // VS just before contact (no touchdown simvar)
     CHECK_NEAR(e.peakG, 1.35, 1e-6);
