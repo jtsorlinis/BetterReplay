@@ -41,6 +41,7 @@ interface SetupStep {
 // The control setup (src/core/ControlSetup.h); the step fields are there while it's active.
 interface SetupStatus {
     offer: string;  // "new" (can start), "wait" (no profile, not ready yet), "gear" or ""
+    requested?: boolean;  // offered because Set up / Redo was pressed (whatever the profile)
     ready?: { parkingBrake: boolean; onRunway: boolean; engines: boolean };  // what "wait" is waiting for
     have: string;   // the aircraft's profile: "none", "partial", "complete", "declined"
     controls: SetupControl[];
@@ -51,7 +52,7 @@ interface SetupStatus {
     stepNo?: number;
     steps?: number;
     prompt?: string;  // one short instruction or question
-    detail?: string;  // what it's for (the throttle's holds and lever phases)
+    detail?: string;  // what it's for (the throttle's holds and lever phases, the gear above the runway)
     progress?: number;  // the throttle sweep, 0..1
     task?: number;    // the pilot's instruction showing, of `tasks` in this step
     tasks?: number;
@@ -147,6 +148,7 @@ const SETUP_BUTTONS: { [answer: string]: string } = {
     ready: "Continue anyway",
     begin: "Start",
     later: "Later",
+    dismiss: "Cancel",
     never: "Never for this aircraft",
     cancel: "Cancel setup",
     close: "Done",
@@ -163,6 +165,7 @@ const SETUP_KIND: { [answer: string]: string } = {
     again: "secondary",
     ready: "secondary",
     later: "secondary",
+    dismiss: "secondary",
 };
 const SETUP_PHASES: { [phase: string]: string } = {
     wait: "Get ready",
@@ -170,6 +173,9 @@ const SETUP_PHASES: { [phase: string]: string } = {
     user: "Your turn",
     away: "Your turn",
     takeoff: "Take off",
+    hover: "Get ready",
+    land: "Watch",
+    lower: "Your turn",
     retry: "Didn't catch that",
     replay: "Watch",
     hold: "Watch",
@@ -182,7 +188,9 @@ const SETUP_PHASES: { [phase: string]: string } = {
     done: "All done",
 };
 // Phases where the pilot is doing something: when what they were told changes there, they did it.
-const PILOT_PHASES: { [phase: string]: boolean } = { prepare: true, takeoff: true, user: true, away: true, positions: true };
+const PILOT_PHASES: { [phase: string]: boolean } = {
+    prepare: true, takeoff: true, user: true, away: true, positions: true, hover: true, lower: true,
+};
 const TICK_HOLD_MS = 1100;  // a done instruction stays up, ticked, this long
 const NOTE_MS = 5000;       // a failed command's message stays this long
 
@@ -681,7 +689,8 @@ class BetterReplayPanel extends UIElement {
             const button = findWithAttr(e.target, "data-a", setup);
             if (button) this.setupAction(button.getAttribute("data-a") || "");
         });
-        byId("br-setup-run").addEventListener("click", () => this.send({ op: "setupStart" }));
+        // Set up / Redo: the same offer as a new aircraft, checklist first (setupRequest).
+        byId("br-setup-run").addEventListener("click", () => this.send({ op: "setupRequest" }));
 
         const list = byId("br-list");
         list.addEventListener("click", (e: Event) => {
@@ -717,7 +726,7 @@ class BetterReplayPanel extends UIElement {
             this.send({ op: "setupStart" });
         } else if (a === "never") {
             this.send({ op: "setupNever" });
-        } else if (a === "later" && !active) {
+        } else if ((a === "later" || a === "dismiss") && !active) {
             this.send({ op: "setupLater" });
         } else {
             this.send({ op: "setupAnswer", a: a });
@@ -896,20 +905,21 @@ class BetterReplayPanel extends UIElement {
             buttons = setup.buttons || [];
             if (phase === "done") list = resultsHtml(setup.controls);
         } else if (setup && setup.offer === "new") {
-            kicker = "New aircraft";
+            const redo = !!setup.requested && setup.have !== "none";
+            kicker = setup.requested ? "Control setup" : "New aircraft";
             phase = "offer";
-            prompt = "Set up replay controls for this aircraft?";
+            prompt = redo ? "Redo the control setup for this aircraft?" : "Set up replay controls for this aircraft?";
             detail = "BetterReplay learns how its spoilers, flaps, throttle and gear respond, so replays can move them.";
             list = outlineHtml([
                 ["Here on the runway, about a minute",
                     "Move the spoilers, flaps and throttle when asked. Each time, it replays your movement and asks whether it looked right."],
-                ["After takeoff", "Raise the gear and lower it again, once."],
+                ["Then the gear, held just above the runway", "Raise the gear and lower it again, once. No takeoff needed."],
             ]);
-            buttons = ["start", "later", "never"];
+            buttons = setup.requested ? ["start", "dismiss"] : ["start", "later", "never"];
         } else if (setup && setup.offer === "wait") {
-            // No profile yet, and not where the setup can start: say what's missing.
+            // Not where the setup can start (no profile yet, or Set up / Redo): say what's missing.
             const r = setup.ready || { parkingBrake: false, onRunway: false, engines: false };
-            kicker = "New aircraft";
+            kicker = setup.requested ? "Control setup" : "New aircraft";
             phase = "wait";
             prompt = "Set up replay controls for this aircraft";
             detail = "Line up on a runway with the engines running, ready for takeoff. The setup can start once these are ticked:";
@@ -918,13 +928,14 @@ class BetterReplayPanel extends UIElement {
                 [r.onRunway, "On a runway"],
                 [r.engines, "Engines running"],
             ]);
-            buttons = ["later", "never"];
+            buttons = setup.requested ? ["dismiss"] : ["later", "never"];
         } else if (setup && setup.offer === "gear") {
             kicker = "Control setup";
             phase = "offer";
-            prompt = "One step left: the gear";
-            detail = "Raise the gear and lower it again, staying slow. It then replays that and asks whether it looked right.";
-            buttons = ["start", "later"];
+            prompt = setup.requested ? "In the air, only the gear can be set up" : "One step left: the gear";
+            detail = "Raise the gear and lower it again, staying slow. It then replays that and asks whether it looked right." +
+                (setup.requested ? " For the rest, stop on a runway with the engines running." : "");
+            buttons = setup.requested ? ["start", "dismiss"] : ["start", "later"];
         }
 
         const show = !!prompt;
@@ -1022,7 +1033,7 @@ class BetterReplayPanel extends UIElement {
         byId("br-setup-run").classList.toggle("hidden", !setup);
         if (!setup) return;
         // Configured: every control the aircraft has replays. Partly: some do, some were skipped,
-        // didn't pass, or are still to do (the gear, after takeoff).
+        // didn't pass, or are still to do (the gear, if it was left for later).
         const profile = setup.have === "partial" || setup.have === "complete";
         let present = 0;
         let ok = 0;

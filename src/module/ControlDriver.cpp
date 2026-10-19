@@ -208,6 +208,11 @@ bool ControlDriver::beginSlot(Control c, Slot& s, const ControlMethod& m, std::s
                 }
                 break;
             }
+            // The flap lever from the last notches, only if they were just now (a replay's restore):
+            // since then the pilot may have moved it.
+            if (c == Control::Flaps && m.var == kKeyFlapsNotches && !(utcNowMs() - flapNotchMs_ < kNotchSettleMs)) {
+                flapLever_ = NAN;
+            }
             if (c == Control::Flaps && m.var != kKeyFlapsNotches && (!ctx_.flapPositions || *ctx_.flapPositions < 2)) {
                 why = "FLAPS_SET needs the number of flap positions";
                 return false;
@@ -284,7 +289,10 @@ bool ControlDriver::reverseToggled() const {
     return s.active && s.reverseBy == ReverseBy::Toggle && s.toggle.busy();
 }
 
-void ControlDriver::forgetReverse() { slots_[static_cast<int>(Control::Throttle)].toggle.forget(); }
+void ControlDriver::forgetReverse() {
+    slots_[static_cast<int>(Control::Throttle)].toggle.forget();
+    flapLever_ = NAN;
+}
 
 namespace {
 
@@ -714,34 +722,32 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
     }
 }
 
-// Like a hardware flap switch: one notch toward the clip's handle index, the next once the
-// aircraft's handle shows the last one (or after kNotchWaitFrames, if it doesn't report it).
+// Like a hardware flap switch: a notch at a time toward the clip's handle index, going by where
+// the notches sent left the lever. The handle can show that much later: the PMDG 777's follows its
+// flaps, a detent every ten seconds or so, and going by it sent extra notches that ran them to 25.
+// So it counts again only once it has held still for kNotchSettleMs since it last moved and the
+// last notch (a notch didn't take).
 void ControlDriver::stepFlaps(Slot& s, double target, bool force) {
     const double live = ctx_.live ? ctx_.live->v[kFlapsHandleIndex] : NAN;
     if (!std::isfinite(live)) return;
     ++s.since[0];
-    // Where the notches sent put the lever (sent[0]), which the handle may show seconds later (the
-    // PMDG 777's: a notch sent before it did ran the flaps past the clip's). Only once the handle
-    // has held still for kNotchWaitFrames since the last notch (one didn't take) does it go by the
-    // handle again. sent[1]: the handle when it last moved, since[1] frames since then.
-    if (!std::isfinite(s.sent[1]) || std::fabs(live - s.sent[1]) >= 0.5) {
-        s.sent[1] = std::round(live);
-        s.since[1] = 0;
-    } else {
-        ++s.since[1];
+    const int64_t nowMs = utcNowMs();
+    const double handle = std::round(live);
+    if (!(handle == flapHandle_)) {
+        flapHandle_ = handle;
+        flapMovedMs_ = nowMs;
     }
-    if (!std::isfinite(s.sent[0]) || (s.since[0] >= kNotchWaitFrames && s.since[1] >= kNotchWaitFrames)) {
-        s.sent[0] = std::round(live);
-    }
-    if (std::fabs(s.sent[0] - target) < 0.5) return;
+    if (!std::isfinite(flapLever_) || nowMs - flapMovedMs_ >= kNotchSettleMs) flapLever_ = handle;
+    if (std::fabs(flapLever_ - target) < 0.5) return;
     if (!force && s.since[0] < kNotchFrames) return;
-    const bool extend = target > s.sent[0];
+    const bool extend = target > flapLever_;
     keyEvent(extend ? KEY_FLAPS_INCR : KEY_FLAPS_DECR, 0);
-    s.sent[0] += extend ? 1.0 : -1.0;
+    flapLever_ += extend ? 1.0 : -1.0;
+    flapMovedMs_ = flapNotchMs_ = nowMs;
     s.since[0] = 0;
     ++s.sends;
     log::info("controls: flaps a notch %s (FLAPS_%s; the handle at %.0f, the lever to %.0f, the clip %.0f)",
-              extend ? "down" : "up", extend ? "INCR" : "DECR", live, s.sent[0], target);
+              extend ? "down" : "up", extend ? "INCR" : "DECR", live, flapLever_, target);
 }
 
 void ControlDriver::restoreLVars(Control c) {

@@ -149,7 +149,10 @@ public:
 
     // Control setup (ControlSetup.h). Offered for every aircraft without a profile: it can start
     // once on a runway with the engines running and the parking brake set. "later" hides the offer until the next
-    // flight, "never" for this aircraft; "reset" forgets its profile.
+    // flight, "never" for this aircraft; "reset" forgets its profile. "request" (Set up / Redo on
+    // the aircraft card) offers it like that whatever the profile: on the ground with the checklist
+    // until it's ready, in the air the gear.
+    bool setupRequest(std::string& error);
     bool setupStart(std::string& error);
     bool setupAnswer(const std::string& answer, std::string& error);
     bool setupLater(std::string& error);
@@ -236,6 +239,7 @@ private:
     ProfileStore profiles_;
     SetupFlow setup_;
     bool setupSnoozed_ = false;  // "later": no offer until the next flight
+    bool setupRequested_ = false;  // Set up / Redo pressed: offered until started, "later" or the next flight
     std::string channelVar_[kChannelCount];
 
     // playback

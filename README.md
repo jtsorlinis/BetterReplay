@@ -46,7 +46,7 @@ Many aircraft drive their own levers in ways a replay can't simply copy. The con
 1. For an aircraft that hasn't been set up, the panel offers the setup, with a checklist: parking brake set, on a runway, engines running. Then pick **Start setup**. You can also pick **Later** or **Never for this aircraft**, and start it any time with **Set up** / **Redo** on the main screen.
 2. For each control, the panel asks you to move it ("Deploy the spoilers", "Move the throttle to about halfway and hold it"…). Then it replays your movement and asks whether it worked: **Yes**, **No**, **Watch again** or **Skip**. Keep your hands off the controls while it replays.
 3. On some aircraft the throttle step also asks you to keep your hands off while it moves the throttle and tests reverse thrust itself. The engines spool up against the parking brake for up to 40 seconds, and it stops if the aircraft starts to roll.
-4. The gear is done after takeoff. If you skip it, the panel offers it again next time you're airborne.
+4. The gear needs no takeoff: BetterReplay lifts the aircraft about 30 ft above the runway, holds it there frozen, and asks you to raise and lower the gear. When the step is done (or you skip or cancel it) it waits for the gear to be down, asks you to lower it if it isn't within 30 seconds, then puts the aircraft back where it was. If the aircraft still counts as on the ground up there, or its gear won't move there, the gear is done after takeoff instead. If you skip it, the panel offers it again next time you're airborne.
 
 Recording stops while the setup runs and starts again when it finishes, so the setup never ends up in a clip. Variants of an aircraft (like the PMDG 737-700 and -800) share one setup.
 

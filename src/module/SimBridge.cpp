@@ -281,6 +281,10 @@ void SimBridge::applyAircraftKey(bool changed) {
 
 void SimBridge::close() {
     if (h_) {
+        if (hovering_) {
+            log::info("control setup: the module is stopping with the aircraft held above the runway");
+            endHover(true);
+        }
         fsEventsUnregisterKeyEventHandler(&SimBridge::keyEventThunk, this);
         SimConnect_Close(h_);
         h_ = 0;
@@ -648,6 +652,7 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
 
     requestAirports();
     checkAircraftPath();
+    if (hovering_) writeHover(hoverAt_, false);  // held above the runway for the setup's gear step
 
     if (frameCount_++ == 0) {
         const double* r = input_.raw.v;
@@ -1058,7 +1063,6 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     restoreWaiting_ = false;  // a new clip started while still settling a restore: playback wins
     restoreDeferred_ = false;
     prepareGearSent_ = false;
-    prepareUnfrozen_ = false;
     snapFramesLeft_ = 0;
     snapCheckFrames_ = 0;
     flapsHold_ = false;
@@ -1287,10 +1291,10 @@ void SimBridge::commandGearDown(const Frame& target) {
 }
 
 // A jump onto the ground with the gear down while the aircraft's gear is up: unless gear
-// positions are known to snap on this aircraft, lower the gear first, here, where the aircraft
-// is. Lowering it after the jump puts the extending gear into the runway, and on the A320neo V2
-// the gear then stops half way. In the air it isn't frozen meanwhile (it flies on until the jump):
-// frozen, neither the PMDG 777's gear nor the A380's came down.
+// positions are known to snap on this aircraft, lower the gear first, here, frozen where the
+// aircraft is. Lowering it after the jump puts the extending gear into the runway, and on the
+// A320neo V2 the gear then stops half way. (Frozen is fine: the PMDG 777's gear moves frozen; it
+// only needed the right way of lowering it.)
 bool SimBridge::prepareJump(const Frame& target) {
     if (!h_ || !playing_) return true;
     const double live = liveGearExtension();
@@ -1299,8 +1303,6 @@ bool SimBridge::prepareJump(const Frame& target) {
     const int64_t now = utcNowMs();
     auto done = [&]() {
         prepareGearSent_ = false;
-        if (prepareUnfrozen_) sendFreeze(true);
-        prepareUnfrozen_ = false;
         return true;
     };
     if (!needed) {
@@ -1310,12 +1312,7 @@ bool SimBridge::prepareJump(const Frame& target) {
     if (!prepareGearSent_) {
         prepareGearSent_ = true;
         prepareStartMs_ = now;
-        if (input_.raw.v[kOnGround] < 0.5) {
-            sendFreeze(false);
-            prepareUnfrozen_ = true;
-        }
-        log::info("playback: lowering the gear before going to the runway (gear at %.2f, %.0f kt IAS%s)", live, liveIas_,
-                  prepareUnfrozen_ ? ", not frozen meanwhile" : "");
+        log::info("playback: lowering the gear before going to the runway (gear at %.2f, %.0f kt IAS)", live, liveIas_);
         commandGearDown(target);
     } else if (profileDrives_[static_cast<int>(Control::Gear)]) {
         driver_.apply(Control::Gear, target, false);  // again if it hasn't started coming down
@@ -1952,7 +1949,7 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     logOverrides();
     logEngines();
     playing_ = false;
-    prepareGearSent_ = prepareUnfrozen_ = false;  // stopped while lowering the gear: unfrozen below
+    prepareGearSent_ = false;
     playChannelCount_ = 0;
     directChannelCount_ = 0;
     driver_.clearAutothrust();  // the snapshot below isn't the clip
@@ -2207,6 +2204,67 @@ void SimBridge::throttleDecrease() {
 
 void SimBridge::toggleReverse() {
     if (!playing_) driver_.toggleReverse();
+}
+
+// The gear step on the ground: the aircraft straight up from where it stands, its heading and
+// attitude kept and its velocities zero, held there with playback's freeze.
+bool SimBridge::beginHover(double liftFt, std::string& why) {
+    if (!h_) {
+        why = "not connected to the sim";
+        return false;
+    }
+    if (playing_ || restoreWaiting_) {
+        why = playing_ ? "a replay is playing" : "the aircraft is still being put back after a replay";
+        return false;
+    }
+    if (!std::isfinite(input_.raw.v[kAlt]) || !std::isfinite(input_.raw.v[kLat]) || !std::isfinite(input_.raw.v[kLon])) {
+        why = "its position isn't known";
+        return false;
+    }
+    if (!hoverDefDefined_ || hoverChannelCount_ == 0) {
+        ChannelMask motion;
+        for (int c = kLat; c <= kRotVelBodyZ; ++c) motion.set(static_cast<size_t>(c));
+        hoverChannelCount_ = buildDefinition(DEF_HOVER, hoverDefDefined_, PlayMode::Set, &motion, hoverChannels_);
+    }
+    hoverSnap_ = input_.raw;
+    hoverAt_ = hoverSnap_;
+    hoverAt_.v[kAlt] += liftFt;
+    for (int c = kVelBodyX; c <= kRotVelBodyZ; ++c) hoverAt_.v[c] = 0.0;
+    hovering_ = true;
+    sendFreeze(true);
+    writeHover(hoverAt_, true);
+    log::info("control setup: holding the aircraft %.0f ft above where it stood (alt %.0f ft, %.1f ft above the ground), "
+              "frozen",
+              liftFt, hoverSnap_.v[kAlt], hoverSnap_.v[kAgl]);
+    return true;
+}
+
+void SimBridge::endHover(bool restore) {
+    if (!hovering_) return;
+    hovering_ = false;
+    if (restore) {
+        writeHover(hoverSnap_, true);
+        log::info("control setup: put the aircraft back where it stood, lat %.5f lon %.5f alt %.0f ft; unfreezing",
+                  hoverSnap_.v[kLat], hoverSnap_.v[kLon], hoverSnap_.v[kAlt]);
+    } else {
+        log::info("control setup: unfreezing the aircraft where it is");
+    }
+    if (h_) sendFreeze(false);
+}
+
+// `tracked`: for the exception log (not every frame's write, which would push the rest out of it).
+void SimBridge::writeHover(const Frame& frame, bool tracked) {
+    if (!h_ || hoverChannelCount_ == 0) return;
+    double buf[kChannelCount];
+    for (int i = 0; i < hoverChannelCount_; ++i) {
+        const int c = hoverChannels_[i];
+        double v = std::isfinite(frame.v[c]) ? frame.v[c] : input_.raw.v[c];  // unknown: as it is
+        if (!std::isfinite(v)) v = 0.0;
+        buf[i] = isRotation(c) ? v * rotationScale_ : v;
+    }
+    const HRESULT hr = SimConnect_SetDataOnSimObject(h_, DEF_HOVER, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, 0, 0,
+                                                     static_cast<DWORD>(hoverChannelCount_ * sizeof(double)), buf);
+    if (tracked) track(hr, "SetDataOnSimObject (setup hover)");
 }
 
 void SimBridge::onTitleData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size) {

@@ -233,8 +233,9 @@ void Engine::onFlightLoaded(const char* what) {
     // Note: the sim also loads a default flight when returning to the menu, so this must not
     // clear atMainMenu_ (the flow events own that flag).
     endPlayback(false, "flight loaded");
-    setup_.cancel("flight loaded");
+    setup_.abandon("flight loaded");  // (the flight put the aircraft where it is: not put back)
     setupSnoozed_ = false;
+    setupRequested_ = false;
     finishEvents();
     ring_.clear();
     airports_.clear();  // the module asks for the new flight's
@@ -267,7 +268,7 @@ void Engine::setAtMainMenu(bool atMenu) {
     if (atMenu != atMainMenu_) logf(0, atMenu ? "back at the main menu" : "left the main menu");
     if (atMenu) {
         endPlayback(false, "main menu");
-        setup_.cancel("main menu");
+        setup_.abandon("main menu");
         finishEvents();
     }
     atMainMenu_ = atMenu;
@@ -292,7 +293,7 @@ void Engine::setAircraftKey(const std::string& path) {
     aircraftPath_ = path;
     const std::string key = aircraftFamily(path);
     if (key == aircraftKey_) return;
-    setup_.cancel("aircraft changed");
+    setup_.cancel("aircraft changed");  // (held above the runway, the aircraft is put back once its gear is down)
     aircraftKey_ = key;
     const AircraftProfile* p = currentProfile();
     if (!p) {
@@ -742,6 +743,25 @@ void Engine::endPlayback(bool restore, const char* why) {
 
 // ---------------------------------------------------------------------------- control setup
 
+bool Engine::setupRequest(std::string& error) {
+    if (aircraftKey_.empty()) {
+        error = "the aircraft isn't identified yet";
+        return false;
+    }
+    if (playbackActive_) {
+        error = "stop the replay first";
+        return false;
+    }
+    if (atMainMenu_ || !simRunning_ || !haveLastRaw_) {
+        error = "not in a flight";
+        return false;
+    }
+    if (setup_.active()) return true;
+    setupRequested_ = true;
+    setupSnoozed_ = false;
+    return true;
+}
+
 bool Engine::setupStart(std::string& error) {
     if (aircraftKey_.empty()) {
         error = "the aircraft isn't identified yet";
@@ -760,6 +780,7 @@ bool Engine::setupStart(std::string& error) {
     base.key = aircraftKey_;
     if (!setup_.start(base, lastRaw_, facts_, error)) return false;
     setupSnoozed_ = false;
+    setupRequested_ = false;
     if (setup_.takeChanged()) storeSetupProfile();
     return true;
 }
@@ -775,6 +796,7 @@ bool Engine::setupLater(std::string& error) {
     (void)error;
     setup_.cancel("finish later");
     setupSnoozed_ = true;
+    setupRequested_ = false;
     return true;
 }
 
@@ -784,6 +806,7 @@ bool Engine::setupNever(std::string& error) {
         return false;
     }
     setup_.cancel("declined");
+    setupRequested_ = false;
     AircraftProfile& p = profiles_.upsert(aircraftKey_);
     p.declined = true;
     p.title = aircraft_;
@@ -839,6 +862,12 @@ const char* Engine::setupOffer() const {
         return "";
     }
     const AircraftProfile* p = currentProfile();
+    const bool onGround = lastRaw_.v[kOnGround] >= 0.5;
+    // Set up / Redo: the same offer as a new aircraft, whatever the profile says.
+    if (setupRequested_) {
+        if (!onGround) return facts_.gearRetractable ? "gear" : "wait";
+        return readyForSetup() ? "new" : "wait";
+    }
     if (p && p->declined) return "";
     bool groundPending = !p;
     for (int i = 0; p && i < kControlCount; ++i) {
@@ -846,7 +875,6 @@ const char* Engine::setupOffer() const {
     }
     // Until the aircraft is ready for it, the offer says what's missing ("wait").
     if (groundPending) return readyForSetup() ? "new" : "wait";
-    const bool onGround = lastRaw_.v[kOnGround] >= 0.5;
     const bool gearPending = (*p)[Control::Gear].state == ControlState::Pending && facts_.gearRetractable;
     return gearPending && !onGround ? "gear" : "";
 }
@@ -888,6 +916,7 @@ void Engine::statusJson(std::string& out) const {
     w.endObject();
     w.key("setup").beginObject();
     w.kv("offer", setupOffer());
+    w.kv("requested", setupRequested_);  // Set up / Redo: no "never for this aircraft"
     // What the setup needs before it can start, for the "wait" offer's checklist.
     w.key("ready").beginObject();
     w.kv("parkingBrake", facts_.parkingBrake);

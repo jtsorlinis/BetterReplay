@@ -28,6 +28,7 @@ constexpr size_t kMaxMethods = 8;
 constexpr double kPassPeak = 0.6;    // a replay must move the control at least 60% as far as the pilot did
 constexpr double kPassReturn = 0.15; // and bring it back to within 15% of that
 constexpr double kMaxRollKt = 3.0;   // the throttle replay stops if the aircraft starts to roll
+constexpr double kStopKt = 2.0;      // stopped, for the steps on the runway
 constexpr double kTaskStillSec = 0.75;  // a control held this long has finished that instruction
 // The gear: a variable that took this long to travel, or this share of the time the legs took
 // (where they took that long), follows them (a leg's animation, not the lever).
@@ -97,6 +98,20 @@ constexpr double kSweepStowCheckSec = 3.0;
 constexpr int kSweepToggleAgain = 2;
 constexpr double kSweepHoldSec = 4.0;
 constexpr double kSweepStowSec = 6.0;
+
+// The gear step on the ground (SetupFlow::kHover*). Above the runway the sim has to show the
+// aircraft off the ground for kHoverSettleSec before the pilot is told to raise the gear; a height
+// above the ground on the runway over kHoverMaxAglFt isn't one. The pilot's gear lever (its handle
+// simvar) up without the gear moving for as long as playback waits for it means the gear doesn't
+// move up there. When the step ends, the gear (each leg within kGearDownTol of where it was on the
+// runway) must be down for kLandDownSec before the aircraft goes back, and then the sim must show
+// it on the ground for kLandSettleSec (kLandSettleMaxSec at most) before the setup goes on.
+constexpr double kHoverSettleSec = 0.5;
+constexpr double kHoverMaxAglFt = 60.0;
+constexpr double kGearDownTol = 0.02;
+constexpr double kLandDownSec = 1.0;
+constexpr double kLandSettleSec = 0.5;
+constexpr double kLandSettleMaxSec = 5.0;
 
 double meanOf(const Frame& f, int first, int count) {
     double sum = 0.0;
@@ -208,6 +223,17 @@ const char* const kReverseNoticeDetail =
     "BetterReplay now tries reverse thrust itself, to learn how to replay it on this aircraft. The engines spool "
     "up against the parking brake for up to half a minute.";
 const char* const kReverseSweepDetail = "Keep your hands off the throttle while BetterReplay tries reverse thrust.";
+
+// The gear step on the ground: held above the runway, then put back.
+const char* const kHoverPrompt = "Lifting the aircraft off the runway";
+const char* const kHoverDetail =
+    "No takeoff needed: BetterReplay holds the aircraft frozen just above the runway while you raise and lower the "
+    "gear, then puts it back.";
+const char* const kHeldDetail = "The aircraft is held frozen just above the runway until the gear step is done.";
+const char* const kLandDetail = "Once the gear is down, BetterReplay puts the aircraft back on the runway.";
+const char* const kLowerDetail =
+    "The gear is still up. Once it's down, BetterReplay puts the aircraft back on the runway. Cancel setup puts it "
+    "back as it is.";
 
 // Recording stops while the setup runs (SetupFlow::running), so its tests stay out of clips.
 const char* const kTakeoffDetail = "Recording is paused until the setup is done, so this takeoff isn't saved.";
@@ -872,15 +898,19 @@ void SetupFlow::enterStep() {
         return;
     }
     const Control c = control();
-    phase_ = c == Control::Gear && onGround_ ? Phase::Takeoff : Phase::Prepare;
     logf(0, "control setup: step %zu of %zu, %s", step_ + 1, plan_.size(), controlSpec(c).key);
+    if (c == Control::Gear && onGround_) {
+        beginHover();
+    } else {
+        phase_ = Phase::Prepare;
+    }
 }
 
 const char* SetupFlow::precondition(const Frame& live) const {
     const Control c = control();
     if (c == Control::Gear) return onGround_ ? "Take off" : nullptr;
     if (!onGround_) return "Land and stop on the runway";
-    if (live.v[kGroundSpeed] > 2.0) return "Come to a stop";
+    if (live.v[kGroundSpeed] > kStopKt) return "Come to a stop";
     if (c == Control::Throttle) {
         if (!facts_.engineRunning) return "Start the engines";
         if (!facts_.parkingBrake) return "Set the parking brake";
@@ -906,8 +936,16 @@ void SetupFlow::onFrame(double dt, const Frame& live, const SetupFacts& facts) {
             break;
         }
         case Phase::Takeoff:
-            if (!onGround_) beginUser();
+            // (Right after a hover the sim may still show the aircraft up there for a frame or two.)
+            if (onGround_) {
+                groundSeen_ = true;
+            } else if (groundSeen_) {
+                beginUser();
+            }
             break;
+        case Phase::Hover: hoverFrame(dt, live); break;
+        case Phase::Land:
+        case Phase::Lower: landFrame(dt, live); break;
         case Phase::User: userFrame(dt, live); break;
         case Phase::Away: awayFrame(live); break;
         case Phase::Back: backFrame(dt, live); break;
@@ -939,6 +977,7 @@ void SetupFlow::beginUser() {
     taskDone_ = false;
     resetHolds();
     need_.clear();
+    gearHandleRest_ = gearHandleUpAt_ = NAN;
     std::vector<ScanVar> vars;
     sim_->scanBegin(vars);
     scanning_ = true;
@@ -991,6 +1030,20 @@ void SetupFlow::userFrame(double dt, const Frame& live) {
         handlePeak_ = dh > handlePeak_ ? dh : handlePeak_;
         outcomePeak_ = dout > outcomePeak_ ? dout : outcomePeak_;
     }
+    if (!moved_ && control() == Control::Gear && hovering()) {
+        // Held above the runway: the pilot's lever up (where its handle simvar shows it) and the
+        // gear not moving for as long as playback waits for it, the gear doesn't move up there.
+        const double lever = live.v[kGearHandle];
+        if (std::isnan(gearHandleRest_)) gearHandleRest_ = lever;
+        if (!(gearHandleRest_ >= 0.5 && lever < 0.5)) {
+            gearHandleUpAt_ = NAN;
+        } else if (std::isnan(gearHandleUpAt_)) {
+            gearHandleUpAt_ = t_;
+        } else if (t_ - gearHandleUpAt_ > backStartSec(Control::Gear)) {
+            leaveHover("the gear didn't move with its lever up there");
+            return;
+        }
+    }
     if (movedFrom(h, handleAnchor_, 0.5 * tu.handleStart) || movedFrom(o, outcomeAnchor_, 0.5 * tu.outcomeStart)) {
         handleAnchor_ = h;
         outcomeAnchor_ = o;
@@ -1035,6 +1088,10 @@ void SetupFlow::userFrame(double dt, const Frame& live) {
         return;
     }
     if (phaseT_ > tu.waitMaxSec) {
+        if (!moved_ && hovering()) {
+            leaveHover("the gear didn't move there");
+            return;
+        }
         endScan();
         tracker_.clear();
         keys_.clear();
@@ -2546,6 +2603,18 @@ void SetupFlow::finishStep(ControlState state, const ControlMethod& method, bool
              state == ControlState::Ok ? describeControl(c, cp).c_str() : "");
     }
     changed_ = true;
+    clearStep();
+    if (hovering()) {
+        beginLand(LandThen::Next);
+        return;
+    }
+    ++step_;
+    enterStep();
+}
+
+void SetupFlow::clearStep() {
+    endDrive();
+    endScan();
     tracker_.clear();
     keys_.clear();
     mini_ = Clip();
@@ -2555,8 +2624,161 @@ void SetupFlow::finishStep(ControlState state, const ControlMethod& method, bool
     attempts_.clear();
     for (std::vector<ControlMethod>& w : ways_) w.clear();
     std::vector<Frame>().swap(capture_);
-    ++step_;
-    enterStep();
+}
+
+// ---------------------------------------------------------------------------- gear on the ground
+
+bool SetupFlow::hovering() const { return sim_ && sim_->hovering(); }
+
+double SetupFlow::hoverLift(const Frame& live) {
+    const double agl = live.v[kAgl];
+    return std::isfinite(agl) && agl >= 0.0 && agl <= kHoverMaxAglFt ? agl + kHoverClearFt : kHoverLiftFt;
+}
+
+// The gear step on the ground: the aircraft goes up once it has stopped (hoverFrame).
+void SetupFlow::beginHover() {
+    phase_ = Phase::Hover;
+    phaseT_ = 0.0;
+    hoverAirSec_ = 0.0;
+    need_.clear();
+}
+
+void SetupFlow::hoverFrame(double dt, const Frame& live) {
+    if (!hovering()) {
+        if (!onGround_) {
+            logf(0, "control setup: airborne; the gear is set up in the air");
+            beginUser();
+            return;
+        }
+        if (live.v[kGroundSpeed] > kStopKt) {
+            need_ = "Come to a stop";
+            phaseT_ = 0.0;
+            return;
+        }
+        need_.clear();
+        static const int kLegs[3] = {kGearCenter, kGearLeft, kGearRight};
+        for (int i = 0; i < 3; ++i) hoverGear_[i] = live.v[kLegs[i]];
+        hoverHandle_ = live.v[kGearHandle];
+        const double lift = hoverLift(live);
+        std::string why;
+        if (!sim_->beginHover(lift, why)) {
+            leaveHover("BetterReplay couldn't hold the aircraft there (" + why + ")");
+            return;
+        }
+        logf(0, "control setup: holding the aircraft %.0f ft above where it stood (%.1f ft above the ground there), frozen, "
+             "for the gear",
+             lift, live.v[kAgl]);
+        phaseT_ = 0.0;
+        hoverAirSec_ = 0.0;
+        return;
+    }
+    // The pilot is told to raise the gear once the sim shows the aircraft airborne up there.
+    hoverAirSec_ = onGround_ ? 0.0 : hoverAirSec_ + dt;
+    if (hoverAirSec_ >= kHoverSettleSec) {
+        logf(0, "control setup: the aircraft counts as airborne above the runway (after %.1f s)", phaseT_);
+        beginUser();
+        return;
+    }
+    if (phaseT_ >= kHoverAirborneSec) leaveHover("the aircraft still counted as on the ground there");
+}
+
+// The gear can't be set up above the runway on this aircraft: it goes back onto the runway (once
+// its gear is down) and the step waits for a takeoff instead.
+void SetupFlow::leaveHover(const std::string& why) {
+    clearStep();
+    note_ = "Couldn't set up the gear above the runway: " + why + ". It's set up after takeoff instead.";
+    logf(1, "control setup: can't set up the gear above the runway: %s; it's set up after takeoff instead", why.c_str());
+    if (hovering()) {
+        beginLand(LandThen::Takeoff);
+    } else {
+        enterTakeoff();
+    }
+}
+
+void SetupFlow::enterTakeoff() {
+    phase_ = Phase::Takeoff;
+    phaseT_ = 0.0;
+    groundSeen_ = false;
+}
+
+// The gear step on the ground has ended (or the setup is stopping): the aircraft goes back onto
+// the runway once its gear is down, then `then`.
+void SetupFlow::beginLand(LandThen then) {
+    endDrive();
+    endScan();
+    landThen_ = then;
+    phase_ = Phase::Land;
+    phaseT_ = 0.0;
+    taskDone_ = false;
+    landDownSec_ = 0.0;
+    landPut_ = false;
+    landGroundSec_ = 0.0;
+    logf(0, "control setup: putting the aircraft back on the runway once the gear is down");
+}
+
+bool SetupFlow::gearDown(const Frame& live) const {
+    static const int kLegs[3] = {kGearCenter, kGearLeft, kGearRight};
+    for (int i = 0; i < 3; ++i) {
+        const double want = hoverGear_[i];
+        const double v = live.v[kLegs[i]];
+        if (std::isfinite(want) && std::isfinite(v) && v < std::min(want, 1.0) - kGearDownTol) return false;
+    }
+    // And its lever, where the handle simvar showed it down on the runway: one left up while the
+    // gear didn't move might raise it once the aircraft is let go.
+    return !(hoverHandle_ >= 0.5) || live.v[kGearHandle] >= 0.5;
+}
+
+// Land and Lower: until the gear is down (the pilot is asked after kLandGearWaitSec), then the
+// aircraft goes back, until the sim shows it on the ground.
+void SetupFlow::landFrame(double dt, const Frame& live) {
+    if (landPut_) {
+        landGroundSec_ = onGround_ ? landGroundSec_ + dt : 0.0;
+        if (landGroundSec_ < kLandSettleSec && phaseT_ < kLandSettleMaxSec) return;
+        if (landGroundSec_ < kLandSettleSec) {
+            logf(1, "control setup: the sim doesn't show the aircraft on the ground %.0f s after putting it back; going on",
+                 kLandSettleMaxSec);
+        }
+        afterLand();
+        return;
+    }
+    if (!hovering()) {  // (let go meanwhile)
+        afterLand();
+        return;
+    }
+    landGear_ = meanOf(live, kGearCenter, 3);
+    landDownSec_ = gearDown(live) ? landDownSec_ + dt : 0.0;
+    if (landDownSec_ >= kLandDownSec) {
+        if (phase_ == Phase::Lower) logf(0, "control setup: the gear is down");
+        putBack();
+        return;
+    }
+    if (phase_ == Phase::Land && phaseT_ >= kLandGearWaitSec) {
+        logf(1, "control setup: the gear isn't down after %.0f s (at %.2f, its handle at %.2f); asking you to lower it",
+             kLandGearWaitSec, landGear_, live.v[kGearHandle]);
+        phase_ = Phase::Lower;
+        phaseT_ = 0.0;
+    }
+}
+
+void SetupFlow::putBack() {
+    logf(0, "control setup: putting the aircraft back where it stood on the runway (gear at %.2f)", landGear_);
+    sim_->endHover(true);
+    landPut_ = true;
+    landGroundSec_ = 0.0;
+    phase_ = Phase::Land;
+    phaseT_ = 0.0;
+}
+
+void SetupFlow::afterLand() {
+    landPut_ = false;
+    switch (landThen_) {
+        case LandThen::Next:
+            ++step_;
+            enterStep();
+            break;
+        case LandThen::Takeoff: enterTakeoff(); break;
+        case LandThen::Stop: stop(landWhy_); break;
+    }
 }
 
 void SetupFlow::endScan() {
@@ -2573,19 +2795,44 @@ void SetupFlow::endDrive() {
 
 void SetupFlow::cancel(const char* why) {
     if (!active()) return;
+    if (phase_ == Phase::Land || phase_ == Phase::Lower) {
+        // Putting the aircraft back already: it stops once that's done. Asked to lower the gear,
+        // the pilot cancelled: it goes back as it is.
+        if (landThen_ != LandThen::Stop) {
+            landThen_ = LandThen::Stop;
+            landWhy_ = why;
+        }
+        if (phase_ == Phase::Lower) {
+            logf(1, "control setup: cancelled with the gear still up");
+            putBack();
+        }
+        return;
+    }
     if (phase_ == Phase::Sweep) parkThrottle();
-    endDrive();
-    endScan();
-    tracker_.clear();
-    keys_.clear();
-    mini_ = Clip();
-    std::vector<double>().swap(keyColumn_);
-    learned_.clear();
-    methods_.clear();
-    for (std::vector<ControlMethod>& w : ways_) w.clear();
-    std::vector<Frame>().swap(capture_);
+    if (hovering()) {
+        clearStep();
+        landWhy_ = why;
+        logf(0, "control setup stopping (%s)", why);
+        beginLand(LandThen::Stop);
+        return;
+    }
+    stop(why);
+}
+
+void SetupFlow::abandon(const char* why) {
+    if (!active()) return;
+    if (phase_ == Phase::Sweep) parkThrottle();
+    if (hovering()) {
+        logf(0, "control setup: letting the aircraft go where it is (%s)", why);
+        sim_->endHover(false);
+    }
+    stop(why);
+}
+
+void SetupFlow::stop(const std::string& why) {
+    clearStep();
     phase_ = Phase::Idle;
-    logf(0, "control setup stopped (%s)", why);
+    logf(0, "control setup stopped (%s)", why.c_str());
 }
 
 bool SetupFlow::answer(const std::string& a, std::string& error) {
@@ -2664,7 +2911,7 @@ bool SetupFlow::answer(const std::string& a, std::string& error) {
         default: break;
     }
     if (a == "skip" && phase_ != Phase::Done && phase_ != Phase::Replay && phase_ != Phase::Hold && phase_ != Phase::Sweep &&
-        phase_ != Phase::Back) {
+        phase_ != Phase::Back && phase_ != Phase::Land && phase_ != Phase::Lower) {
         note_.clear();
         if (leverStage_) {
             // The method stays; the lever keeps an earlier calibration made for the same method.
@@ -2700,6 +2947,10 @@ std::string SetupFlow::prompt() const {
         case Phase::User: return tasks.items[task_ < tasks.count ? task_ : tasks.count - 1];
         case Phase::Away: return tasks.items[0];
         case Phase::Takeoff: return "Take off";
+        case Phase::Hover: return need_.empty() ? kHoverPrompt : need_;
+        case Phase::Land:
+            return landPut_ || landDownSec_ > 0.0 ? "Putting the aircraft back" : "Waiting for the gear to come down";
+        case Phase::Lower: return "Lower the gear";
         case Phase::Retry: return "That didn't register";
         case Phase::Replay:
         case Phase::Hold:
@@ -2718,7 +2969,8 @@ void SetupFlow::statusJson(JsonWriter& w) const {
     w.kv("active", active());
     if (!active()) return;
     static const char* const kPhases[] = {"idle",  "prepare", "takeoff", "user",  "retry",     "replay", "hold", "ask",
-                                          "done",  "query",   "positions", "notice", "sweep", "away", "back"};
+                                          "done",  "query",   "positions", "notice", "sweep", "away", "back",
+                                          "hover", "land",    "lower"};
     w.kv("phase", kPhases[static_cast<int>(phase_)]);
     const bool done = phase_ == Phase::Done;
     w.kv("step", done ? "" : controlSpec(control()).key);
@@ -2728,14 +2980,17 @@ void SetupFlow::statusJson(JsonWriter& w) const {
     w.kv("prompt", prompt());
     // The pilot's instructions in this step: which one is showing, and whether it's done (the
     // last one, while things settle). The throttle's holds also say how long it's been held.
-    // Away is one instruction (the first again).
-    const bool away = phase_ == Phase::Away;
-    const bool pilot = phase_ == Phase::User || phase_ == Phase::Positions || away;
-    const bool holding = pilot && !away && control() == Control::Throttle && task_ < kThrottleHolds;
+    // Away and Lower are one instruction each (the first again; "Lower the gear").
+    const bool single = phase_ == Phase::Away || phase_ == Phase::Lower;
+    const bool pilot = phase_ == Phase::User || phase_ == Phase::Positions || single;
+    const bool holding = pilot && !single && control() == Control::Throttle && task_ < kThrottleHolds;
     const char* detail = "";
     switch (phase_) {
-        case Phase::User: detail = holding ? kHoldDetail : ""; break;
+        case Phase::User: detail = holding ? kHoldDetail : hovering() ? kHeldDetail : ""; break;
         case Phase::Away: detail = kAwayDetail; break;
+        case Phase::Hover: detail = kHoverDetail; break;
+        case Phase::Land: detail = kLandDetail; break;
+        case Phase::Lower: detail = kLowerDetail; break;
         case Phase::Query: detail = kQueryDetail; break;
         case Phase::Positions: detail = kPositionsDetail; break;
         case Phase::Notice: detail = reverseOnly_ ? kReverseNoticeDetail : kNoticeDetail; break;
@@ -2745,9 +3000,9 @@ void SetupFlow::statusJson(JsonWriter& w) const {
         default: break;
     }
     w.kv("detail", detail);
-    w.kv("task", static_cast<int>(pilot && !away ? task_ : 0));
+    w.kv("task", static_cast<int>(pilot && !single ? task_ : 0));
     w.kv("tasks", static_cast<int>(done                         ? 0
-                                   : away                       ? 1
+                                   : single                     ? 1
                                    : phase_ == Phase::Positions ? kPositionTasks
                                                                 : tasksFor(control()).count));
     w.kv("taskDone", pilot && taskDone_);
@@ -2783,8 +3038,10 @@ void SetupFlow::statusJson(JsonWriter& w) const {
             w.value("skip").value("cancel");
             break;
         case Phase::User:
-        case Phase::Away: w.value("skip").value("cancel"); break;
+        case Phase::Away:
+        case Phase::Hover: w.value("skip").value("cancel"); break;
         case Phase::Takeoff: w.value("skip").value("later"); break;
+        case Phase::Lower: w.value("cancel"); break;
         case Phase::Retry: w.value("retry").value("skip").value("cancel"); break;
         case Phase::Replay:
         case Phase::Hold:

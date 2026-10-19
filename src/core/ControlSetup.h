@@ -2,13 +2,20 @@
 // on a new aircraft.
 //
 // For each control the pilot moves it once (spoilers, flaps and throttle on the runway with the
-// engines running; the gear after takeoff). Meanwhile every input event and L:var the aircraft
+// engines running; the gear in the air). Meanwhile every input event and L:var the aircraft
 // has is watched, to find the ones that moved with the control whatever they're called, and so is
 // every key event that fires (a cockpit click, a binding: the aircraft's own events, which no
 // variable shows). Then the movement is replayed with each candidate method, through the same
 // code playback uses (IControlSim), and checked: did the spoilers / flaps / gear / engines do what
 // they did when the pilot moved them? A method that passes is put to the pilot ("did the engines
 // spool up and back down?"); a "no" tries the next. The result is the aircraft's ControlProfile.
+//
+// The gear needs no takeoff. On the runway the setup holds the aircraft frozen a little above
+// where it stands (IControlSim::beginHover), checks the sim counts it as airborne there, and
+// teaches the gear as in flight. When the step ends, however it ends, the gear has to be down
+// before the aircraft is put back: the setup waits for it, then asks the pilot to lower it. Where
+// the aircraft still counts as on the ground up there, or its gear doesn't move, the step waits
+// for a takeoff instead.
 //
 // How a control comes back can depend on how it got there: the PMDG 777's gear key events lowered
 // its gear after its lever event had raised it, but after the pilot had, only a click on the lever
@@ -94,6 +101,14 @@ public:
     virtual void setReverser(bool on) = 0;
     virtual void throttleDecrease() = 0;
     virtual void toggleReverse() = 0;
+    // The gear step on the ground: beginHover snapshots the aircraft, puts it `liftFt` straight up
+    // from where it stands (heading and attitude kept, velocities zero) and freezes it, holding it
+    // there until endHover. endHover puts the snapshot back and unfreezes it; with `restore` false
+    // (the sim reset the aircraft: a flight loaded) it only unfreezes it. beginHover is false, with
+    // the reason, if it can't (a replay is playing).
+    virtual bool beginHover(double liftFt, std::string& why) = 0;
+    virtual void endHover(bool restore) = 0;
+    virtual bool hovering() const = 0;
 };
 
 // Watches every scanned variable while the pilot moves a control and finds the ones that moved
@@ -241,15 +256,21 @@ public:
     void setSim(IControlSim* sim) { sim_ = sim; }
 
     // Starts on a copy of `profile`. On the ground it teaches every control the aircraft has
-    // (the gear after takeoff); in the air only the gear.
+    // (the gear last, held above the runway); in the air only the gear.
     bool start(const AircraftProfile& profile, const Frame& live, const SetupFacts& facts, std::string& error);
+    // Stops. An aircraft held above the runway is put back first, once its gear is down (the
+    // pilot is asked to lower it if it isn't within kLandGearWaitSec), so the setup stays active
+    // until then. Cancelled while the pilot is asked, it's put back as it is.
     void cancel(const char* why);
+    // Stops at once: the sim reset the aircraft (a flight loaded, the main menu). An aircraft held
+    // above the runway is let go where the sim has it now, not put back.
+    void abandon(const char* why);
     // The pilot's answer: yes, no, again, skip, retry, ready (continue despite a precondition),
     // begin (the throttle sweep), later, cancel, close.
     bool answer(const std::string& a, std::string& error);
     bool active() const { return phase_ != Phase::Idle; }
-    // Active and not yet on its results screen: it's teaching or testing controls (and waiting
-    // for the takeoff in between). Recording stops meanwhile.
+    // Active and not yet on its results screen: it's teaching or testing controls (holding the
+    // aircraft above the runway, or waiting for a takeoff, for the gear). Recording stops meanwhile.
     bool running() const { return phase_ != Phase::Idle && phase_ != Phase::Done; }
 
     // Every sim frame while active. dt = 0 while the sim is paused.
@@ -278,13 +299,29 @@ public:
     };
     Tuning tuning(Control c) const;
 
+    // The gear step on the ground (exposed for tests). The aircraft goes up by its height above the
+    // ground where it stands (about as long as its gear) plus kHoverClearFt, or by kHoverLiftFt where
+    // that isn't known (hoverLift), and must count as airborne there within kHoverAirborneSec. When
+    // the step ends the gear gets kLandGearWaitSec to be down before the pilot is asked to lower it.
+    static constexpr double kHoverClearFt = 30.0;
+    static constexpr double kHoverLiftFt = 50.0;
+    static constexpr double kHoverAirborneSec = 5.0;
+    static constexpr double kLandGearWaitSec = 30.0;
+    static double hoverLift(const Frame& live);
+
 private:
     // After Done: the throttle lever's phases, for aircraft whose lever simvar isn't the lever.
     // Query asks whether it is when the pilot's movement didn't tell; Positions repeats the
     // movement's holds when they didn't show the lever's variable; Notice warns before the Sweep
     // steps the axis through its range. Away: the pilot moves the control away once more; Back:
-    // the way back replayed from there (or from where a method's replay left it).
-    enum class Phase { Idle, Prepare, Takeoff, User, Retry, Replay, Hold, Ask, Done, Query, Positions, Notice, Sweep, Away, Back };
+    // the way back replayed from there (or from where a method's replay left it). Hover: the gear
+    // step on the ground, lifting the aircraft above the runway; Land: waiting for its gear to be
+    // down, putting it back and waiting for the sim to show it there; Lower: the pilot is asked to
+    // lower the gear.
+    enum class Phase {
+        Idle, Prepare, Takeoff, User, Retry, Replay, Hold, Ask, Done, Query, Positions, Notice, Sweep, Away, Back,
+        Hover, Land, Lower
+    };
     enum class LeverVerdict { Steady, Creeps, Unclear };  // the lever simvar while the hand was still
 
     Control control() const { return plan_[step_]; }
@@ -344,6 +381,21 @@ private:
     void evaluate(const Frame& live);
     void nextMethod();
     void finishStep(ControlState state, const ControlMethod& method, bool confirmed);
+    // The gear step on the ground. LandThen: what follows putting the aircraft back: the next
+    // step, waiting for a takeoff (the hover didn't work), or stopping.
+    enum class LandThen : uint8_t { Next, Takeoff, Stop };
+    bool hovering() const;
+    void beginHover();
+    void hoverFrame(double dt, const Frame& live);
+    void leaveHover(const std::string& why);  // the gear after takeoff instead
+    void beginLand(LandThen then);
+    void landFrame(double dt, const Frame& live);
+    void putBack();
+    void afterLand();
+    void enterTakeoff();
+    bool gearDown(const Frame& live) const;  // at least as far down as where the aircraft stood
+    void clearStep();  // the step's movement, methods and scan
+    void stop(const std::string& why);
     void endScan();
     void endDrive();
     const char* precondition(const Frame& live) const;  // what's missing, or null
@@ -438,6 +490,20 @@ private:
     int pilotBack_ = -1;   // the method that brought the control back from where the pilot left it
     int replayBack_ = -1;  // the one that brought it back from where method_'s replay left it, when that didn't
     std::vector<ControlMethod> ways_[kDirections];  // what confirmMethod found, for finishStep
+
+    // the gear step on the ground
+    LandThen landThen_ = LandThen::Next;
+    std::string landWhy_;      // LandThen::Stop: why the setup stops (logged once it's back)
+    double hoverGear_[3] = {NAN, NAN, NAN};  // the gear where the aircraft stood, and its handle simvar
+    double hoverHandle_ = NAN;
+    double hoverAirSec_ = 0.0;      // Hover: how long the sim has shown it off the ground
+    double gearHandleRest_ = NAN;   // User, held up there: the gear handle simvar at the start, and
+    double gearHandleUpAt_ = NAN;   // when it went up with the gear still down
+    double landDownSec_ = 0.0;      // Land: how long the gear has been down (and where it was last)
+    double landGear_ = NAN;
+    bool landPut_ = false;          // and it's been put back:
+    double landGroundSec_ = 0.0;    // how long the sim has shown it on the ground since
+    bool groundSeen_ = true;        // Takeoff: the sim has shown the aircraft on the ground (not at once after a hover)
 
     // the throttle lever (aircraft whose lever simvar isn't the lever)
     AircraftProfile before_;  // the profile when the run started: a skipped step keeps its result

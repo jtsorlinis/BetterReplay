@@ -555,12 +555,15 @@ button {
 .br-setup.phase-wait,
 .br-setup.phase-prepare,
 .br-setup.phase-user,
-.br-setup.phase-takeoff {
+.br-setup.phase-takeoff,
+.br-setup.phase-hover,
+.br-setup.phase-lower {
   border-color: rgba(245, 177, 61, 0.55);
 }
 
 .br-setup.phase-replay,
-.br-setup.phase-hold {
+.br-setup.phase-hold,
+.br-setup.phase-land {
   border-color: rgba(74, 168, 255, 0.6);
 }
 
@@ -713,7 +716,8 @@ button {
 
 .phase-replay .br-phase,
 .phase-hold .br-phase,
-.phase-sweep .br-phase {
+.phase-sweep .br-phase,
+.phase-land .br-phase {
   background: rgba(74, 168, 255, 0.15);
   color: var(--br-blue);
   animation: br-pulse 1.4s ease-in-out infinite;
@@ -888,7 +892,9 @@ button {
 .br-setup.stepping.phase-prepare .br-tick,
 .br-setup.stepping.phase-takeoff .br-tick,
 .br-setup.stepping.phase-user .br-tick,
-.br-setup.stepping.phase-positions .br-tick {
+.br-setup.stepping.phase-positions .br-tick,
+.br-setup.stepping.phase-hover .br-tick,
+.br-setup.stepping.phase-lower .br-tick {
   display: block;
   visibility: hidden;
 }

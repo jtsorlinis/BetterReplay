@@ -1,5 +1,6 @@
 // Control setup and profiles, against a simulated aircraft whose controls only respond to one
 // method each (like the A320neo V2, which ignores the simvars and legacy events).
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -123,6 +124,20 @@ struct FakeAircraft : IControlSim {
     EventStepper stepper;
     GearCommandFollower gearFollow;
     int clicks = 0;
+    // The gear's key events and input event lower it only after the pilot raised it (not after a
+    // replay did): a replay that raises it leaves it up.
+    bool replayLowersOnlyAfterPilot = false;
+    // The setup's hover (the gear step on the ground): put up there and frozen. The sim counts it as
+    // airborne up there unless hoverOnGround; with gearStuckFrozen its gear doesn't move while
+    // frozen; with handleFollowsLever its gear handle simvar shows the lever at once.
+    bool hoverable = true;
+    bool hoverOnGround = false;
+    bool gearStuckFrozen = false;
+    bool handleFollowsLever = false;
+    bool frozen = false;
+    double lifted = 0.0;  // how far up it was put
+    int hovers = 0, putBacks = 0, letGo = 0;
+    double gearWhenPutBack = NAN;
 
     // what the setup did
     std::vector<ControlMethod> tried;
@@ -182,12 +197,13 @@ struct FakeAircraft : IControlSim {
             }
         }
         for (int e = 0; e < 2; ++e) n1[e] = approach(n1[e], 20.0 + 0.75 * std::fabs(thr[e]), 10.0, dt);
-        if (t - gearLeverChangedAt >= 2.0) {
+        if (t - gearLeverChangedAt >= 2.0 && !(frozen && gearStuckFrozen)) {
             gearPos = approach(gearPos, gearLever, gearRate, dt);
             legAnim = approach(legAnim, gearLever, legAnimRate > 0.0 ? legAnimRate : gearRate, dt);
         }
         if (gearPos >= 0.999) gearHandleSimvar = 1.0;  // the handle simvar lags, as on the A320
         if (gearPos <= 0.001) gearHandleSimvar = 0.0;
+        if (handleFollowsLever) gearHandleSimvar = gearLever;
         if (rollWhenDriven && driving && drivenControl == Control::Throttle && (thr[0] > 50.0 || thr[1] > 50.0)) gs = 5.0;
         if (keyNoise) fire(kElevatorAxis, std::round(300.0 * std::sin(7.0 * t)));
     }
@@ -360,13 +376,38 @@ struct FakeAircraft : IControlSim {
             }
             // Key events (an event's position too) from the gear command, like ControlDriver.
             const double v = driven.kind == MethodKind::KeyEvent ? f.v[kGearHandle] : f.v[kInputGear];
-            if (std::isfinite(v)) replayGearLever(v >= 0.5 ? 1.0 : 0.0);
+            if (!std::isfinite(v) || (v >= 0.5 && gearLever < 0.5 && replayLowersOnlyAfterPilot && !raisedByPilot)) return;
+            replayGearLever(v >= 0.5 ? 1.0 : 0.0);
         }
     }
     void endControl(Control) override {
         driving = false;
         ++ends;
     }
+    bool beginHover(double liftFt, std::string& why) override {
+        if (!hoverable) {
+            why = "it can't here";
+            return false;
+        }
+        frozen = true;
+        lifted = liftFt;
+        ++hovers;
+        onGround = hoverOnGround;
+        gs = 0.0;
+        return true;
+    }
+    void endHover(bool restore) override {
+        if (!frozen) return;
+        frozen = false;
+        if (restore) {
+            ++putBacks;
+            onGround = true;
+            gearWhenPutBack = gearPos;
+        } else {
+            ++letGo;
+        }
+    }
+    bool hovering() const override { return frozen; }
 };
 
 SetupFacts airlinerFacts() {
@@ -1540,24 +1581,34 @@ TEST(Setup_ThrottleReplayStopsWhenTheAircraftRolls) {
     CHECK(!h.aircraft.driving);
 }
 
+namespace {
+
+// Lever up at 2 s (the legs follow from 4 s), down again at 12 s.
+std::function<void(double)> cycleGear(FakeAircraft& a) {
+    return [&a](double s) { a.setGearLever(s >= 2.0 && s < 12.0 ? 0.0 : 1.0); };
+}
+
+}  // namespace
+
+// Where the aircraft can't be held above the runway, the gear step waits for the takeoff.
 TEST(Setup_GearAfterTakeoffFindsTheLeverAheadOfTheLegs) {
     SetupHarness h;
     h.facts.hasSpoilers = false;
     h.facts.engines = 1;
     h.aircraft.engines = 1;
+    h.aircraft.hoverable = false;
     REQUIRE(h.start());
     CHECK_EQ(h.status().getNumber("steps", 0), 2.0);
     REQUIRE(h.answer("skip"));  // throttle
-    CHECK_EQ(h.phase(), std::string("takeoff"));
     h.run(1.0);
     CHECK_EQ(h.phase(), std::string("takeoff"));
+    CHECK(h.status().getString("note", "").find("couldn't hold the aircraft there (it can't here)") != std::string::npos);
+    CHECK(!h.aircraft.frozen);
 
     h.aircraft.onGround = false;
     h.run(0.1);
     CHECK_EQ(h.phase(), std::string("user"));
-    // Lever up at 2 s (the legs follow from 4 s), down again at 12 s.
-    auto pilot = [&](double s) { h.aircraft.setGearLever(s >= 2.0 && s < 12.0 ? 0.0 : 1.0); };
-    CHECK(h.run(120.0, pilot, "ask"));
+    CHECK(h.run(120.0, cycleGear(h.aircraft), "ask"));
     REQUIRE(!h.aircraft.tried.empty());
     CHECK(h.aircraft.tried[0] == h.aircraft.gearWorks);
     CHECK_NEAR(h.aircraft.gearPos, 1.0, 1e-6);
@@ -1565,6 +1616,213 @@ TEST(Setup_GearAfterTakeoffFindsTheLeverAheadOfTheLegs) {
     REQUIRE(h.answer("yes"));
     CHECK_EQ(h.phase(), std::string("done"));
     CHECK(h.flow.profile()[Control::Gear].state == ControlState::Ok);
+    CHECK_EQ(h.aircraft.hovers, 0);
+}
+
+// On the runway the gear needs no takeoff: once stopped, the aircraft is held frozen just above
+// where it stood (its height above the ground there plus 30 ft), the sim shows it airborne, and the
+// gear is taught as in flight. The step done, the aircraft goes back once the gear is down.
+TEST(Setup_GearHeldAboveTheRunwayWithoutATakeoff) {
+    Frame f;
+    f.v[kAgl] = 12.5;
+    CHECK_NEAR(SetupFlow::hoverLift(f), 42.5, 1e-9);
+    f.v[kAgl] = NAN;
+    CHECK_NEAR(SetupFlow::hoverLift(f), SetupFlow::kHoverLiftFt, 1e-9);
+    f.v[kAgl] = 800.0;  // not on the ground
+    CHECK_NEAR(SetupFlow::hoverLift(f), SetupFlow::kHoverLiftFt, 1e-9);
+
+    SetupHarness h;
+    h.facts.hasSpoilers = false;
+    h.facts.engines = 1;
+    h.aircraft.engines = 1;
+    REQUIRE(h.start());
+    REQUIRE(h.answer("skip"));  // throttle
+    CHECK_EQ(h.phase(), std::string("hover"));
+    {
+        const JsonValue st = h.status();
+        CHECK(st.getString("detail", "").find("No takeoff needed") != std::string::npos);
+        const JsonValue* buttons = st.get("buttons");
+        REQUIRE(buttons && buttons->array.size() == 2);
+        CHECK_EQ(buttons->array[0].string, std::string("skip"));
+    }
+    // Still rolling: it waits.
+    h.aircraft.gs = 5.0;
+    h.run(1.0);
+    CHECK_EQ(h.status().getString("prompt", ""), std::string("Come to a stop"));
+    CHECK_EQ(h.aircraft.hovers, 0);
+    h.aircraft.gs = 0.0;
+    h.run(0.1);
+    CHECK_EQ(h.aircraft.hovers, 1);
+    CHECK(h.aircraft.frozen);
+    CHECK_NEAR(h.aircraft.lifted, SetupFlow::kHoverClearFt, 1e-9);  // its AGL on the ground is 0 here
+    CHECK(h.run(1.0, nullptr, "user"));
+    CHECK(logged("the aircraft counts as airborne above the runway"));
+    CHECK(h.status().getString("detail", "").find("held frozen just above the runway") != std::string::npos);
+
+    CHECK(h.run(120.0, cycleGear(h.aircraft), "ask"));
+    CHECK(h.aircraft.frozen);
+    REQUIRE(!h.aircraft.tried.empty());
+    CHECK(h.aircraft.tried[0] == h.aircraft.gearWorks);
+    REQUIRE(h.answer("yes"));
+    CHECK(h.flow.profile()[Control::Gear].state == ControlState::Ok);
+    CHECK_EQ(h.phase(), std::string("land"));
+    CHECK(h.flow.running());
+    CHECK(h.run(5.0, nullptr, "done"));
+    CHECK_EQ(h.aircraft.putBacks, 1);
+    CHECK(!h.aircraft.frozen);
+    CHECK(h.aircraft.onGround);
+    CHECK_NEAR(h.aircraft.gearWhenPutBack, 1.0, 1e-6);
+    CHECK(inOrder(h.prompts, {"Come to a stop", "Lifting the aircraft off the runway", "Raise the gear", "Lower the gear",
+                              "Raise the gear", "Watch the gear", "Did the gear retract and extend again?",
+                              "Putting the aircraft back", "Setup finished"}));
+    CHECK(std::find(h.prompts.begin(), h.prompts.end(), "Take off") == h.prompts.end());
+}
+
+// The sim still counts the aircraft as on the ground up there: it goes back down and the step
+// waits for the takeoff, saying why.
+TEST(Setup_GearAfterTakeoffWhenTheAircraftCountsAsOnTheGroundAboveTheRunway) {
+    SetupHarness h;
+    h.facts.hasSpoilers = false;
+    h.facts.engines = 1;
+    h.aircraft.engines = 1;
+    h.aircraft.hoverOnGround = true;
+    REQUIRE(h.start());
+    REQUIRE(h.answer("skip"));  // throttle
+    CHECK(h.run(SetupFlow::kHoverAirborneSec - 1.0, nullptr, "user") == false);
+    CHECK_EQ(h.phase(), std::string("hover"));
+    CHECK(h.aircraft.frozen);
+    CHECK(h.run(5.0, nullptr, "takeoff"));
+    CHECK_EQ(h.aircraft.putBacks, 1);
+    CHECK(!h.aircraft.frozen);
+    CHECK(h.status().getString("note", "").find("the aircraft still counted as on the ground there. It's set up after takeoff "
+                                                "instead") != std::string::npos);
+    CHECK(logged("can't set up the gear above the runway"));
+    h.run(1.0);
+    CHECK_EQ(h.phase(), std::string("takeoff"));
+
+    // The takeoff path as before.
+    h.aircraft.onGround = false;
+    h.run(0.1);
+    CHECK_EQ(h.phase(), std::string("user"));
+    CHECK(h.run(120.0, cycleGear(h.aircraft), "ask"));
+    REQUIRE(h.answer("yes"));
+    CHECK_EQ(h.phase(), std::string("done"));
+    CHECK(h.flow.profile()[Control::Gear].state == ControlState::Ok);
+    CHECK_EQ(h.aircraft.hovers, 1);
+}
+
+// Frozen, this aircraft's gear doesn't move: the pilot's lever up and the gear still for as long as
+// playback waits for it, the step waits for the takeoff instead. The lever was left up, so before
+// the aircraft goes back the pilot is asked to lower it.
+TEST(Setup_GearAfterTakeoffWhenItWontMoveAboveTheRunway) {
+    SetupHarness h;
+    h.facts.hasSpoilers = false;
+    h.facts.engines = 1;
+    h.aircraft.engines = 1;
+    h.aircraft.gearStuckFrozen = true;
+    h.aircraft.handleFollowsLever = true;
+    REQUIRE(h.start());
+    REQUIRE(h.answer("skip"));  // throttle
+    CHECK(h.run(2.0, nullptr, "user"));
+    auto pilot = [&](double s) { h.aircraft.setGearLever(s >= 2.0 ? 0.0 : 1.0); };  // and leaves it up
+    CHECK(h.run(20.0, pilot, "land"));
+    CHECK(h.status().getString("note", "").find("the gear didn't move with its lever up there") != std::string::npos);
+    CHECK_NEAR(h.aircraft.gearPos, 1.0, 1e-6);
+    CHECK(h.aircraft.frozen);
+    CHECK(h.run(SetupFlow::kLandGearWaitSec + 1.0, nullptr, "lower"));
+    CHECK_EQ(h.status().getString("prompt", ""), std::string("Lower the gear"));
+    CHECK(logged("the gear isn't down after 30 s (at 1.00, its handle at 0.00)"));  // the legs down, the lever up
+    CHECK(h.aircraft.frozen);
+    h.aircraft.setGearLever(1.0);
+    CHECK(h.run(5.0, nullptr, "takeoff"));
+    CHECK_EQ(h.aircraft.putBacks, 1);
+    CHECK(!h.aircraft.frozen);
+    CHECK(logged("the gear is down"));
+}
+
+// The last method tried raised the gear and couldn't lower it. The step fails, the setup waits
+// for the gear, then asks the pilot to lower it, and only then puts the aircraft back.
+TEST(Setup_GearLeftUpByAFailedMethodAsksThePilotToLowerIt) {
+    SetupHarness h;
+    h.facts.hasSpoilers = false;
+    h.facts.engines = 1;
+    h.aircraft.engines = 1;
+    h.aircraft.replayLowersOnlyAfterPilot = true;
+    REQUIRE(h.start());
+    REQUIRE(h.answer("skip"));  // throttle
+    CHECK(h.run(2.0, nullptr, "user"));
+    CHECK(h.run(900.0, cycleGear(h.aircraft), "land"));
+    CHECK(h.flow.profile()[Control::Gear].state == ControlState::Failed);
+    CHECK(h.aircraft.gearPos < 0.5);  // left up
+    CHECK(h.aircraft.frozen);
+    CHECK_EQ(h.status().getString("prompt", ""), std::string("Waiting for the gear to come down"));
+    {
+        const JsonValue st = h.status();
+        const JsonValue* buttons = st.get("buttons");
+        CHECK(buttons && buttons->array.empty());
+    }
+    CHECK(h.run(SetupFlow::kLandGearWaitSec - 1.0, nullptr, "lower") == false);
+    CHECK(h.run(2.0, nullptr, "lower"));
+    CHECK(logged("the gear isn't down after 30 s (at 0.00, its handle at 0.00); asking you to lower it"));
+    {
+        const JsonValue st = h.status();
+        CHECK(st.getString("detail", "").find("puts it back as it is") != std::string::npos);
+        const JsonValue* buttons = st.get("buttons");
+        REQUIRE(buttons && buttons->array.size() == 1);
+        CHECK_EQ(buttons->array[0].string, std::string("cancel"));
+    }
+    h.run(60.0);  // it waits for the pilot
+    CHECK_EQ(h.phase(), std::string("lower"));
+    CHECK_EQ(h.aircraft.putBacks, 0);
+    h.aircraft.setGearLever(1.0);
+    CHECK(h.run(15.0, nullptr, "done"));
+    CHECK_EQ(h.aircraft.putBacks, 1);
+    CHECK(h.aircraft.gearWhenPutBack > 0.98);
+    CHECK(!h.aircraft.frozen);
+    CHECK(inOrder(h.prompts, {"Waiting for the gear to come down", "Lower the gear", "Putting the aircraft back"}));
+}
+
+// Cancelled above the runway, the aircraft goes back once the gear is down; cancelled again while
+// the pilot is asked to lower it, it goes back as it is.
+TEST(Setup_CancelAboveTheRunwayPutsTheAircraftBack) {
+    SetupHarness h;
+    h.facts.hasSpoilers = false;
+    h.facts.engines = 1;
+    h.aircraft.engines = 1;
+    REQUIRE(h.start());
+    REQUIRE(h.answer("skip"));  // throttle
+    CHECK(h.run(2.0, nullptr, "user"));
+    REQUIRE(h.answer("cancel"));
+    CHECK(h.flow.active());
+    CHECK_EQ(h.phase(), std::string("land"));
+    CHECK(h.aircraft.frozen);
+    CHECK(h.run(5.0, nullptr, "idle"));
+    CHECK_EQ(h.aircraft.putBacks, 1);
+    CHECK(!h.aircraft.frozen);
+    CHECK(h.aircraft.onGround);
+    CHECK(!h.aircraft.driving);
+    CHECK(logged("control setup stopped (cancelled)"));
+
+    SetupHarness g;
+    g.facts.hasSpoilers = false;
+    g.facts.engines = 1;
+    g.aircraft.engines = 1;
+    REQUIRE(g.start());
+    REQUIRE(g.answer("skip"));  // throttle
+    CHECK(g.run(2.0, nullptr, "user"));
+    g.aircraft.setGearLever(0.0);
+    g.run(8.0);
+    REQUIRE(g.answer("later"));
+    CHECK_EQ(g.phase(), std::string("land"));
+    CHECK(g.run(SetupFlow::kLandGearWaitSec + 1.0, nullptr, "lower"));
+    std::string err;
+    CHECK(!g.flow.answer("skip", err));
+    REQUIRE(g.answer("cancel"));
+    CHECK_EQ(g.aircraft.putBacks, 1);
+    CHECK(g.aircraft.gearWhenPutBack < 0.5);  // as it was
+    CHECK(!g.aircraft.frozen);
+    CHECK(g.run(2.0, nullptr, "idle"));
+    CHECK(logged("control setup stopped (finish later)"));
 }
 
 namespace {
@@ -2474,7 +2732,8 @@ struct EngineSetupHarness {
         engine.setAircraftTitle("Test Airliner");
         engine.setAircraftKey("simobjects/airplanes/test_airliner");
     }
-    void run(double seconds, const std::function<void(double)>& pilot = nullptr) {
+    // Stops early once the setup reaches `until` (a phase name, "idle" once it's inactive), if given.
+    bool run(double seconds, const std::function<void(double)>& pilot = nullptr, const char* until = nullptr) {
         for (double s = 0.0; s < seconds; s += kDt) {
             const JsonValue st = setupStatus();
             const std::string phase = st.getString("phase", "");
@@ -2490,7 +2749,10 @@ struct EngineSetupHarness {
             in.facts = facts;
             simTime += kDt;
             engine.onFrame(in, 1792247525000 + static_cast<int64_t>(simTime * 1000.0));
+            const std::string now = engine.setupActive() ? setupStatus().getString("phase", "") : "idle";
+            if (until && now == until) return true;
         }
+        return !until;
     }
     JsonValue setupStatus() {
         std::string out;
@@ -2560,6 +2822,52 @@ TEST(EngineSetup_OfferedOnTheRunwayWithEnginesRunning) {
     CHECK(!h.spy.haveProfile);
 }
 
+// Set up / Redo on an aircraft that has a profile: the same offer as a new one, the checklist
+// first; in the air, the gear. Started, "later" or a new flight, it's gone again.
+TEST(EngineSetup_RedoGoesThroughTheSameChecklist) {
+    EngineSetupHarness h;
+    h.facts.gearRetractable = false;
+    h.run(0.2);
+    std::string err;
+    REQUIRE(h.engine.setupStart(err));
+    REQUIRE(h.engine.setupAnswer("skip", err));  // spoilers
+    REQUIRE(h.engine.setupAnswer("skip", err));  // throttle
+    h.run(0.2);
+    if (h.engine.setupActive()) REQUIRE(h.engine.setupAnswer("close", err));  // the results screen
+    h.run(0.2);
+    REQUIRE(!h.engine.setupActive());
+    CHECK_EQ(h.setupStatus().getString("offer", "?"), std::string(""));  // it has a profile: not offered
+
+    h.facts.engineRunning = false;  // at the gate, engines off
+    h.run(0.1);
+    REQUIRE(h.engine.setupRequest(err));
+    h.run(0.1);
+    CHECK(!h.engine.setupActive());  // not started: the checklist first
+    CHECK_EQ(h.setupStatus().getString("offer", "?"), std::string("wait"));
+    CHECK(h.setupStatus().getBool("requested", false));
+    h.facts.engineRunning = true;
+    h.run(0.1);
+    CHECK_EQ(h.setupStatus().getString("offer", "?"), std::string("new"));
+    h.aircraft.onGround = false;
+    h.facts.gearRetractable = true;
+    h.run(0.1);
+    CHECK_EQ(h.setupStatus().getString("offer", "?"), std::string("gear"));
+    h.aircraft.onGround = true;
+    h.run(0.1);
+    REQUIRE(h.engine.setupStart(err));
+    CHECK(!h.setupStatus().getBool("requested", true));
+    REQUIRE(h.engine.setupLater(err));
+
+    REQUIRE(h.engine.setupRequest(err));
+    REQUIRE(h.engine.setupLater(err));
+    h.run(0.1);
+    CHECK_EQ(h.setupStatus().getString("offer", "?"), std::string(""));
+    REQUIRE(h.engine.setupRequest(err));
+    h.engine.onFlightLoaded("test");
+    h.run(0.1);
+    CHECK_EQ(h.setupStatus().getString("offer", "?"), std::string(""));
+}
+
 TEST(EngineSetup_StepsAreSavedAndAppliedAndSurviveARestart) {
     EngineSetupHarness h;
     h.facts.gearRetractable = false;
@@ -2608,15 +2916,20 @@ TEST(EngineSetup_RecordingStopsWhileItRunsAndStartsAfresh) {
     CHECK_EQ(h.engine.bufferedFrames(), before);  // the setup's tests aren't recorded
     REQUIRE(h.engine.setupAnswer("yes", err));
     REQUIRE(h.engine.setupAnswer("skip", err));  // throttle
-    // Waiting for the takeoff, for the gear: that isn't recorded either.
-    CHECK_EQ(h.setupStatus().getString("phase", ""), std::string("takeoff"));
+    // Held above the runway for the gear: that isn't recorded either.
+    CHECK_EQ(h.setupStatus().getString("phase", ""), std::string("hover"));
     h.run(1.0);
+    CHECK(h.aircraft.frozen);
     CHECK(!h.engine.recording());
     CHECK_EQ(h.engine.bufferedFrames(), before);
 
-    // Finished (here: the gear left for later), recording starts from scratch, and detection
-    // arms again as after a teleport.
+    // Finished (here: the gear left for later), recording starts from scratch once the aircraft
+    // is back on the runway, and detection arms again as after a teleport.
     REQUIRE(h.engine.setupAnswer("later", err));
+    CHECK(h.engine.setupActive());
+    CHECK(h.run(5.0, nullptr, "idle"));
+    CHECK(!h.aircraft.frozen);
+    CHECK(h.engine.bufferedFrames() <= 1);  // afresh, from the runway
     h.run(2.0);
     CHECK(h.engine.recording());
     CHECK(h.engine.bufferedSeconds() < 2.1);
@@ -2703,4 +3016,90 @@ TEST(EngineSetup_AWayThatWorkedInAReplayGoesFirstInTheProfile) {
     REQUIRE(back.ways[kDown].size() == 2);
     CHECK(back.ways[kDown][0] == kClick777);
     CHECK(back.ways[kDown][1] == kGearKeys);
+}
+
+namespace {
+
+// A setup on the runway, the throttle skipped: the gear step, the aircraft held above the runway.
+bool heldAboveTheRunway(EngineSetupHarness& h) {
+    h.facts.hasSpoilers = false;
+    h.run(0.2);
+    std::string err;
+    return h.engine.setupStart(err) && h.engine.setupAnswer("skip", err) && h.run(2.0, nullptr, "user") &&
+           h.aircraft.frozen;
+}
+
+}  // namespace
+
+// The whole gear step on the runway, through the Engine: held above it, taught, saved, put back,
+// and recording starts again from there.
+TEST(EngineSetup_GearSetUpAboveTheRunwayAndPutBack) {
+    g_setupLog.clear();
+    EngineSetupHarness h;
+    REQUIRE(heldAboveTheRunway(h));
+    CHECK(!h.engine.recording());
+    CHECK_NEAR(h.aircraft.lifted, SetupFlow::kHoverClearFt, 1e-9);
+    std::string err;
+    CHECK(!h.engine.play("x.rpl", err));
+    CHECK(h.run(150.0, cycleGear(h.aircraft), "ask"));
+    REQUIRE(h.engine.setupAnswer("yes", err));
+    CHECK(h.spy.last[Control::Gear].state == ControlState::Ok);  // saved at once
+    CHECK(h.spy.last[Control::Gear].method == h.aircraft.gearWorks);
+    CHECK(h.aircraft.frozen);
+    CHECK(h.run(5.0, nullptr, "done"));
+    CHECK_EQ(h.aircraft.putBacks, 1);
+    CHECK(!h.aircraft.frozen);
+    CHECK(h.aircraft.onGround);
+    h.run(1.0);
+    CHECK(h.engine.recording());
+    CHECK(h.engine.bufferedSeconds() < 1.1);
+    const JsonValue s = h.setupStatus();
+    const JsonValue* controls = s.get("controls");
+    REQUIRE(controls && controls->array.size() == 4);
+    CHECK_EQ(controls->array[3].getString("state", ""), std::string("ok"));  // the gear
+}
+
+// A flight loaded meanwhile put the aircraft somewhere else: it's let go there, not put back.
+TEST(EngineSetup_FlightLoadedAboveTheRunwayLetsTheAircraftGo) {
+    g_setupLog.clear();
+    EngineSetupHarness h;
+    REQUIRE(heldAboveTheRunway(h));
+    h.aircraft.setGearLever(0.0);
+    h.run(8.0);
+    h.engine.onFlightLoaded("test");
+    CHECK(!h.engine.setupActive());
+    CHECK(!h.aircraft.frozen);
+    CHECK_EQ(h.aircraft.letGo, 1);
+    CHECK_EQ(h.aircraft.putBacks, 0);
+    CHECK(logged("letting the aircraft go where it is (flight loaded)"));
+
+    EngineSetupHarness m;
+    REQUIRE(heldAboveTheRunway(m));
+    m.engine.setAtMainMenu(true);
+    CHECK(!m.engine.setupActive());
+    CHECK(!m.aircraft.frozen);
+    CHECK_EQ(m.aircraft.letGo, 1);
+}
+
+// Another aircraft key mid-step (or the same aircraft identified by its path at last): the setup
+// stops, and the aircraft goes back once its gear is down, the pilot asked to lower it.
+TEST(EngineSetup_AircraftChangedAboveTheRunwayPutsItBackOnceTheGearIsDown) {
+    g_setupLog.clear();
+    EngineSetupHarness h;
+    REQUIRE(heldAboveTheRunway(h));
+    h.aircraft.setGearLever(0.0);
+    h.run(8.0);
+    REQUIRE(h.aircraft.gearPos < 0.5);
+    h.engine.setAircraftKey("simobjects/airplanes/other_airliner");
+    CHECK(h.engine.setupActive());
+    CHECK(h.aircraft.frozen);
+    CHECK(h.run(SetupFlow::kLandGearWaitSec + 1.0, nullptr, "lower"));
+    CHECK(!h.engine.recording());
+    CHECK_EQ(h.aircraft.putBacks, 0);
+    h.aircraft.setGearLever(1.0);
+    CHECK(h.run(15.0, nullptr, "idle"));
+    CHECK_EQ(h.aircraft.putBacks, 1);
+    CHECK(h.aircraft.gearWhenPutBack > 0.98);
+    CHECK(!h.aircraft.frozen);
+    CHECK(logged("control setup stopped (aircraft changed)"));
 }

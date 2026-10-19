@@ -50,9 +50,12 @@ public:
     void setReverser(bool on) override;
     void throttleDecrease() override;
     void toggleReverse() override;
+    bool beginHover(double liftFt, std::string& why) override;
+    void endHover(bool restore) override;
+    bool hovering() const override { return hovering_; }
 
 private:
-    enum DataDef : DWORD { DEF_RECORD = 1, DEF_TITLE = 2, DEF_PLAYBACK = 3, DEF_RESTORE = 4, DEF_SNAP = 5 };
+    enum DataDef : DWORD { DEF_RECORD = 1, DEF_TITLE = 2, DEF_PLAYBACK = 3, DEF_RESTORE = 4, DEF_SNAP = 5, DEF_HOVER = 6 };
     enum ClientEvent : DWORD {
         EVT_FREEZE_SET_FIRST = 100,    // + Freeze
         EVT_FREEZE_TOGGLE_FIRST = 110, // + Freeze
@@ -270,6 +273,16 @@ private:
     bool profileDrives_[kControlCount] = {};  // this playback: the profile drives the control
     bool throttleByProfile_ = false;
     bool setupMasking_ = false;  // the setup is driving the throttle simvars: hardware masked
+    // The setup's gear step on the ground (beginHover): the aircraft as it stood, and where it's
+    // held, frozen, its position, attitude and velocities (DEF_HOVER) written every data frame in
+    // case the freeze doesn't hold. Put back at the latest when the module stops.
+    bool hovering_ = false;
+    Frame hoverSnap_;
+    Frame hoverAt_;
+    int hoverChannels_[kChannelCount] = {};
+    int hoverChannelCount_ = 0;
+    bool hoverDefDefined_ = false;
+    void writeHover(const Frame& frame, bool tracked);
     // the setup's scan: input events (B: vars) then L:vars, and the key events seen meanwhile
     // (none of ours) until the setup takes them, each frame
     std::vector<FsBVarId> scanB_;
@@ -367,7 +380,6 @@ private:
     static constexpr int64_t kPrepareGearMaxMs = 50000;  // a profile's ways of lowering it, each 6 to 10 s (WayPicker)
     int64_t prepareStartMs_ = 0;
     bool prepareGearSent_ = false;
-    bool prepareUnfrozen_ = false;  // in the air, not frozen while the gear comes down
     bool snapAccepted_ = false;    // a gear snap held on this aircraft: no need to lower it first
     bool restoreDeferred_ = false;  // Stop: lowering the gear before putting the aircraft back
     static double gearExtensionOf(const Frame& f);

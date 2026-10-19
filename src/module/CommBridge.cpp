@@ -82,6 +82,8 @@ void CommBridge::onCommand(const char* buf, unsigned int size) {
         ok = engine_.setSpeed(cmd.getNumber("x", 1.0), err);
     } else if (op == "stop") {
         ok = engine_.stopPlayback(err);
+    } else if (op == "setupRequest") {
+        ok = engine_.setupRequest(err);
     } else if (op == "setupStart") {
         ok = engine_.setupStart(err);
     } else if (op == "setupAnswer") {
