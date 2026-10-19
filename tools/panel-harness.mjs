@@ -18,10 +18,24 @@ class UIElement extends HTMLElement { connectedCallback() {} disconnectedCallbac
 class TemplateElement extends UIElement {}
 function checkAutoload() {}
 // <ingame-ui>: shows its children in a fixed-size frame and announces itself as active.
+// closePanel hides it, as the title bar's X does, until the stand-in toolbar button opens it.
 class IngameUiMock extends HTMLElement {
   connectedCallback() {
     this.style.cssText = 'display:block;width:520px;height:720px;border:1px solid #345;';
     setTimeout(() => this.dispatchEvent(new Event('panelActive')), 200);
+  }
+  closePanel() {
+    this.style.display = 'none';
+    this.dispatchEvent(new Event('panelInactive'));
+    const open = document.createElement('button');
+    open.textContent = 'Toolbar: open Better Replay';
+    open.style.cssText = 'padding:8px 12px;background:#24313d;color:#e8eef3;border:1px solid #345;cursor:pointer;';
+    open.addEventListener('click', () => {
+      open.remove();
+      this.style.display = 'block';
+      this.dispatchEvent(new Event('panelActive'));
+    });
+    this.parentNode.insertBefore(open, this);
   }
 }
 customElements.define('ingame-ui', IngameUiMock);

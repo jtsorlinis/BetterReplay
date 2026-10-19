@@ -1492,16 +1492,9 @@ button {
 }
 
 .br-round-main {
-  width: 108px;
-  height: 108px;
   border-color: var(--br-blue);
   background: var(--br-blue);
   color: #04121f;
-}
-
-.br-round-main svg {
-  width: 54px;
-  height: 54px;
 }
 
 .br-round-main:hover {
@@ -1514,16 +1507,24 @@ button {
   color: var(--br-red);
 }
 
-.br-speeds {
+.br-btn.br-hide {
   display: flex;
-  justify-content: center;
-  margin-top: 30px;
+  align-self: center;
+  align-items: center;
+  margin-top: 20px;
+  padding: 8px 16px 8px 13px;
+  color: var(--br-muted);
+  font-size: 15px;
 }
 
-.br-speeds .br-btn {
-  margin: 0 4px;
-  padding: 10px 14px;
-  font-size: 16px;
+.br-btn.br-hide:hover {
+  color: var(--br-text);
+}
+
+.br-btn.br-hide svg {
+  width: 20px;
+  height: 20px;
+  margin-right: 7px;
 }
 
 /* ---- clips: the library */

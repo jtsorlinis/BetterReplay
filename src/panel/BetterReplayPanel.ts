@@ -16,6 +16,10 @@ interface CommBusListener {
     callWasm(name: string, json: string): unknown;
 }
 declare function RegisterCommBusListener(callback?: () => void): CommBusListener;
+// The panel's window (Templates/ingameUi/ingameUi.js); its title bar's X calls closePanel.
+interface IngameUi extends HTMLElement {
+    closePanel(): void;
+}
 declare function checkAutoload(): void;
 
 // ---- protocol (mirrors src/module/CommBridge.cpp and Engine::statusJson / clipsJson)
@@ -470,7 +474,7 @@ function findWithAttr(start: EventTarget | null, attr: string, stop: HTMLElement
 // ---- panel
 
 class BetterReplayPanel extends UIElement {
-    declare ingameUi: HTMLElement | null;
+    declare ingameUi: IngameUi | null;
     declare listener: CommBusListener | null;
     declare timer: number;
     declare active: boolean;
@@ -547,7 +551,7 @@ class BetterReplayPanel extends UIElement {
 
     connectedCallback(): void {
         super.connectedCallback();
-        this.ingameUi = this.querySelector("ingame-ui");
+        this.ingameUi = this.querySelector("ingame-ui") as IngameUi | null;
         this.bindControls();
         if (this.ingameUi) {
             this.ingameUi.addEventListener("panelActive", () => this.setActive(true));
@@ -695,15 +699,13 @@ class BetterReplayPanel extends UIElement {
         };
         byId("br-stop").addEventListener("click", stop);
         byId("br-prep-cancel").addEventListener("click", stop);
+        // Closes the window like its title bar's X; the replay plays on in the module.
+        byId("br-hide").addEventListener("click", () => {
+            if (this.ingameUi && typeof this.ingameUi.closePanel === "function") this.ingameUi.closePanel();
+        });
         byId("br-playpause").addEventListener("click", () => {
             const playing = this.status && this.status.play.playing;
             this.send({ op: playing ? "pause" : "resume" });
-        });
-
-        const speeds = byId("br-speeds");
-        speeds.addEventListener("click", (e: Event) => {
-            const button = findWithAttr(e.target, "data-speed", speeds);
-            if (button) this.send({ op: "speed", x: parseFloat(button.getAttribute("data-speed") || "1") });
         });
 
         const track = byId("br-seek");
@@ -1167,13 +1169,6 @@ class BetterReplayPanel extends UIElement {
             button.setAttribute("data-mode", mode);
             button.innerHTML = mode === "pause" ? ICON_PAUSE : mode === "replay" ? ICON_REPLAY : ICON_PLAY;
             button.title = mode === "pause" ? "Pause" : mode === "replay" ? "Replay" : "Play";
-        }
-
-        const buttons = byId("br-speeds").querySelectorAll("[data-speed]");
-        for (let i = 0; i < buttons.length; ++i) {
-            const b = buttons[i] as HTMLElement;
-            const speed = parseFloat(b.getAttribute("data-speed") || "0");
-            b.classList.toggle("active", Math.abs(speed - p.speed) < 1e-3);
         }
     }
 
