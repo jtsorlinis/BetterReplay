@@ -289,6 +289,34 @@ bool ControlDriver::reverseToggled() const {
     return s.active && s.reverseBy == ReverseBy::Toggle && s.toggle.busy();
 }
 
+double ControlDriver::throttleOff(const Frame& clip) const {
+    const Slot& s = slots_[static_cast<int>(Control::Throttle)];
+    if (!s.active || s.method.kind != MethodKind::KeyEvent || isOwnEvent(s.method) || !ctx_.live) return NAN;
+    if (s.holding || s.toggle.busy()) return NAN;
+    if (!s.useLever && s.reverseBy == ReverseBy::Axis) return NAN;
+    const Frame& live = *ctx_.live;
+    double off = NAN;
+    for (int e = 0; e < s.count; ++e) {
+        // Reverse, by what the reversers did, or the flags (not on a "hold" aircraft, where the
+        // clip's flag isn't its reverse).
+        if (s.engaged[e] || reversing(clip, e) || reversing(live, e)) return NAN;
+        if (s.reverseBy != ReverseBy::Hold && (clip.v[kReverser1 + e] >= 0.5 || live.v[kReverser1 + e] >= 0.5)) return NAN;
+        if (!std::isfinite(s.sent[e])) continue;
+        double at = NAN;
+        if (s.useLever) {
+            const double lv = live.v[kLVarThrottle1 + (s.lever.var.find('#') != std::string::npos ? e : 0)];
+            if (!leverAxis(s.lever, lv, 0.0, false, at)) continue;
+        } else {
+            const double pct = live.v[kThrottle1 + e];
+            if (!std::isfinite(pct)) continue;
+            at = pct / 100.0;
+        }
+        const double gap = std::fabs(at - (s.sent[e] + 16384.0) / 32768.0);
+        if (!(gap <= off)) off = gap;
+    }
+    return off;
+}
+
 void ControlDriver::forgetReverse() {
     slots_[static_cast<int>(Control::Throttle)].toggle.forget();
     flapLever_ = NAN;

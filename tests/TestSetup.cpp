@@ -1717,6 +1717,57 @@ TEST(Playback_ThrustFollowerTracksAnApproach) {
     CHECK_NEAR(follower.step(100.0, 100.0, 0.3, 1.0, 0.0), 1.0, 1e-12);
 }
 
+TEST(Playback_LeverWatchCatchesAnAutothrottleBackOn) {
+    // A replay's levers, as LeverWatch sees them a frame at a time (60 Hz): `offAt` gives how far
+    // they are from where the replay put them; returns the times of each Disconnect and Back.
+    auto run = [](double seconds, const std::function<double(double)>& offAt, std::vector<double>& disconnects,
+                  std::vector<double>& backs) {
+        LeverWatch w;
+        w.reset();
+        for (int i = 0; i < static_cast<int>(seconds * 60.0); ++i) {
+            const double t = i * kDt;
+            const LeverWatch::Result r = w.step(offAt(t), static_cast<int64_t>(std::llround(t * 1000.0)));
+            if (r == LeverWatch::Result::Disconnect) disconnects.push_back(t);
+            if (r == LeverWatch::Result::Back) backs.push_back(t);
+        }
+        return w.tries();
+    };
+    std::vector<double> d, b;
+    // Following the replay: a little off, and further for a moment when the clip's lever moves
+    // fast (the lever a second behind), or nothing to tell (reverse).
+    run(60.0, [](double t) { return t > 20.0 && t < 21.2 ? 0.3 : (t > 30.0 && t < 40.0 ? NAN : 0.02); }, d, b);
+    CHECK(d.empty());
+    CHECK(b.empty());
+    // The autothrottle engaged at 100 s, the levers 10% off; the disconnect takes at the second
+    // try, and they're back at 107.
+    d.clear();
+    b.clear();
+    run(120.0, [](double t) { return t >= 100.0 && t < 107.0 ? 0.1 : 0.01; }, d, b);
+    REQUIRE(d.size() == 2u);
+    CHECK_NEAR(d[0], 100.0 + LeverWatch::kOffMs / 1000.0, 0.05);
+    CHECK_NEAR(d[1], d[0] + LeverWatch::kRetryMs / 1000.0, 0.05);
+    REQUIRE(b.size() == 1u);
+    CHECK_NEAR(b[0], 107.0 + LeverWatch::kBackMs / 1000.0, 0.05);
+    // The replay's sends pull a lever back for a moment (0.3 s a second) before the autothrottle
+    // has it again: still off.
+    d.clear();
+    b.clear();
+    run(20.0, [](double t) { return t >= 5.0 && std::fmod(t, 1.0) >= 0.3 ? 0.2 : 0.0; }, d, b);
+    CHECK(!d.empty());
+    CHECK(b.empty());
+    // An aircraft that doesn't take the disconnect: kTries, then left alone.
+    d.clear();
+    b.clear();
+    CHECK_EQ(run(300.0, [](double t) { return t >= 1.0 ? 0.5 : 0.0; }, d, b), LeverWatch::kTries);
+    CHECK_EQ(static_cast<int>(d.size()), LeverWatch::kTries);
+    // Off, then nothing to tell (reverse) for a moment: the time off starts again after it.
+    d.clear();
+    b.clear();
+    run(5.0, [](double t) { return t >= 1.0 && t < 1.2 ? NAN : (t >= 0.5 ? 0.1 : 0.0); }, d, b);
+    REQUIRE(d.size() == 1u);
+    CHECK_NEAR(d[0], 1.2 + LeverWatch::kOffMs / 1000.0, 0.05);
+}
+
 TEST(Setup_ThrottleReplayStopsWhenTheAircraftRolls) {
     SetupHarness h;
     h.facts.hasSpoilers = false;

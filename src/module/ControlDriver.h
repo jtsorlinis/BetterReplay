@@ -73,6 +73,12 @@ public:
     // The "toggle" throttle has the aircraft in reverse, or a toggle is still settling: ending it
     // now would toggle it back out at once, whether the levers are at idle or not.
     bool reverseToggled() const;
+    // The key-event throttle: how far the levers are from where they were last sent, as a fraction
+    // of the axis (the engine furthest off), for LeverWatch. Read from the lever's own variable
+    // through the calibration where it's replayed from that, else the lever simvar (not on an axis
+    // with its own reverse zone, where idle isn't the axis's bottom). NaN where that can't be told:
+    // nothing sent yet, the lever unreadable, or in or around reverse in the clip or the aircraft.
+    double throttleOff(const Frame& clip) const;
     // The aircraft was reset (flight loaded, main menu, another aircraft): it's out of any reverse
     // we toggled, so end() mustn't toggle it.
     void forgetReverse();  // and the flap lever (stepFlaps)

@@ -1147,6 +1147,8 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
         }
     }
     atPresses_ = 0;  // (pressed after each jump)
+    atAgain_ = false;
+    atWatch_.reset();
     for (int c = 0; c < kChannelCount; ++c) {
         if (owned.test(static_cast<size_t>(c)) && kChannels[c].play == PlayMode::Set) playSkip_.set(static_cast<size_t>(c));
     }
@@ -1740,17 +1742,64 @@ const Frame& SimBridge::leadFrame(int control, const Frame& frame) {
 // held 106% N1). Triggered as a key event: sent through SimConnect it didn't reach the 777's, a
 // binding to it did. Twice, half a second apart: the second press clears the disconnect warning,
 // and with the autothrottle off neither does anything. Aircraft that don't take the sim's event
-// are left as they are.
-void SimBridge::pressAutothrottleDisconnect() {
-    if (atPresses_ <= 0) return;
+// are left as they are. After the second, the throttle goes out again: the levers stay where the
+// autothrottle left them, and the replay only sends them when the clip's move.
+bool SimBridge::pressAutothrottleDisconnect() {
+    if (atPresses_ <= 0) return false;
     const int64_t now = utcNowMs();
-    if (now < atNextMs_) return;
+    if (now < atNextMs_) return false;
     --atPresses_;
     atNextMs_ = now + 500;
     ControlDriver::keyEvent(KEY_AUTO_THROTTLE_DISCONNECT, 0);
-    if (atPresses_ == 0) {
+    if (atPresses_ > 0) return false;
+    if (!atAgain_) {
         log::info("playback: sent AUTO_THROTTLE_DISCONNECT (twice), so the autothrottle can't drive the thrust levers "
                   "against the replay's; it stays off after the replay");
+    }
+    return true;
+}
+
+// The rest of the replay: the thrust levers away from where it put them (LeverWatch) mean an
+// autothrottle that engaged itself again (the PMDG 777's at the clip's acceleration altitude,
+// with its A/T arm switches on), so it gets the disconnect again, and the throttle after it.
+void SimBridge::watchLevers(const Frame& frame) {
+    if (!playPresent_.test(static_cast<size_t>(kThrottle1))) return;
+    const int64_t now = utcNowMs();
+    double off = NAN;
+    if (atPresses_ > 0) {
+        // The presses still going out: nothing to tell until they're done.
+    } else if (throttleByProfile_) {
+        off = driver_.throttleOff(frame);
+    } else if (throttleViaEvents_ && clipHasThrottle_) {
+        // Axis events: the lever simvar against what they were sent for (sendThrottleEvents).
+        for (int e = 0; e < 4 && e < numEngines_; ++e) {
+            if (!playPresent_.test(static_cast<size_t>(kThrottle1 + e))) continue;
+            if (reversing(frame, e) || reversing(input_.raw, e) || frame.v[kReverser1 + e] >= 0.5 ||
+                input_.raw.v[kReverser1 + e] >= 0.5) {
+                off = NAN;
+                break;
+            }
+            const double live = input_.raw.v[kThrottle1 + e];
+            if (!std::isfinite(live)) continue;
+            const double gap = std::fabs(live - throttleTarget_[e]) / 100.0;
+            if (!(gap <= off)) off = gap;
+        }
+    }
+    switch (atWatch_.step(off, now)) {
+        case LeverWatch::Result::Disconnect:
+            log::info("playback: the thrust levers have been up to %.0f%% of their travel off where the replay put them "
+                      "for %.1f s: the autothrottle may have engaged itself again; sending AUTO_THROTTLE_DISCONNECT "
+                      "(twice) and the throttle again (%d of %d)",
+                      atWatch_.worst() * 100.0, atWatch_.offForMs(now) / 1000.0, atWatch_.tries(), LeverWatch::kTries);
+            atPresses_ = 2;
+            atNextMs_ = 0;
+            atAgain_ = true;
+            break;
+        case LeverWatch::Result::Back:
+            log::info("playback: the thrust levers are back where the replay puts them, %.1f s after the disconnect",
+                      (now - LeverWatch::kBackMs - atWatch_.firedMs()) / 1000.0);
+            break;
+        case LeverWatch::Result::Quiet: break;
     }
 }
 
@@ -1785,6 +1834,7 @@ void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
         // jump: frozen in the air at the clip's 0 kt, the 777's engaged itself again.
         atPresses_ = playPresent_.test(static_cast<size_t>(kThrottle1)) ? 2 : 0;
         atNextMs_ = 0;
+        atAgain_ = false;
     }
     bool releaseFlaps = false;
     if (flapsHold_ && flapsSettled(frame, true)) {
@@ -1799,13 +1849,15 @@ void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
         }
     }
     sendInputEvents(frame, jumped);
-    pressAutothrottleDisconnect();
+    const bool resendThrottle = pressAutothrottleDisconnect();
     for (int i = 0; i < kControlCount; ++i) {
         const Control c = controlAt(i);
         if (!profileDrives_[i] || (c == Control::Flaps && flapsHold_)) continue;
-        driver_.apply(c, leadFrame(i, frame), jumped || (c == Control::Flaps && releaseFlaps));
+        driver_.apply(c, leadFrame(i, frame),
+                      jumped || (c == Control::Flaps && releaseFlaps) || (c == Control::Throttle && resendThrottle));
     }
-    if (throttleViaEvents_ && clipHasThrottle_) sendThrottleEvents(frame, jumped);
+    if (throttleViaEvents_ && clipHasThrottle_) sendThrottleEvents(frame, jumped || resendThrottle);
+    watchLevers(frame);
     trackEventChannels(frame, jumped);
     if (!settling_ || jumped) trackEngines(frame, jumped);  // (not while held at the start)
     if (playChannelCount_ == 0 && directChannelCount_ == 0) return;

@@ -726,6 +726,33 @@ double ThrustFollower::step(double clip, double live, double lo, double hi, doub
     return axis < lo ? lo : (axis > hi ? hi : axis);
 }
 
+LeverWatch::Result LeverWatch::step(double off, int64_t nowMs) {
+    if (!std::isfinite(off)) {  // nothing to tell: start over
+        offSinceMs_ = backSinceMs_ = -1;
+        return Result::Quiet;
+    }
+    if (off > kOffAxis) {
+        backSinceMs_ = -1;
+        if (offSinceMs_ < 0) {
+            offSinceMs_ = nowMs;
+            worst_ = 0.0;
+        }
+        worst_ = std::fmax(worst_, off);
+        if (nowMs - offSinceMs_ < kOffMs || tries_ >= kTries) return Result::Quiet;
+        if (firedMs_ >= 0 && nowMs - firedMs_ < kRetryMs) return Result::Quiet;
+        ++tries_;
+        firedMs_ = nowMs;
+        waitingBack_ = true;
+        return Result::Disconnect;
+    }
+    if (backSinceMs_ < 0) backSinceMs_ = nowMs;
+    if (nowMs - backSinceMs_ < kBackMs) return Result::Quiet;
+    offSinceMs_ = -1;
+    if (!waitingBack_) return Result::Quiet;
+    waitingBack_ = false;
+    return Result::Back;
+}
+
 int methodSourceChannel(Control c, MethodKind k, int engine) {
     const ControlSpec& s = controlSpec(c);
     const int e = s.perEngine ? engine : 0;

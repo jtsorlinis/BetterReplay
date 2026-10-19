@@ -455,6 +455,45 @@ private:
     double integral_ = 0.0;
 };
 
+// The thrust levers in a replay away from where it put them: an autothrottle that engaged itself
+// again after the disconnect at the jump. The PMDG 777's, its A/T arm switches on, did at the
+// clip's acceleration altitude and drove the levers against the replay's from there. One call a
+// frame with `off`, how far the levers are from where the replay last sent them (the engine
+// furthest off, as a fraction of the throttle axis; NaN where that can't be told, as in reverse).
+// Disconnect: they've been more than kOffAxis off for kOffMs (back for less than kBackMs doesn't
+// count: a lever the replay sends may jump back for a moment before the autothrottle has it
+// again), kRetryMs or more since the last time, kTries at most a replay. Back: after a
+// Disconnect, they've been where the replay put them for kBackMs.
+class LeverWatch {
+public:
+    enum class Result : uint8_t { Quiet, Disconnect, Back };
+    void reset() {
+        offSinceMs_ = backSinceMs_ = firedMs_ = -1;
+        waitingBack_ = false;
+        tries_ = 0;
+        worst_ = 0.0;
+    }
+    Result step(double off, int64_t nowMs);
+    int tries() const { return tries_; }
+    double worst() const { return worst_; }  // the furthest off since they went off
+    int64_t offForMs(int64_t nowMs) const { return offSinceMs_ < 0 ? 0 : nowMs - offSinceMs_; }
+    int64_t firedMs() const { return firedMs_; }  // the last Disconnect, -1 before any
+
+    static constexpr double kOffAxis = 0.05;
+    static constexpr int64_t kOffMs = 1500;
+    static constexpr int64_t kBackMs = 1000;
+    static constexpr int64_t kRetryMs = 5000;
+    static constexpr int kTries = 10;
+
+private:
+    int64_t offSinceMs_ = -1;
+    int64_t backSinceMs_ = -1;
+    int64_t firedMs_ = -1;
+    bool waitingBack_ = false;
+    int tries_ = 0;
+    double worst_ = 0.0;
+};
+
 // The channel a method takes its values from (engine is 0-based, throttle only), or -1.
 int methodSourceChannel(Control c, MethodKind k, int engine);
 // Every channel playback drives for this control when the profile drives it (any method):

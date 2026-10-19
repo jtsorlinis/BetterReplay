@@ -284,10 +284,15 @@ private:
     Frame leadFrame_;
     double playSpeed_ = 1.0;
     const Frame& leadFrame(int control, const Frame& frame);
-    // AUTO_THROTTLE_DISCONNECT presses this replay has still to send, the next at atNextMs_.
+    // AUTO_THROTTLE_DISCONNECT presses this replay has still to send, the next at atNextMs_; after
+    // the jump, or (atAgain_) for levers that left where the replay put them (atWatch_). True when
+    // the last of them went out: the throttle is sent again, wherever the autothrottle left it.
     int atPresses_ = 0;
     int64_t atNextMs_ = 0;
-    void pressAutothrottleDisconnect();
+    bool atAgain_ = false;
+    LeverWatch atWatch_;
+    bool pressAutothrottleDisconnect();
+    void watchLevers(const Frame& frame);
     bool setupMasking_ = false;  // the setup is driving the throttle simvars: hardware masked
     // The setup's gear step on the ground (beginHover): the aircraft as it stood, and where it's
     // held, frozen, its position, attitude and velocities (DEF_HOVER) written every data frame in
