@@ -168,10 +168,12 @@ const SETUP_PHASES: { [phase: string]: string } = {
     wait: "Get ready",
     prepare: "Get ready",
     user: "Your turn",
+    away: "Your turn",
     takeoff: "Take off",
     retry: "Didn't catch that",
     replay: "Watch",
     hold: "Watch",
+    back: "Watch",
     ask: "Your call",
     query: "Your call",
     positions: "Your turn",
@@ -180,7 +182,7 @@ const SETUP_PHASES: { [phase: string]: string } = {
     done: "All done",
 };
 // Phases where the pilot is doing something: when what they were told changes there, they did it.
-const PILOT_PHASES: { [phase: string]: boolean } = { prepare: true, takeoff: true, user: true, positions: true };
+const PILOT_PHASES: { [phase: string]: boolean } = { prepare: true, takeoff: true, user: true, away: true, positions: true };
 const TICK_HOLD_MS = 1100;  // a done instruction stays up, ticked, this long
 const NOTE_MS = 5000;       // a failed command's message stays this long
 
@@ -366,7 +368,7 @@ function attemptsHtml(setup: SetupStatus): string {
         return '<div class="br-attempt current"><span class="br-attempt-mark"></span>Testing the throttle: ' +
             pct + "%</div>";
     }
-    if (phase !== "replay" && phase !== "hold" && phase !== "ask") return "";
+    if (phase !== "replay" && phase !== "hold" && phase !== "back" && phase !== "ask") return "";
     const done = setup.attempts || [];
     let html = "";
     for (let i = 0; i < done.length; ++i) {

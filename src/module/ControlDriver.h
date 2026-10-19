@@ -1,6 +1,7 @@
 // Drives a control with one of the profile methods (AircraftProfile.h). The control setup uses
 // it to try a method, and playback uses it for an aircraft whose profile has one, so a method
-// that worked in the setup works the same way in a replay.
+// that worked in the setup works the same way in a replay. Where the profile has ways for each
+// direction, playback gets each of them ready and drives with the one its WayPicker picks.
 #pragma once
 
 #include <MSFS/MSFS_WindowsTypes.h>
@@ -36,12 +37,20 @@ public:
         const double* throttleLowerLimit = nullptr;  // percent, negative with reversers
         const std::vector<InputEventInfo>* inputEvents = nullptr;
         const ChannelMask* clipChannels = nullptr;  // the playing clip's channels (empty otherwise)
+        // A way that moved the control when the one before it in its list didn't (WayPicker): for
+        // the profile, to try it first from now on.
+        void (*wayWorked)(void* ctx, Control c, Direction d, const ControlMethod& m) = nullptr;
+        void* wayCtx = nullptr;
     };
     void setContext(const Context& c) { ctx_ = c; }
 
     // Resolves what the method needs on this aircraft (its preset, L:var, simvars...). False,
     // with the reason, if it can't be used.
     bool begin(Control c, const ControlMethod& m, std::string& why);
+    // Playback: the profile's method, or where it has them each direction's ways (the gear, flaps
+    // and spoilers), each resolved like a method; the WayPicker picks one every frame. Ways the
+    // aircraft can't take are left out; false if a direction has none left.
+    bool beginWays(Control c, const ControlProfile& cp, std::string& why);
     // The key-event throttle on an aircraft whose lever simvar isn't the lever: the clip's lever
     // variable (lv_thr_N) is turned back into the axis value through the setup's calibration.
     // After begin(); the clip must have recorded that variable (clipHasLever).
@@ -76,6 +85,8 @@ public:
     void end(Control c);
     void endAll();
     bool active(Control c) const { return slots_[static_cast<int>(c)].active; }
+    // Driven with more than one way (beginWays): it picks among them.
+    bool picks(Control c) const { return active(c) && picker_[static_cast<int>(c)].multi(); }
     bool anyActive() const;
     // A key event of ours is being sent now (the key event handler sees it too).
     static bool sending() { return sending_; }
@@ -107,8 +118,6 @@ private:
         DWORD eventClient[2] = {};     // and its client event IDs where it's the aircraft's own (0: a sim key event)
         EventStepper stepper;          // a toggle or steps
         GearCommandFollower gearLive;  // the gear's command from its legs, for a toggle or steps
-        int gearDir = 0;               // applyOwnGear: the way it last sent the gear (+1 down)
-        int gearTry = 0;               // and how many ways it has tried so far that way
         double sent[4] = {NAN, NAN, NAN, NAN};
         int since[4] = {};
         int64_t lastingFromMs[4] = {};  // dueWhenLasting: since when the value has been off what was sent
@@ -131,6 +140,8 @@ private:
         int64_t followMs = 0;   // when the throttle was last applied, for the follower's time step
         int followFrames = 0;   // per engine, following the clip's thrust demand
     };
+    bool beginSlot(Control c, Slot& s, const ControlMethod& m, std::string& why);
+    void applySlot(Control c, Slot& s, const Frame& f, bool force);
     // Whether clip time t is in one of engine e's autothrust stretches.
     static bool inAutothrust(const Slot& s, int e, double t);
     // Whether value v for output i is due (changed, forced or time to resend); records it.
@@ -153,7 +164,6 @@ private:
     // An event by its number: a position sent when the control's value changes; a toggle or steps
     // one at a time toward the clip's value (EventStepper), as a pilot clicking would.
     void applyEvent(Control c, Slot& s, const Frame& f, bool force);
-    void applyOwnGear(Slot& s, const EventMethod& ev, double target, double now, bool force);
     void sendEvent(Slot& s, int which, int32_t param);  // which: 0 the event (steps: up), 1 steps' way back
     static void keyEvent(int id, int32_t value);
     // The client event ID mapped to the aircraft's own event `name` ("#69927"), mapping it the
@@ -162,7 +172,9 @@ private:
 
     static bool sending_;
     Context ctx_;
-    Slot slots_[kControlCount];
+    Slot slots_[kControlCount];  // the method, or the picker's first way
+    std::vector<Slot> extra_[kControlCount];  // and its others (WayPicker::ways() from 1 on)
+    WayPicker picker_[kControlCount];
     FsUnitId number_ = FS_INVALID_UNIT;
     std::vector<std::string> ownEvents_;  // mapped to kOwnEventFirst + index
 };

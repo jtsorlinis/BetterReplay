@@ -10,6 +10,15 @@
 // they did when the pilot moved them? A method that passes is put to the pilot ("did the engines
 // spool up and back down?"); a "no" tries the next. The result is the aircraft's ControlProfile.
 //
+// How a control comes back can depend on how it got there: the PMDG 777's gear key events lowered
+// its gear after its lever event had raised it, but after the pilot had, only a click on the lever
+// did. So for the gear, flaps and spoilers each way is tested on its own as well. After the
+// pilot's movement the pilot moves the control away once more ("Raise the gear"), and the way back
+// is replayed from there with each candidate until one brings it back. Then the whole movement
+// is replayed with each candidate as above; one that moves the control away but doesn't bring it
+// back gets the way back replayed from where it left it, with each of the others. The profile
+// keeps a list of ways for each direction where one method doesn't do it all (ControlProfile::ways).
+//
 // The throttle's lever simvar isn't the lever on every aircraft (on the A320neo V2 it's the
 // autothrust's thrust demand). So the pilot's throttle movement holds the lever at about halfway
 // and at full before going back to idle. If the simvar kept moving during those holds and the key
@@ -216,6 +225,11 @@ private:
 // Whether a clip carries what a profile's method needs: the channel it reads, recorded from
 // the same aircraft variable. Clips recorded before a setup, or on another aircraft, may not.
 bool clipSupports(Control c, const ControlMethod& m, const Clip& clip, int engines, std::string* why);
+// The profile as a clip can replay it: each direction's ways without those the clip doesn't
+// support (`left` counts them). False, with the reason, if a direction has none left, or (without
+// ways) the method isn't supported.
+bool clipWays(Control c, const ControlProfile& cp, const Clip& clip, int engines, ControlProfile& out, size_t& left,
+              std::string* why);
 // Whether a clip recorded the throttle lever's variable (lv_thr_N) that the calibration is for.
 bool clipHasLever(const LeverCalibration& cal, const Clip& clip, int engines, std::string* why);
 
@@ -268,8 +282,9 @@ private:
     // After Done: the throttle lever's phases, for aircraft whose lever simvar isn't the lever.
     // Query asks whether it is when the pilot's movement didn't tell; Positions repeats the
     // movement's holds when they didn't show the lever's variable; Notice warns before the Sweep
-    // steps the axis through its range.
-    enum class Phase { Idle, Prepare, Takeoff, User, Retry, Replay, Hold, Ask, Done, Query, Positions, Notice, Sweep };
+    // steps the axis through its range. Away: the pilot moves the control away once more; Back:
+    // the way back replayed from there (or from where a method's replay left it).
+    enum class Phase { Idle, Prepare, Takeoff, User, Retry, Replay, Hold, Ask, Done, Query, Positions, Notice, Sweep, Away, Back };
     enum class LeverVerdict { Steady, Creeps, Unclear };  // the lever simvar while the hand was still
 
     Control control() const { return plan_[step_]; }
@@ -305,6 +320,18 @@ private:
     std::vector<double> eventSeries() const;  // eventTarget over capture_ (the gear from its legs)
     std::string enginePattern(const std::string& name, bool lvar) const;
     void startMethod(size_t i);
+    void prepareMethod(const ControlMethod& m);  // fills in the channels it reads in mini_
+    // Each way on its own (not the throttle). Away: the pilot moves the control away once more;
+    // Back: the way back replayed from there, or from where method_'s replay left it, with each
+    // method in turn until one brings it back.
+    enum class BackFrom : uint8_t { Pilot, Replay };
+    void beginAway();
+    void awayFrame(const Frame& live);
+    void startBack(BackFrom from);
+    void tryBack();
+    void backFrame(double dt, const Frame& live);
+    void endBack(bool ok, const char* why);
+    void startReplays();  // the whole movement, method by method
     void replayFrame(double dt, const Frame& live);
     void holdFrame(const Frame& live);
     void track(const Frame& live);
@@ -401,6 +428,16 @@ private:
     bool started_ = false;   // the control was back where the pilot started it (or the wait ran out)
     bool seenRest_ = false;  // it has been there during this replay: movement counts from then on
     double gearCommand_ = NAN, gearCommandAt_ = 0.0, gearFrom_ = NAN, gearTo_ = NAN;
+
+    // each way on its own
+    BackFrom backFrom_ = BackFrom::Pilot;
+    std::vector<size_t> backTries_;  // the methods to try the way back with, in order
+    size_t backAt_ = 0;
+    double backFromDist_ = NAN;  // how far from where the pilot started it the control was then
+    bool backMoved_ = false;     // it has come some way back since
+    int pilotBack_ = -1;   // the method that brought the control back from where the pilot left it
+    int replayBack_ = -1;  // the one that brought it back from where method_'s replay left it, when that didn't
+    std::vector<ControlMethod> ways_[kDirections];  // what confirmMethod found, for finishStep
 
     // the throttle lever (aircraft whose lever simvar isn't the lever)
     AircraftProfile before_;  // the profile when the run started: a skipped step keeps its result

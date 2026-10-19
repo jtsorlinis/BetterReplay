@@ -161,6 +161,10 @@ public:
     const char* setupOffer() const;
     bool readyForSetup() const;
     const ProfileStore& profiles() const { return profiles_; }
+    // A replay found way `m` moving a control where the one before it in the profile's list that
+    // way didn't (WayPicker): it goes first in the aircraft's profile, logged and saved, so later
+    // replays try it first. False if the profile has no such list or it's first already.
+    bool promoteWay(Control c, Direction d, const ControlMethod& m);
 
     // ---- status
     bool recording() const { return suspendReason_ == nullptr; }

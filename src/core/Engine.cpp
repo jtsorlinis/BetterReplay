@@ -101,7 +101,7 @@ void Engine::setLogger(LogFn fn, void* ctx) {
 
 void Engine::logf(int level, const char* fmt, ...) const {
     if (!log_) return;
-    char buf[320];
+    char buf[512];  // as long as the module log's lines
     va_list args;
     va_start(args, fmt);
     std::vsnprintf(buf, sizeof(buf), fmt, args);
@@ -806,6 +806,19 @@ bool Engine::setupReset(std::string& error) {
     }
     setupSnoozed_ = false;
     if (out_) out_->applyProfile(nullptr);
+    return true;
+}
+
+bool Engine::promoteWay(Control c, Direction d, const ControlMethod& m) {
+    if (aircraftKey_.empty() || !profiles_.find(aircraftKey_)) return false;
+    AircraftProfile& p = profiles_.upsert(aircraftKey_);
+    if (!br::promoteWay(p[c], d, m)) return false;
+    p.updatedUtcMs = lastUtcMs_;
+    logf(0, "control profile: the %s %s with %s first from now on (it worked in a replay where the way before it didn't); "
+         "now %s",
+         controlSpec(c).label, directionKey(c, d), describeMethod(c, m).c_str(), describeControl(c, p[c]).c_str());
+    saveProfiles();
+    if (out_) out_->applyProfile(currentProfile());
     return true;
 }
 

@@ -186,6 +186,9 @@ TaskList tasksFor(Control c) {
 
 const char* const kHoldDetail =
     "Hold each position until it's ticked. On a lever with detents, the detent nearest halfway will do.";
+// Phase::Away: the first instruction once more.
+const char* const kAwayDetail =
+    "Once more, and leave it there: BetterReplay then tries bringing it back from where you left it.";
 
 // The throttle lever's phases (SetupFlow::Phase::Query and on).
 const char* const kQueryPrompt = "Do the levers stay put under autothrust?";
@@ -229,6 +232,15 @@ const char* watchWhat(Control c) {
     }
     return "Watch";
 }
+
+// The pilot's movement takes the gear up and back down, the rest out and back in.
+Direction awayDirection(Control c) { return c == Control::Gear ? Direction::Retract : Direction::Extend; }
+Direction backDirection(Control c) { return c == Control::Gear ? Direction::Extend : Direction::Retract; }
+
+// The way back on its own: a method that hasn't moved the control back within this long hasn't
+// worked (the gear: as long as playback waits for it, EventStepper's, since its legs start seconds
+// after the lever).
+double backStartSec(Control c) { return c == Control::Gear ? EventStepper::kGearWaitFrames / 60.0 : 3.0; }
 
 std::string title(Control c) {
     std::string s = controlSpec(c).label;
@@ -681,6 +693,27 @@ bool clipSupports(Control c, const ControlMethod& m, const Clip& clip, int engin
     return true;
 }
 
+bool clipWays(Control c, const ControlProfile& cp, const Clip& clip, int engines, ControlProfile& out, size_t& left,
+              std::string* why) {
+    out = cp;
+    left = 0;
+    if (!cp.perDirection()) return clipSupports(c, cp.method, clip, engines, why);
+    for (int d = 0; d < kDirections; ++d) {
+        std::vector<ControlMethod> kept;
+        std::string reason;
+        for (const ControlMethod& m : cp.waysTo(static_cast<Direction>(d))) {
+            if (clipSupports(c, m, clip, engines, &reason)) kept.push_back(m);
+            else ++left;
+        }
+        if (kept.empty()) {
+            if (why) *why = std::string("nothing it has for ") + directionKey(c, static_cast<Direction>(d)) + " fits (" + reason + ")";
+            return false;
+        }
+        out.ways[d] = kept;
+    }
+    return true;
+}
+
 bool clipHasLever(const LeverCalibration& cal, const Clip& clip, int engines, std::string* why) {
     if (!cal.valid()) {
         if (why) *why = "the profile has no throttle lever";
@@ -715,7 +748,7 @@ void SetupFlow::setLogger(LogFn fn, void* ctx) {
 
 void SetupFlow::logf(int level, const char* fmt, ...) const {
     if (!log_) return;
-    char buf[400];
+    char buf[512];  // as long as the module log's lines (a per-direction profile takes a few hundred)
     va_list args;
     va_start(args, fmt);
     std::vsnprintf(buf, sizeof(buf), fmt, args);
@@ -825,6 +858,8 @@ void SetupFlow::enterStep() {
     std::vector<SweepMove>().swap(sweep_);
     std::vector<LeverPoint>().swap(sweepForward_);
     std::vector<LeverPoint>().swap(sweepReverse_);
+    for (std::vector<ControlMethod>& w : ways_) w.clear();
+    pilotBack_ = replayBack_ = -1;
     if (step_ >= plan_.size()) {
         phase_ = Phase::Done;
         std::string summary;
@@ -874,6 +909,8 @@ void SetupFlow::onFrame(double dt, const Frame& live, const SetupFacts& facts) {
             if (!onGround_) beginUser();
             break;
         case Phase::User: userFrame(dt, live); break;
+        case Phase::Away: awayFrame(live); break;
+        case Phase::Back: backFrame(dt, live); break;
         case Phase::Replay: replayFrame(dt, live); break;
         case Phase::Hold: holdFrame(live); break;
         case Phase::Positions: positionsFrame(dt, live); break;
@@ -1099,7 +1136,12 @@ void SetupFlow::analyze() {
         finishStep(ControlState::Failed, ControlMethod(), false);
         return;
     }
-    startMethod(0);
+    pilotBack_ = replayBack_ = -1;
+    if (c == Control::Throttle) {
+        startMethod(0);
+        return;
+    }
+    beginAway();
 }
 
 std::string SetupFlow::enginePattern(const std::string& name, bool lvar) const {
@@ -1203,24 +1245,14 @@ double SetupFlow::buildMethods() {
     double firstFiring = INFINITY;
     std::vector<ControlMethod> learned = learnEvents(firstFiring);
     firstChange = std::min(firstChange, firstFiring);
-    // The aircraft's own gear lever event, where its SDK documents one, unless it was seen above:
-    // for when the lever's event didn't show (the PMDG 777 ignores the gear key events). Seen as a
-    // position, the table's version takes its place: it knows what else the aircraft needs.
+    methods_.insert(methods_.end(), learned.begin(), learned.end());
+    // The ways the aircraft's own gear lever event moves it, where its SDK documents one, those
+    // not seen above: for when the lever's event didn't show (the PMDG 777's lever sends none the
+    // setup sees). Which of them works which way, the replays below find out.
     if (gear) {
-        const ControlMethod own = ownGearLever(profile_.key);
-        EventMethod ownEv, ev;
-        bool fired = false;
-        for (ControlMethod& m : learned) {
-            if (!parseEventMethod(own, ownEv) || !parseEventMethod(m, ev) || (ev.id != ownEv.id && ev.lowerId != ownEv.id)) {
-                continue;
-            }
-            fired = true;
-            if (ev.mode == EventMethod::Mode::Position) m = own;
+        for (const ControlMethod& own : ownGearWays(profile_.key)) {
+            if (std::find(methods_.begin(), methods_.end(), own) == methods_.end()) methods_.push_back(own);
         }
-        methods_.insert(methods_.end(), learned.begin(), learned.end());
-        if (own.kind != MethodKind::None && !fired) methods_.push_back(own);
-    } else {
-        methods_.insert(methods_.end(), learned.begin(), learned.end());
     }
     if (c != Control::Flaps || facts_.flapPositions > 1) methods_.push_back({MethodKind::KeyEvent, std::string(), 1.0});
     // What hardware bindings send, for aircraft that ignore the events above (the PMDG 737).
@@ -1567,6 +1599,24 @@ void SetupFlow::startMethod(size_t i) {
         return;
     }
     driving_ = true;
+    prepareMethod(m);
+    replayT_ = 0.0;
+    hint_ = 0;
+    firstApply_ = true;
+    replayPeak_ = 0.0;
+    stoppedEarly_ = false;
+    started_ = seenRest_ = false;
+    gearCommand_ = gearFrom_ = gearTo_ = NAN;
+    gearCommandAt_ = 0.0;
+    replayBack_ = -1;
+    phase_ = Phase::Replay;
+    phaseT_ = 0.0;
+    logf(0, "control setup: replaying the %s with %s (method %zu of %zu)", controlSpec(c).label,
+         describeMethod(c, m).c_str(), i + 1, methods_.size());
+}
+
+void SetupFlow::prepareMethod(const ControlMethod& m) {
+    const Control c = control();
     // The method reads a channel the pilot's movement didn't record under this name: fill it in
     // from the scanned variable.
     if (m.kind == MethodKind::InputSet || m.kind == MethodKind::InputValue || m.kind == MethodKind::LVar) {
@@ -1599,18 +1649,175 @@ void SetupFlow::startMethod(size_t i) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------- each way
+
+// After the pilot's movement (at rest again): "Raise the gear" once more, so the way back can be
+// tried from where the pilot leaves it, as replays meet it (the PMDG 777's gear came down after the
+// pilot had raised it only with a click on its lever).
+void SetupFlow::beginAway() {
+    phase_ = Phase::Away;
+    phaseT_ = 0.0;
+    taskDone_ = false;
+    replayAnchor_ = NAN;
+    replayStable_ = 0.0;
+    logf(0, "control setup: \"%s\" once more: the way back is tried from where you leave the %s", tasksFor(control()).items[0],
+         controlSpec(control()).label);
+}
+
+void SetupFlow::awayFrame(const Frame& live) {
+    const Control c = control();
+    const Tuning tu = tuning(c);
+    const char* label = controlSpec(c).label;
+    const double v = judgeOutcome_ ? outcomeSignal(live) : handleSignal(live);
+    const double d = absDiff(v, judgeOutcome_ ? outcomeRest_ : handleRest_);
+    if (movedFrom(v, replayAnchor_, 0.5 * (judgeOutcome_ ? tu.outcomeStart : tu.handleStart))) {
+        replayAnchor_ = v;
+        replayStable_ = phaseT_;
+    }
+    // As far as a replay has to take it (kPassPeak), and still.
+    const bool away = std::isfinite(v) && d >= kPassPeak * userPeak_;
+    taskDone_ = away;
+    if (away && phaseT_ - replayStable_ >= kStableSec) {
+        logf(0, "control setup: the %s is away (%.3g from where you started it); bringing it back with each method in turn "
+             "until one does",
+             label, d);
+        startBack(BackFrom::Pilot);
+        return;
+    }
+    if (phaseT_ > tu.waitMaxSec) {
+        logf(1, "control setup: didn't see the %s moved away again; the way back is only tried from where the replays leave it",
+             label);
+        startReplays();
+    }
+}
+
+void SetupFlow::startBack(BackFrom from) {
+    backFrom_ = from;
+    backTries_.clear();
+    if (from == BackFrom::Pilot) {
+        // Every method, but not the simvars: written, they move what the check reads (only the
+        // pilot could tell, and isn't asked about these).
+        for (size_t i = 0; i < methods_.size(); ++i) {
+            if (methods_[i].kind != MethodKind::SimVar) backTries_.push_back(i);
+        }
+    } else {
+        // The one that did it from where the pilot left it first, then the others in their order.
+        if (pilotBack_ >= 0 && static_cast<size_t>(pilotBack_) != method_) backTries_.push_back(static_cast<size_t>(pilotBack_));
+        for (size_t i = 0; i < methods_.size(); ++i) {
+            if (i != method_ && static_cast<int>(i) != pilotBack_) backTries_.push_back(i);
+        }
+    }
+    backAt_ = 0;
+    tryBack();
+}
+
+void SetupFlow::tryBack() {
+    const Control c = control();
+    const char* label = controlSpec(c).label;
+    for (; backAt_ < backTries_.size(); ++backAt_) {
+        const ControlMethod& m = methods_[backTries_[backAt_]];
+        std::string why;
+        if (sim_->beginControl(c, m, why)) break;
+        logf(1, "control setup: can't try %s: %s", describeMethod(c, m).c_str(), why.c_str());
+        if (backFrom_ == BackFrom::Pilot) attempts_.push_back("unavailable");
+    }
+    if (backAt_ >= backTries_.size()) {
+        if (backFrom_ == BackFrom::Pilot) {
+            logf(1, "control setup: none of the method(s) brought the %s back from where you left it", label);
+            startReplays();
+        } else {
+            logf(0, "control setup: %s moved the %s away, but nothing brought it back from there",
+                 describeMethod(c, methods_[method_]).c_str(), label);
+            attempts_.push_back("failed");
+            nextMethod();
+        }
+        return;
+    }
+    driving_ = true;
+    const size_t i = backTries_[backAt_];
+    prepareMethod(methods_[i]);
+    if (backFrom_ == BackFrom::Pilot) method_ = i;  // (the panel's "Trying method N")
     replayT_ = 0.0;
-    hint_ = 0;
     firstApply_ = true;
-    replayPeak_ = 0.0;
-    stoppedEarly_ = false;
-    started_ = seenRest_ = false;
+    backFromDist_ = NAN;
+    backMoved_ = false;
+    replayAnchor_ = NAN;
+    replayStable_ = 0.0;
     gearCommand_ = gearFrom_ = gearTo_ = NAN;
     gearCommandAt_ = 0.0;
-    phase_ = Phase::Replay;
+    phase_ = Phase::Back;
     phaseT_ = 0.0;
-    logf(0, "control setup: replaying the %s with %s (method %zu of %zu)", controlSpec(c).label,
-         describeMethod(c, m).c_str(), i + 1, methods_.size());
+    logf(0, "control setup: bringing the %s back from where %s left it with %s (%zu of %zu)", label,
+         backFrom_ == BackFrom::Pilot ? "you" : "the replay", describeMethod(c, methods_[i]).c_str(), backAt_ + 1,
+         backTries_.size());
+}
+
+// The way back: where the pilot's movement started the control, held until it's there and still,
+// it stops short, or it hasn't started back within backStartSec.
+void SetupFlow::backFrame(double dt, const Frame& live) {
+    const Control c = control();
+    const Tuning tu = tuning(c);
+    const Frame& rest = mini_.frames.front();
+    replayT_ += dt;
+    sim_->applyControl(c, rest, firstApply_);
+    firstApply_ = false;
+    if (c == Control::Gear) noteGearCommand(eventTarget(c, rest), live);
+    const double v = judgeOutcome_ ? outcomeSignal(live) : handleSignal(live);
+    const double d = absDiff(v, judgeOutcome_ ? outcomeRest_ : handleRest_);
+    if (std::isnan(backFromDist_)) backFromDist_ = d;
+    if (d <= backFromDist_ - restTol()) backMoved_ = true;
+    if (movedFrom(v, replayAnchor_, 0.5 * (judgeOutcome_ ? tu.outcomeStart : tu.handleStart))) {
+        replayAnchor_ = v;
+        replayStable_ = phaseT_;
+    }
+    const bool settled = phaseT_ >= 1.0 && phaseT_ - replayStable_ >= kStableSec;
+    const bool there = atRest(live);
+    if (there && settled) {
+        endBack(true, "");
+    } else if (!backMoved_ && phaseT_ >= backStartSec(c)) {
+        endBack(false, "it didn't move");
+    } else if (backMoved_ && settled) {
+        endBack(false, "it stopped short");
+    } else if (phaseT_ >= tu.holdMaxSec) {
+        endBack(there, "it hadn't got there");
+    }
+}
+
+void SetupFlow::endBack(bool ok, const char* why) {
+    const Control c = control();
+    const char* label = controlSpec(c).label;
+    endDrive();
+    if (c == Control::Gear) logGearCommand();
+    const size_t i = backTries_[backAt_];
+    const std::string desc = describeMethod(c, methods_[i]);
+    const char* who = backFrom_ == BackFrom::Pilot ? "you" : "the replay";
+    if (!ok) {
+        logf(0, "control setup: %s didn't bring the %s back from where %s left it (%s)", desc.c_str(), label, who, why);
+        if (backFrom_ == BackFrom::Pilot) attempts_.push_back("failed");
+        ++backAt_;
+        tryBack();
+        return;
+    }
+    logf(0, "control setup: %s brought the %s back from where %s left it", desc.c_str(), label, who);
+    if (backFrom_ == BackFrom::Pilot) {
+        pilotBack_ = static_cast<int>(i);
+        startReplays();
+        return;
+    }
+    // Out with method_, back with this: put to the pilot like a method that did both.
+    replayBack_ = static_cast<int>(i);
+    logf(0, "control setup: %s %s the %s and %s %s it; asking", describeMethod(c, methods_[method_]).c_str(),
+         c == Control::Gear ? "raised" : "moved out", label, desc.c_str(), c == Control::Gear ? "lowered" : "brought back");
+    note_.clear();
+    phase_ = Phase::Ask;
+    phaseT_ = 0.0;
+}
+
+void SetupFlow::startReplays() {
+    attempts_.clear();
+    startMethod(0);
 }
 
 double SetupFlow::restTol() const {
@@ -1737,6 +1944,12 @@ void SetupFlow::evaluate(const Frame& live) {
     }
     logf(0, "control setup: %s moved the %s %d%% as far as you did%s", desc.c_str(), controlSpec(c).label, pct,
          reached && !returned ? ", but didn't bring it back" : "");
+    if (reached && !returned && c != Control::Throttle && methods_.size() > 1) {
+        // It goes one way: the way back from there with the others (the PMDG 777's lever event
+        // raised its gear but didn't lower it; then the gear key events did).
+        startBack(BackFrom::Replay);
+        return;
+    }
     attempts_.push_back("failed");  // the panel lists it as a row
     nextMethod();
 }
@@ -1798,7 +2011,22 @@ SetupFlow::LeverVerdict SetupFlow::checkLever() {
 
 void SetupFlow::confirmMethod() {
     const ControlMethod m = methods_[method_];
-    const bool keyEvents = control() == Control::Throttle && m.kind == MethodKind::KeyEvent;
+    if (control() != Control::Throttle) {
+        // Out with this method; back with it or the one that brought it back after it, then the one
+        // that brought it back from where the pilot left it, if another. All one method: as before.
+        const Control c = control();
+        std::vector<ControlMethod> back{replayBack_ >= 0 ? methods_[static_cast<size_t>(replayBack_)] : m};
+        if (pilotBack_ >= 0 && !(methods_[static_cast<size_t>(pilotBack_)] == back[0])) {
+            back.push_back(methods_[static_cast<size_t>(pilotBack_)]);
+        }
+        if (back.size() > 1 || !(back[0] == m)) {
+            ways_[static_cast<int>(awayDirection(c))] = {m};
+            ways_[static_cast<int>(backDirection(c))] = back;
+        }
+        finishStep(ControlState::Ok, m, true);
+        return;
+    }
+    const bool keyEvents = m.kind == MethodKind::KeyEvent;
     if (!keyEvents) {
         if (control() == Control::Throttle && leverVerdict_ != LeverVerdict::Steady) {
             logf(0, "control setup: %s replays the aircraft's own variable, so the throttle needs no lever calibration",
@@ -2313,6 +2541,7 @@ void SetupFlow::finishStep(ControlState state, const ControlMethod& method, bool
         const bool keyThrottle = state == ControlState::Ok && c == Control::Throttle && method.kind == MethodKind::KeyEvent;
         cp.lever = keyThrottle ? lever_ : LeverCalibration();
         cp.reverseBy = keyThrottle ? reverseBy_ : ReverseBy::Unknown;
+        for (int d = 0; d < kDirections; ++d) cp.ways[d] = state == ControlState::Ok ? ways_[d] : std::vector<ControlMethod>();
         logf(0, "control setup: %s %s%s%s", controlSpec(c).key, stateKey(state), state == ControlState::Ok ? " via " : "",
              state == ControlState::Ok ? describeControl(c, cp).c_str() : "");
     }
@@ -2324,6 +2553,7 @@ void SetupFlow::finishStep(ControlState state, const ControlMethod& method, bool
     learned_.clear();
     methods_.clear();
     attempts_.clear();
+    for (std::vector<ControlMethod>& w : ways_) w.clear();
     std::vector<Frame>().swap(capture_);
     ++step_;
     enterStep();
@@ -2352,6 +2582,7 @@ void SetupFlow::cancel(const char* why) {
     std::vector<double>().swap(keyColumn_);
     learned_.clear();
     methods_.clear();
+    for (std::vector<ControlMethod>& w : ways_) w.clear();
     std::vector<Frame>().swap(capture_);
     phase_ = Phase::Idle;
     logf(0, "control setup stopped (%s)", why);
@@ -2432,7 +2663,8 @@ bool SetupFlow::answer(const std::string& a, std::string& error) {
             break;
         default: break;
     }
-    if (a == "skip" && phase_ != Phase::Done && phase_ != Phase::Replay && phase_ != Phase::Hold && phase_ != Phase::Sweep) {
+    if (a == "skip" && phase_ != Phase::Done && phase_ != Phase::Replay && phase_ != Phase::Hold && phase_ != Phase::Sweep &&
+        phase_ != Phase::Back) {
         note_.clear();
         if (leverStage_) {
             // The method stays; the lever keeps an earlier calibration made for the same method.
@@ -2466,10 +2698,12 @@ std::string SetupFlow::prompt() const {
     switch (phase_) {
         case Phase::Prepare: return need_.empty() ? tasks.items[0] : need_;
         case Phase::User: return tasks.items[task_ < tasks.count ? task_ : tasks.count - 1];
+        case Phase::Away: return tasks.items[0];
         case Phase::Takeoff: return "Take off";
         case Phase::Retry: return "That didn't register";
         case Phase::Replay:
         case Phase::Hold:
+        case Phase::Back:
             return watchWhat(c);
         case Phase::Ask: return question(c);
         case Phase::Query: return kQueryPrompt;
@@ -2483,8 +2717,8 @@ std::string SetupFlow::prompt() const {
 void SetupFlow::statusJson(JsonWriter& w) const {
     w.kv("active", active());
     if (!active()) return;
-    static const char* const kPhases[] = {"idle", "prepare", "takeoff", "user",      "retry",  "replay", "hold",
-                                          "ask",  "done",    "query",   "positions", "notice", "sweep"};
+    static const char* const kPhases[] = {"idle",  "prepare", "takeoff", "user",  "retry",     "replay", "hold", "ask",
+                                          "done",  "query",   "positions", "notice", "sweep", "away", "back"};
     w.kv("phase", kPhases[static_cast<int>(phase_)]);
     const bool done = phase_ == Phase::Done;
     w.kv("step", done ? "" : controlSpec(control()).key);
@@ -2494,11 +2728,14 @@ void SetupFlow::statusJson(JsonWriter& w) const {
     w.kv("prompt", prompt());
     // The pilot's instructions in this step: which one is showing, and whether it's done (the
     // last one, while things settle). The throttle's holds also say how long it's been held.
-    const bool pilot = phase_ == Phase::User || phase_ == Phase::Positions;
-    const bool holding = pilot && control() == Control::Throttle && task_ < kThrottleHolds;
+    // Away is one instruction (the first again).
+    const bool away = phase_ == Phase::Away;
+    const bool pilot = phase_ == Phase::User || phase_ == Phase::Positions || away;
+    const bool holding = pilot && !away && control() == Control::Throttle && task_ < kThrottleHolds;
     const char* detail = "";
     switch (phase_) {
         case Phase::User: detail = holding ? kHoldDetail : ""; break;
+        case Phase::Away: detail = kAwayDetail; break;
         case Phase::Query: detail = kQueryDetail; break;
         case Phase::Positions: detail = kPositionsDetail; break;
         case Phase::Notice: detail = reverseOnly_ ? kReverseNoticeDetail : kNoticeDetail; break;
@@ -2508,8 +2745,11 @@ void SetupFlow::statusJson(JsonWriter& w) const {
         default: break;
     }
     w.kv("detail", detail);
-    w.kv("task", static_cast<int>(pilot ? task_ : 0));
-    w.kv("tasks", static_cast<int>(done ? 0 : phase_ == Phase::Positions ? kPositionTasks : tasksFor(control()).count));
+    w.kv("task", static_cast<int>(pilot && !away ? task_ : 0));
+    w.kv("tasks", static_cast<int>(done                         ? 0
+                                   : away                       ? 1
+                                   : phase_ == Phase::Positions ? kPositionTasks
+                                                                : tasksFor(control()).count));
     w.kv("taskDone", pilot && taskDone_);
     w.kv("holdTask", holding);
     w.kv("hold", holding ? hold_ : 0.0);
@@ -2542,11 +2782,13 @@ void SetupFlow::statusJson(JsonWriter& w) const {
             if (!need_.empty()) w.value("ready");
             w.value("skip").value("cancel");
             break;
-        case Phase::User: w.value("skip").value("cancel"); break;
+        case Phase::User:
+        case Phase::Away: w.value("skip").value("cancel"); break;
         case Phase::Takeoff: w.value("skip").value("later"); break;
         case Phase::Retry: w.value("retry").value("skip").value("cancel"); break;
         case Phase::Replay:
-        case Phase::Hold: w.value("cancel"); break;
+        case Phase::Hold:
+        case Phase::Back: w.value("cancel"); break;
         case Phase::Ask: w.value("yes").value("no").value("again").value("skip"); break;
         case Phase::Query: w.value("yes").value("no"); break;
         case Phase::Positions: w.value("skip").value("cancel"); break;

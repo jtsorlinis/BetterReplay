@@ -226,6 +226,8 @@ bool SimBridge::open() {
     ctx.throttleLowerLimit = &throttleLowerLimit_;
     ctx.inputEvents = &inputEvents_;
     ctx.clipChannels = &playPresent_;
+    ctx.wayWorked = &SimBridge::wayWorkedThunk;
+    ctx.wayCtx = this;
     driver_.setContext(ctx);
     fsEventsRegisterKeyEventHandler(&SimBridge::keyEventThunk, this);
     requestAircraftPath();
@@ -287,6 +289,10 @@ void SimBridge::close() {
 
 void SimBridge::keyEventThunk(FsEventId id, FsVarParamArray* params, void* ctx) {
     static_cast<SimBridge*>(ctx)->onKeyEvent(id, params);
+}
+
+void SimBridge::wayWorkedThunk(void* ctx, Control c, Direction d, const ControlMethod& m) {
+    static_cast<SimBridge*>(ctx)->engine_.promoteWay(c, d, m);
 }
 
 // The hardware throttle arrives as key events. Their values are the pilot's actual lever, which
@@ -630,6 +636,7 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     if (restoreWaiting_) checkRestoreGear();
     if (restoreFlapsPending_ && !restoreDeferred_) checkRestoreFlaps();
     if (restoreThrottleFrames_ > 0) checkRestoreThrottle();
+    if (restoreGearFrames_ > 0) checkRestoreGearWays();
     if (gearCheckFrames_ > 0 && --gearCheckFrames_ == 0) checkGearResponse();
     if (frameCount_ == enumerateAtFrame_) {
         inputEventsLogged_ = 0;
@@ -1057,6 +1064,7 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     flapsHold_ = false;
     cancelRestoreFlaps();
     finishRestoreThrottle();
+    finishRestoreGearWays();
     engineStartMs_ = 0;
     engineLastMs_ = 0;
     for (int e = 0; e < 4; ++e) {
@@ -1086,21 +1094,30 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
         if (!haveProfile_ || !profile_.drives(c)) continue;
         const ControlProfile& cp = profile_[c];
         std::string why;
-        if (cp.state == ControlState::Ok && !clipSupports(c, cp.method, clip, numEngines_, &why)) {
+        // Where it has ways for each direction, those this clip can feed (clipWays).
+        ControlProfile drive;
+        size_t leftOut = 0;
+        if (cp.state == ControlState::Ok && !clipWays(c, cp, clip, numEngines_, drive, leftOut, &why)) {
             log::info("playback: the %s's profile method (%s) doesn't fit this clip (%s); using the defaults",
-                      controlSpec(c).label, describeMethod(c, cp.method).c_str(), why.c_str());
+                      controlSpec(c).label, describeControl(c, cp).c_str(), why.c_str());
             continue;
         }
-        if (cp.state == ControlState::Ok && !driver_.begin(c, cp.method, why)) {
+        if (leftOut > 0) {
+            log::info("playback: %zu of the %s's ways don't fit this clip (%s); leaving them out", leftOut, controlSpec(c).label,
+                      why.c_str());
+        }
+        if (cp.state == ControlState::Ok && !driver_.beginWays(c, drive, why)) {
             log::warn("playback: can't drive the %s with its profile method (%s): %s; using the defaults", controlSpec(c).label,
-                      describeMethod(c, cp.method).c_str(), why.c_str());
+                      describeControl(c, cp).c_str(), why.c_str());
             continue;
         }
         profileDrives_[i] = true;
         controlChannels(c, owned);
         if (c == Control::Throttle) throttleByProfile_ = true;
         log::info("playback: %s %s (control profile)", controlSpec(c).label,
-                  cp.state == ControlState::Ok ? ("via " + describeMethod(c, cp.method)).c_str()
+                  cp.state == ControlState::Ok ? ("via " + describeMethod(c, cp.method) +
+                                                  (drive.perDirection() ? " (" + describeControl(c, drive) + ")" : ""))
+                                                     .c_str()
                                                : "left to the aircraft: the setup found no way to replay it");
         if (c == Control::Throttle && cp.state == ControlState::Ok && cp.lever.valid()) {
             // The lever simvar isn't the lever on this aircraft: replay the lever's own variable.
@@ -1378,6 +1395,27 @@ void SimBridge::finishRestoreThrottle() {
     restoreThrottleFrames_ = 0;
     if (!driver_.reverseToggled()) driver_.apply(Control::Throttle, restoreSnap_, true);
     driver_.end(Control::Throttle);  // (toggles reverse out if it's still in)
+}
+
+// Stop with a gear that has ways for each direction (WayPicker): driven back to where it was until
+// it's there, so a way that doesn't move it gives way to the next, 50 s at most.
+void SimBridge::checkRestoreGearWays() {
+    driver_.apply(Control::Gear, restoreSnap_, false);
+    const double want = gearExtensionOf(restoreSnap_);
+    const double live = liveGearExtension();
+    const bool there = std::isfinite(want) && std::isfinite(live) && std::fabs(live - want) < 0.05;
+    if (!there && restoreGearFrames_ > 1) {
+        --restoreGearFrames_;
+        return;
+    }
+    if (!there) log::warn("playback: the gear isn't back where it was (at %.2f, was %.2f); letting go of it", live, want);
+    finishRestoreGearWays();
+}
+
+void SimBridge::finishRestoreGearWays() {
+    if (restoreGearFrames_ <= 0) return;
+    restoreGearFrames_ = 0;
+    driver_.end(Control::Gear);
 }
 
 void SimBridge::trackEngines(const Frame& frame, bool jumped) {
@@ -1902,6 +1940,10 @@ void SimBridge::onAircraftChanged() {
         driver_.forgetReverse();  // that was the other aircraft
         driver_.end(Control::Throttle);
     }
+    if (restoreGearFrames_ > 0) {
+        restoreGearFrames_ = 0;
+        driver_.end(Control::Gear);
+    }
 }
 
 void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
@@ -1925,9 +1967,12 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     const bool deferFlaps = restore && profileDrives_[static_cast<int>(Control::Flaps)];
     if (!restore) driver_.forgetReverse();
     const bool deferThrottle = restore && profileDrives_[static_cast<int>(Control::Throttle)] && driver_.reverseToggled();
+    // A gear with ways for each direction keeps being driven until it's back (checkRestoreGearWays).
+    const bool deferGear = restore && profileDrives_[static_cast<int>(Control::Gear)] && driver_.picks(Control::Gear);
     for (int i = 0; i < kControlCount; ++i) {
         const Control c = controlAt(i);
-        const bool defer = (deferFlaps && c == Control::Flaps) || (deferThrottle && c == Control::Throttle);
+        const bool defer = (deferFlaps && c == Control::Flaps) || (deferThrottle && c == Control::Throttle) ||
+                           (deferGear && c == Control::Gear);
         if (profileDrives_[i] && restore && !(deferFlaps && c == Control::Flaps)) driver_.apply(c, snapshot, true);
         profileDrives_[i] = false;
         if (!defer) driver_.end(c);
@@ -1941,6 +1986,7 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
         restoreThrottleFrames_ = kRestoreThrottleMaxFrames;
         log::info("playback: taking the throttle out of reverse before letting go of it");
     }
+    if (deferGear) restoreGearFrames_ = kRestoreGearMaxFrames;
     throttleByProfile_ = false;
     if (!restore) {
         for (bool& a : ieActive_) a = false;
@@ -2117,6 +2163,7 @@ bool SimBridge::beginControl(Control c, const ControlMethod& m, std::string& why
     }
     cancelRestoreFlaps();
     finishRestoreThrottle();
+    finishRestoreGearWays();
     if (!driver_.begin(c, m, why)) return false;
     if (c == Control::Throttle && driver_.wantsThrottleMask()) {
         setInputMasking(true);  // the simvars only hold with the hardware throttle blocked

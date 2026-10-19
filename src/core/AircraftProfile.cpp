@@ -105,6 +105,24 @@ const char* stateKey(ControlState s) {
 
 bool parseStateKey(const std::string& key, ControlState& out) { return parseKey(kStateKeys, key, out); }
 
+const char* directionKey(Control c, Direction d) {
+    if (c == Control::Gear) return d == Direction::Extend ? "down" : "up";
+    return d == Direction::Extend ? "extend" : "retract";
+}
+
+std::vector<ControlMethod> ControlProfile::waysTo(Direction d) const {
+    const std::vector<ControlMethod>& w = ways[static_cast<int>(d)];
+    return w.empty() ? std::vector<ControlMethod>{method} : w;
+}
+
+bool promoteWay(ControlProfile& cp, Direction d, const ControlMethod& m) {
+    std::vector<ControlMethod>& w = cp.ways[static_cast<int>(d)];
+    const auto it = std::find(w.begin(), w.end(), m);
+    if (it == w.end() || it == w.begin()) return false;
+    std::rotate(w.begin(), it, it + 1);
+    return true;
+}
+
 std::string engineVar(const std::string& pattern, int engine) {
     const size_t at = pattern.find('#');
     if (at == std::string::npos) return pattern;
@@ -120,30 +138,44 @@ namespace {
 // Gear lever events from aircraft SDKs, by the aircraft's profile key (any variant).
 struct OwnGearLever {
     const char* key;
-    const char* event;  // THIRD_PARTY_EVENT_ID_MIN (69632) + the SDK's offset
-    double down;        // the lever's DOWN position (UP is 0)
+    uint32_t event;        // THIRD_PARTY_EVENT_ID_MIN (69632) + the SDK's offset
+    double down;           // the lever's DOWN position (UP is 0)
+    const int32_t* click;  // a left click in the SDK's mouse flags: the button, then its release
 };
+// PMDG's MOUSE_FLAG_LEFTSINGLE and MOUSE_FLAG_LEFTRELEASE: its SDKs' events take them as a click.
+const int32_t kPmdgLeftClick[2] = {0x20000000, 0x00020000};
 const OwnGearLever kOwnGearLevers[] = {
-    // PMDG_777X_SDK.h: EVT_GEAR_LEVER, + 295. In the sim it raised the gear (0) but didn't lower it
-    // (1); GEAR_SET/GEAR_DOWN lowered it, GEAR_UP didn't raise it; sent together it didn't raise it.
-    {"simobjects/airplanes/pmdg 777", "#69927+keys", 1.0},
+    // PMDG_777X_SDK.h: EVT_GEAR_LEVER, + 295. In the sim its position 0 raised the gear but 1 didn't
+    // lower it; GEAR_SET/GEAR_DOWN lowered it after the event had raised it, and after the pilot
+    // had, only a left click did.
+    {"simobjects/airplanes/pmdg 777", 69927, 1.0, kPmdgLeftClick},
 };
 
 }  // namespace
 
-ControlMethod ownGearLever(const std::string& aircraftKey) {
+std::vector<ControlMethod> ownGearWays(const std::string& aircraftKey) {
+    std::vector<ControlMethod> out;
     for (const OwnGearLever& g : kOwnGearLevers) {
-        if (aircraftKey.compare(0, std::strlen(g.key), g.key) == 0) return {MethodKind::KeyEvent, g.event, g.down};
+        if (aircraftKey.compare(0, std::strlen(g.key), g.key) != 0) continue;
+        EventMethod e;
+        e.id = g.event;
+        e.scale = g.down;
+        out.push_back(eventMethod(e));
+        if (!g.click) continue;
+        e.mode = EventMethod::Mode::Toggle;
+        e.param = g.click[0];
+        e.click = true;
+        e.release = g.click[1];
+        out.push_back(eventMethod(e));
     }
-    return ControlMethod();
+    return out;
 }
 
 namespace {
 
-const char* const kWithKeys = "+keys";  // the gear: up by the event, down by the gear key events
-
-// "#<id>" at s[i], then "(<param>)" when `withParam`; advances i.
-bool readEvent(const std::string& s, size_t& i, bool withParam, uint32_t& id, int32_t& param) {
+// "#<id>" at s[i], then "(<param>)" or "(<param>,<release>)" when `withParam`; advances i.
+bool readEvent(const std::string& s, size_t& i, bool withParam, uint32_t& id, int32_t& param, bool& click,
+               int32_t& release) {
     if (i >= s.size() || s[i] != '#') return false;
     const char* begin = s.c_str() + i + 1;
     char* end = nullptr;
@@ -153,11 +185,19 @@ bool readEvent(const std::string& s, size_t& i, bool withParam, uint32_t& id, in
     i = static_cast<size_t>(end - s.c_str());
     if (!withParam) return true;
     if (i >= s.size() || s[i] != '(') return false;
-    begin = s.c_str() + i + 1;
-    const long long p = std::strtoll(begin, &end, 10);
-    if (end == begin || *end != ')' || p < INT32_MIN || p > INT32_MAX) return false;
-    param = static_cast<int32_t>(p);
-    i = static_cast<size_t>(end - s.c_str()) + 1;
+    auto number = [&](int32_t& out) {
+        const char* from = s.c_str() + i + 1;
+        const long long p = std::strtoll(from, &end, 10);
+        if (end == from || p < INT32_MIN || p > INT32_MAX) return false;
+        out = static_cast<int32_t>(p);
+        i = static_cast<size_t>(end - s.c_str());
+        return true;
+    };
+    if (!number(param)) return false;
+    click = s[i] == ',';
+    if (click && !number(release)) return false;
+    if (s[i] != ')') return false;
+    ++i;
     return true;
 }
 
@@ -170,7 +210,7 @@ bool parseEventMethod(const ControlMethod& m, EventMethod& out) {
     const std::string& s = m.var;
     size_t i = 0;
     const bool withParam = s.find('(') != std::string::npos;
-    if (!readEvent(s, i, withParam, e.id, e.param)) return false;
+    if (!readEvent(s, i, withParam, e.id, e.param, e.click, e.release)) return false;
     if (!withParam) {
         e.mode = EventMethod::Mode::Position;
         if (i < s.size() && s[i] == '@') {
@@ -180,15 +220,11 @@ bool parseEventMethod(const ControlMethod& m, EventMethod& out) {
             if (end == begin || !std::isfinite(e.offset)) return false;
             i = static_cast<size_t>(end - s.c_str());
         }
-        if (s.compare(i, std::string::npos, kWithKeys) == 0) {
-            e.withKeys = true;
-            i = s.size();
-        }
     } else if (i == s.size()) {
         e.mode = EventMethod::Mode::Toggle;
     } else {
         e.mode = EventMethod::Mode::Steps;
-        if (s[i++] != '/' || !readEvent(s, i, true, e.lowerId, e.lowerParam)) return false;
+        if (s[i++] != '/' || !readEvent(s, i, true, e.lowerId, e.lowerParam, e.lowerClick, e.lowerRelease)) return false;
     }
     if (i != s.size() || !std::isfinite(e.scale)) return false;
     out = e;
@@ -196,25 +232,27 @@ bool parseEventMethod(const ControlMethod& m, EventMethod& out) {
 }
 
 ControlMethod eventMethod(const EventMethod& e) {
-    auto event = [](uint32_t id, int32_t param, bool withParam) {
+    auto event = [](uint32_t id, bool withParam, int32_t param, bool click, int32_t release) {
         std::string s = "#" + std::to_string(id);
-        if (withParam) s += "(" + std::to_string(param) + ")";
+        if (withParam) s += "(" + std::to_string(param) + (click ? "," + std::to_string(release) : "") + ")";
         return s;
     };
     ControlMethod m{MethodKind::KeyEvent, std::string(), e.scale};
     switch (e.mode) {
         case EventMethod::Mode::Position: {
-            m.var = event(e.id, 0, false);
+            m.var = event(e.id, false, 0, false, 0);
             if (e.offset != 0.0) {
                 char buf[32];
                 std::snprintf(buf, sizeof(buf), "@%.10g", e.offset);
                 m.var += buf;
             }
-            if (e.withKeys) m.var += kWithKeys;
             break;
         }
-        case EventMethod::Mode::Toggle: m.var = event(e.id, e.param, true); break;
-        case EventMethod::Mode::Steps: m.var = event(e.id, e.param, true) + "/" + event(e.lowerId, e.lowerParam, true); break;
+        case EventMethod::Mode::Toggle: m.var = event(e.id, true, e.param, e.click, e.release); break;
+        case EventMethod::Mode::Steps:
+            m.var = event(e.id, true, e.param, e.click, e.release) + "/" +
+                    event(e.lowerId, true, e.lowerParam, e.lowerClick, e.lowerRelease);
+            break;
     }
     return m;
 }
@@ -276,6 +314,122 @@ int EventStepper::step(double target, double live, double size, int waitFrames, 
     return dir;
 }
 
+void WayPicker::begin(Control c, const ControlProfile& cp) {
+    *this = WayPicker();
+    c_ = c;
+    for (int d = 0; d < kDirections; ++d) {
+        for (const ControlMethod& m : cp.waysTo(static_cast<Direction>(d))) {
+            const auto it = std::find(ways_.begin(), ways_.end(), m);
+            const int i = static_cast<int>(it - ways_.begin());
+            if (it == ways_.end()) ways_.push_back(m);
+            if (std::find(order_[d].begin(), order_[d].end(), i) == order_[d].end()) order_[d].push_back(i);
+        }
+    }
+    current_ = multi() ? -1 : 0;
+}
+
+bool WayPicker::drop(size_t i) {
+    if (i >= ways_.size()) return false;
+    ways_.erase(ways_.begin() + static_cast<std::ptrdiff_t>(i));
+    bool left = true;
+    for (std::vector<int>& o : order_) {
+        o.erase(std::remove(o.begin(), o.end(), static_cast<int>(i)), o.end());
+        for (int& k : o) k -= k > static_cast<int>(i) ? 1 : 0;
+        left = left && !o.empty();
+    }
+    current_ = multi() ? -1 : 0;
+    return left;
+}
+
+WayPicker::Pick WayPicker::step(double target, const Frame& f) {
+    Pick out;
+    // What says the control has moved: its value, by half a notch (the gear: its command), or what
+    // it moves, a little.
+    double outcome = NAN, tol = 0.5, outcomeTol = 0.05;
+    switch (c_) {
+        case Control::Gear: {
+            double sum = 0.0;
+            int n = 0;
+            for (const int ch : {kGearCenter, kGearLeft, kGearRight}) {
+                if (!std::isfinite(f.v[ch])) continue;
+                sum += f.v[ch];
+                ++n;
+            }
+            outcome = n > 0 ? sum / n : NAN;
+            live_ = gear_.update(outcome);
+            break;
+        }
+        case Control::Flaps:
+            live_ = f.v[kFlapsHandleIndex];
+            outcome = f.v[kFlapsLeft];
+            outcomeTol = 0.02;
+            break;
+        case Control::Spoilers:
+            live_ = f.v[kSpoilersHandle];
+            outcome = f.v[kSpoilersLeft];
+            tol = 0.05;
+            outcomeTol = 0.03;
+            break;
+        case Control::Throttle: live_ = NAN; break;
+    }
+    if (!multi()) return out;
+    const int before = current_;
+    if (current_ < 0) {
+        // Nothing sent yet: the way toward where the clip has it, out or in.
+        dir_ = std::isfinite(target) && target >= tol ? Direction::Extend : Direction::Retract;
+        current_ = order_[static_cast<int>(dir_)].front();
+    }
+    std::vector<int>& order = order_[static_cast<int>(dir_)];
+    const bool off = std::isfinite(target) && std::isfinite(live_) && std::fabs(target - live_) >= tol;
+    if (pending_) {
+        ++since_;
+        const double sign = dir_ == Direction::Extend ? 1.0 : -1.0;
+        const bool moved = (std::isfinite(live_) && std::isfinite(from_) && sign * (live_ - from_) >= tol) ||
+                           (std::isfinite(outcome) && std::isfinite(fromOutcome_) && sign * (outcome - fromOutcome_) >= outcomeTol);
+        if (moved) {
+            if (!worked_) {
+                worked_ = true;
+                out.worked = current_;
+                if (at_ > 0) {
+                    std::rotate(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(at_),
+                                order.begin() + static_cast<std::ptrdiff_t>(at_) + 1);
+                    at_ = 0;
+                    out.promoted = true;
+                }
+            }
+            from_ = live_;
+            fromOutcome_ = outcome;
+            since_ = 0;
+        } else if (!worked_ && order.size() > 1 && since_ >= EventStepper::waitFrames(c_)) {
+            out.gaveUp = current_;
+            at_ = (at_ + 1) % order.size();
+            current_ = order[at_];
+            since_ = 0;
+            from_ = live_;
+            fromOutcome_ = outcome;
+        }
+        if (!off) pending_ = false;  // there (or the clip came back to where the aircraft is)
+    }
+    if (off) {
+        const Direction want = target > live_ ? Direction::Extend : Direction::Retract;
+        if (!pending_ || want != dir_) {
+            // A new command: the first way that way.
+            pending_ = true;
+            dir_ = want;
+            at_ = 0;
+            since_ = 0;
+            worked_ = false;
+            from_ = live_;
+            fromOutcome_ = outcome;
+            current_ = order_[static_cast<int>(dir_)].front();
+        }
+    }
+    out.way = current_;
+    out.fresh = current_ != before;
+    out.dir = dir_;
+    return out;
+}
+
 std::string describeMethod(Control c, const ControlMethod& m) {
     switch (m.kind) {
         case MethodKind::None: return "nothing";
@@ -292,15 +446,18 @@ std::string describeMethod(Control c, const ControlMethod& m) {
                     return id >= kThirdPartyEventFirst ? "the aircraft's own event #" + std::to_string(id)
                                                        : "key event #" + std::to_string(id);
                 };
+                auto params = [](int32_t param, bool click, int32_t release) {
+                    return std::to_string(param) + (click ? ", then " + std::to_string(release) : "");
+                };
                 switch (e.mode) {
                     case EventMethod::Mode::Position:
-                        if (e.withKeys) return name(e.id) + " up, the gear key events down";
                         return name(e.id) + (e.offset != 0.0 ? " (from " + m.var + ")" : "");
-                    case EventMethod::Mode::Toggle: return name(e.id) + " (" + std::to_string(e.param) + ") as a toggle";
+                    case EventMethod::Mode::Toggle:
+                        return name(e.id) + " (" + params(e.param, e.click, e.release) + ") as a toggle";
                     case EventMethod::Mode::Steps:
-                        return name(e.id) + " (" + std::to_string(e.param) + ") and " +
-                               (e.lowerId == e.id ? "(" : name(e.lowerId) + " (") + std::to_string(e.lowerParam) +
-                               "), a step at a time";
+                        return name(e.id) + " (" + params(e.param, e.click, e.release) + ") and " +
+                               (e.lowerId == e.id ? "(" : name(e.lowerId) + " (") +
+                               params(e.lowerParam, e.lowerClick, e.lowerRelease) + "), a step at a time";
                 }
             }
             if (m.var == kKeyFlapsNotches) return "key events FLAPS_INCR/FLAPS_DECR";
@@ -317,7 +474,16 @@ std::string describeMethod(Control c, const ControlMethod& m) {
 }
 
 std::string describeControl(Control c, const ControlProfile& cp) {
-    std::string s = describeMethod(c, cp.method);
+    std::string s;
+    if (cp.perDirection()) {
+        for (int d = 0; d < kDirections; ++d) {
+            s += std::string(d ? "; " : "") + directionKey(c, static_cast<Direction>(d)) + ": ";
+            const std::vector<ControlMethod> ways = cp.waysTo(static_cast<Direction>(d));
+            for (size_t i = 0; i < ways.size(); ++i) s += (i ? ", then " : "") + describeMethod(c, ways[i]);
+        }
+    } else {
+        s = describeMethod(c, cp.method);
+    }
     if (c != Control::Throttle) return s;
     if (cp.lever.valid()) s += ", lever from L:var " + cp.lever.var;
     switch (cp.reverseBy) {
@@ -620,6 +786,28 @@ std::string aircraftFamily(const std::string& path) {
     return path.substr(0, category + 1) + withoutVariant(folder);
 }
 
+namespace {
+
+// The gear's "#69927+keys" from the builds before per-direction ways (the PMDG 777): up by that
+// event's position, down by the gear key events, then the aircraft's other own ways (ownGearWays).
+void readWithKeys(const std::string& key, ControlProfile& cp) {
+    const std::string suffix = "+keys";
+    std::string& var = cp.method.var;
+    if (cp.method.kind != MethodKind::KeyEvent || cp.perDirection() || var.size() <= suffix.size() ||
+        var.compare(var.size() - suffix.size(), std::string::npos, suffix) != 0) {
+        return;
+    }
+    var.resize(var.size() - suffix.size());
+    std::vector<ControlMethod>& down = cp.ways[static_cast<int>(Direction::Extend)];
+    down.push_back({MethodKind::KeyEvent, std::string(), 1.0});
+    for (const ControlMethod& m : ownGearWays(key)) {
+        if (!(m == cp.method) && std::find(down.begin(), down.end(), m) == down.end()) down.push_back(m);
+    }
+    cp.ways[static_cast<int>(Direction::Retract)].push_back(cp.method);
+}
+
+}  // namespace
+
 bool isTitleKey(const std::string& key) { return key.compare(0, 6, "title:") == 0; }
 
 std::string aircraftFolder(const std::string& raw) {
@@ -751,6 +939,15 @@ void ProfileStore::toJson(std::string& out) const {
             w.kv("var", c.method.var);
             w.kv("scale", c.method.scale);
             w.kv("confirmed", c.confirmed);
+            // Each way's list, in the order playback tries them ("down": [...], "up": [...]).
+            for (int d = 0; d < kDirections; ++d) {
+                if (c.ways[d].empty()) continue;
+                w.key(directionKey(controlAt(i), static_cast<Direction>(d))).beginArray();
+                for (const ControlMethod& m : c.ways[d]) {
+                    w.beginObject().kv("method", methodKey(m.kind)).kv("var", m.var).kv("scale", m.scale).endObject();
+                }
+                w.endArray();
+            }
             if (c.reverseBy != ReverseBy::Unknown) w.kv("reverseBy", reverseByKey(c.reverseBy));
             if (!c.lever.var.empty()) {
                 // [axis, lever] pairs
@@ -796,6 +993,19 @@ bool ProfileStore::fromJson(const char* text, size_t length, std::string* error)
             cp.method.var = c->getString("var", "");
             cp.method.scale = c->getNumber("scale", 1.0);
             cp.confirmed = c->getBool("confirmed", false);
+            for (int d = 0; d < kDirections; ++d) {
+                const JsonValue* ways = c->get(directionKey(controlAt(i), static_cast<Direction>(d)));
+                for (size_t k = 0; ways && ways->isArray() && k < ways->array.size(); ++k) {
+                    const JsonValue& way = ways->array[k];
+                    ControlMethod m;
+                    if (!way.isObject() || !parseMethodKey(way.getString("method", "none"), m.kind)) continue;
+                    if (m.kind == MethodKind::None) continue;
+                    m.var = way.getString("var", "");
+                    m.scale = way.getNumber("scale", 1.0);
+                    cp.ways[d].push_back(m);
+                }
+            }
+            if (controlAt(i) == Control::Gear) readWithKeys(p.key, cp);
             parseReverseByKey(c->getString("reverseBy", ""), cp.reverseBy);
             if (const JsonValue* lv = c->get("lever")) {
                 cp.lever.var = lv->getString("var", "");

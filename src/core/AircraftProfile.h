@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "Channels.h"
+#include "PlaybackController.h"
 
 namespace br {
 
@@ -20,6 +21,11 @@ struct JsonValue;
 // The controls the setup teaches, in the order it asks for them.
 enum class Control : uint8_t { Spoilers = 0, Flaps = 1, Throttle = 2, Gear = 3 };
 constexpr int kControlCount = 4;
+
+// Which way a control goes: out (the gear down, more flap, the spoilers up: toward higher values)
+// or back in. A profile can say how to move it each way (ControlProfile::ways).
+enum class Direction : uint8_t { Extend = 0, Retract = 1 };
+constexpr int kDirections = 2;
 
 // How playback drives a control.
 enum class MethodKind : uint8_t {
@@ -54,7 +60,7 @@ struct ControlMethod {
 
 // A KeyEvent method with one event by its number ('#' starts its var): the aircraft's own event
 // (kThirdPartyEventFirst and up, numbered as its SDK gives them to external apps) or a sim key
-// event, from the aircraft's SDK (ownGearLever) or seen firing while the pilot moved the control
+// event, from the aircraft's SDK (ownGearWays) or seen firing while the pilot moved the control
 // in the setup. Not for the throttle. The var says how it drives the control's value (eventTarget):
 //   "#69927"         a position: sent with round(value * scale) (the PMDG 777's gear lever, 0 UP,
 //   "#70010@-16383"  1 DOWN); after '@', an offset added to that (an axis)
@@ -63,11 +69,10 @@ struct ControlMethod {
 //   "#69940(536870912)/#69940(-2147483648)"
 //                    a step each way: the first toward higher values (more flap, spoilers out,
 //                    gear down), the second back (a click on a lever: left and right button)
-//   "#69927+keys"    the gear up by that event's position (0), down by the gear key events
-//                    (GEAR_SET, GEAR_DOWN), each only when the gear isn't already going that way
-//                    and again if it hasn't started after a while (EventStepper): the PMDG 777's
-//                    lever event raises its gear but ignores DOWN, the key events lower it but
-//                    don't raise it, and the event sent with them didn't raise it either
+//   "#69927(536870912,131072)"
+//                    a click: after ',', a parameter sent right after the first, the same event
+//                    again (a mouse button and its release, in the SDK's mouse flags); in a toggle
+//                    or either step
 // For a toggle or steps `scale` is how far one moves the control.
 bool isOwnEvent(const ControlMethod& m);
 constexpr uint32_t kThirdPartyEventFirst = 0x11000;  // THIRD_PARTY_EVENT_ID_MIN (69632)
@@ -76,11 +81,14 @@ struct EventMethod {
     Mode mode = Mode::Position;
     uint32_t id = 0;        // Steps: the one toward higher values
     int32_t param = 0;      // Toggle, Steps
+    bool click = false;     // and `release` sent right after it
+    int32_t release = 0;
     uint32_t lowerId = 0;   // Steps: the one back
     int32_t lowerParam = 0;
+    bool lowerClick = false;
+    int32_t lowerRelease = 0;
     double offset = 0.0;    // Position
     double scale = 1.0;
-    bool withKeys = false;  // Position, the gear: down by the gear key events instead ("+keys")
 };
 bool parseEventMethod(const ControlMethod& m, EventMethod& out);
 ControlMethod eventMethod(const EventMethod& e);
@@ -91,12 +99,13 @@ int32_t eventParam(const EventMethod& e, double value);  // a position's paramet
 double eventTarget(Control c, const Frame& f);
 // For the log: "#69927 (third-party +295)", "GEAR_TOGGLE (65570)", "key event 66587".
 std::string keyEventName(uint32_t id);
-// The aircraft's own gear lever event, for an aircraft whose SDK documents one and which doesn't
-// take the gear key events both ways (the PMDG 777: EVT_GEAR_LEVER, 0 UP, 1 DOWN, with the key
-// events, "#69927+keys"); else a method of kind None.
-// `aircraftKey` is the profile's key (aircraftFamily). The setup tries it when it didn't see the
-// lever's own event fire as the pilot moved it.
-ControlMethod ownGearLever(const std::string& aircraftKey);
+// The ways the aircraft's own gear lever event moves the lever, for an aircraft whose SDK
+// documents one (the PMDG 777's EVT_GEAR_LEVER, #69927): its position ("#69927", 0 UP, 1 DOWN), and
+// a click on it as the pilot's mouse does, through the SDK's mouse flags ("#69927(536870912,131072)",
+// the left button and its release, as a toggle). Empty for other aircraft. `aircraftKey` is the
+// profile's key (aircraftFamily). The setup tries them when it didn't see the lever's own event
+// fire as the pilot moved it; which works which way, it finds by trying.
+std::vector<ControlMethod> ownGearWays(const std::string& aircraftKey);
 
 // Steps a control toward the clip's value with an EventMethod toggle or steps, as a pilot clicking
 // would (ControlDriver::stepFlaps does the same with FLAPS_INCR/DECR): one event when the
@@ -115,6 +124,57 @@ public:
 private:
     double expect_ = NAN;  // where the last step should take the control
     int since_ = 1 << 20;  // frames since it
+};
+
+struct ControlProfile;
+
+// Playback's pick among a control's ways (ControlProfile::ways), for the gear, flaps and spoilers.
+// A command (the clip's value leaving the aircraft's, one way) starts with the first way of that
+// direction's list. If the control hasn't moved that way after EventStepper::waitFrames, the next
+// one takes over (round the list); the one that moved it is reported, once per command, and is
+// tried first from then on (promoteWay does the same in the profile). A way that has moved the
+// control is kept for the rest of that command. With one way each direction nothing changes.
+class WayPicker {
+public:
+    void begin(Control c, const ControlProfile& cp);
+    // The distinct ways, both directions' together, the profile's `method` first: the driver gets
+    // each ready.
+    const std::vector<ControlMethod>& ways() const { return ways_; }
+    // Leaves way i out (the aircraft can't take it). False if a direction has none left.
+    bool drop(size_t i);
+    // More than one way: there's something to pick (else it's always way 0, as before).
+    bool multi() const { return ways_.size() > 1; }
+    const std::vector<int>& order(Direction d) const { return order_[static_cast<int>(d)]; }  // indices into ways()
+
+    struct Pick {
+        int way = 0;             // index into ways(): drive the control with it now
+        bool fresh = false;      // not the way of the frame before: send its value now
+        Direction dir = Direction::Extend;  // the latest command's way
+        int gaveUp = -1;         // the way given up on this frame: the control hadn't moved
+        int worked = -1;         // the way that has just moved the control (once per command)
+        bool promoted = false;   // and it wasn't the first that way: it is now
+    };
+    // One frame: `target` the clip's value (eventTarget), `live` the aircraft as it is. The way a
+    // command goes by the aircraft's value (the gear's command from its legs, the flap handle
+    // index, the spoiler handle); it has moved when that has, or what the control moves (the legs,
+    // the flap or spoiler surfaces) has gone that way.
+    Pick step(double target, const Frame& live);
+    double live() const { return live_; }  // the aircraft's value, as the last step saw it
+
+private:
+    Control c_ = Control::Gear;
+    std::vector<ControlMethod> ways_;
+    std::vector<int> order_[kDirections];  // indices into ways_
+    int current_ = 0;
+    bool pending_ = false;   // a command is under way
+    Direction dir_ = Direction::Extend;
+    size_t at_ = 0;          // its way's place in order_[dir_]
+    int since_ = 0;          // frames since that way took over, or last moved the control
+    double from_ = NAN;      // the aircraft then
+    double fromOutcome_ = NAN;
+    bool worked_ = false;    // a way has moved the control in this command
+    double live_ = NAN;
+    GearCommandFollower gear_;
 };
 
 enum class ControlState : uint8_t {
@@ -165,7 +225,19 @@ struct ControlProfile {
     bool confirmed = false;  // the pilot said the replay looked right (not only the automatic check)
     LeverCalibration lever;  // throttle only, with the key-event method
     ReverseBy reverseBy = ReverseBy::Unknown;  // throttle only, with the key-event method
+    // The gear, flaps and spoilers, where one method doesn't move them both ways or from wherever
+    // they are (the PMDG 777's gear): for each Direction, the ways to try, in order. Playback sends
+    // the first, and the next if the control hasn't moved after a while (WayPicker); one that moved
+    // it goes to the front (promoteWay). Empty: `method` that way, as in profiles from before.
+    // `method` is still the one the clips' channels are recorded for (the first way out).
+    std::vector<ControlMethod> ways[kDirections];
+
+    std::vector<ControlMethod> waysTo(Direction d) const;  // ways[d], or `method`
+    bool perDirection() const { return !ways[0].empty() || !ways[1].empty(); }
 };
+// Puts `m` first among the ways that way, where a replay found it moving the control when the one
+// before it didn't. False if it's first already or not in that list.
+bool promoteWay(ControlProfile& cp, Direction d, const ControlMethod& m);
 
 // The key an aircraft's control profile is kept under, shared by its variants. `path` is the
 // aircraft.cfg folder as Engine::setAircraftKey gets it (lower case, '/' separators), e.g.
@@ -246,12 +318,14 @@ const char* methodKey(MethodKind k);  // "input_set", ...
 bool parseMethodKey(const std::string& key, MethodKind& out);
 const char* stateKey(ControlState s);  // "pending", "ok", ...
 bool parseStateKey(const std::string& key, ControlState& out);
+// "down"/"up" for the gear, "extend"/"retract" for the rest (aircraft.json, the log).
+const char* directionKey(Control c, Direction d);
 
 // The variable for engine `engine` (1-based): '#' in the pattern replaced by its number.
 std::string engineVar(const std::string& pattern, int engine);
 // "input event HANDLING_FLAPS (preset)", "L:var A32NX_SPOILERS_HANDLE_POSITION", "key events", ...
 std::string describeMethod(Control c, const ControlMethod& m);
-// The method, and the throttle lever's variable if the profile has one.
+// The method (or each direction's ways), and the throttle lever's variable if the profile has one.
 std::string describeControl(Control c, const ControlProfile& cp);
 
 // A sweep's (axis, lever) readings as a calibration table: sorted by axis, unreadable ones dropped.

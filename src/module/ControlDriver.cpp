@@ -66,8 +66,48 @@ bool ControlDriver::dueWhenLasting(Slot& s, int i, double v, bool force, double 
 }
 
 bool ControlDriver::begin(Control c, const ControlMethod& m, std::string& why) {
+    const int i = static_cast<int>(c);
+    extra_[i].clear();
+    ControlProfile one;
+    one.method = m;
+    picker_[i].begin(c, one);
+    return beginSlot(c, slots_[i], m, why);
+}
+
+bool ControlDriver::beginWays(Control c, const ControlProfile& cp, std::string& why) {
+    if (c == Control::Throttle || !cp.perDirection()) return begin(c, cp.method, why);
+    const int ci = static_cast<int>(c);
+    WayPicker& p = picker_[ci];
+    p.begin(c, cp);
+    extra_[ci].clear();
+    std::vector<Slot> slots;
+    for (size_t i = 0; i < p.ways().size();) {
+        Slot s;
+        std::string whyNot;
+        if (beginSlot(c, s, p.ways()[i], whyNot)) {
+            slots.push_back(s);
+            ++i;
+            continue;
+        }
+        log::warn("controls: can't drive the %s with %s: %s; leaving it out", controlSpec(c).label,
+                  describeMethod(c, p.ways()[i]).c_str(), whyNot.c_str());
+        if (!p.drop(i)) {
+            why = "no way left one way (" + whyNot + ")";
+            return false;
+        }
+    }
+    slots_[ci] = slots.front();
+    extra_[ci].assign(slots.begin() + 1, slots.end());
+    for (int d = 0; d < kDirections; ++d) {
+        std::string list;
+        for (const int w : p.order(static_cast<Direction>(d))) list += (list.empty() ? "" : ", then ") + describeMethod(c, p.ways()[w]);
+        log::info("controls: the %s %s: %s", controlSpec(c).label, directionKey(c, static_cast<Direction>(d)), list.c_str());
+    }
+    return true;
+}
+
+bool ControlDriver::beginSlot(Control c, Slot& s, const ControlMethod& m, std::string& why) {
     if (number_ == FS_INVALID_UNIT) number_ = fsVarsGetUnitId("number");
-    Slot& s = slots_[static_cast<int>(c)];
     s = Slot();
     s.method = m;
     const ControlSpec& spec = controlSpec(c);
@@ -246,9 +286,46 @@ bool ControlDriver::reverseToggled() const {
 
 void ControlDriver::forgetReverse() { slots_[static_cast<int>(Control::Throttle)].toggle.forget(); }
 
+namespace {
+
+// "the gear went down", "the flaps retracted" (and "didn't go down", "didn't retract").
+std::string movedText(Control c, Direction d, bool did) {
+    const std::string label = controlSpec(c).label;
+    const bool out = d == Direction::Extend;
+    if (c == Control::Gear) return "the gear " + std::string(did ? "went " : "didn't go ") + (out ? "down" : "up");
+    return "the " + label + (did ? (out ? " extended" : " retracted") : (out ? " didn't extend" : " didn't retract"));
+}
+
+}  // namespace
+
 void ControlDriver::apply(Control c, const Frame& f, bool force) {
-    Slot& s = slots_[static_cast<int>(c)];
-    if (!s.active) return;
+    const int ci = static_cast<int>(c);
+    Slot& first = slots_[ci];
+    if (!first.active) return;
+    WayPicker& p = picker_[ci];
+    if (!p.multi() || !ctx_.live) {
+        applySlot(c, first, f, force);
+        return;
+    }
+    // Each direction's ways: the picker's, which goes on to the next one that way if the control
+    // hasn't moved after a while. The one that moved it is logged, and where it wasn't first, the
+    // profile gets it first from now on.
+    const WayPicker::Pick pick = p.step(eventTarget(c, f), *ctx_.live);
+    auto way = [&](int w) { return describeMethod(c, p.ways()[static_cast<size_t>(w)]); };
+    if (pick.gaveUp >= 0) {
+        log::info("controls: %s with %s within %d frames; now %s", movedText(c, pick.dir, false).c_str(), way(pick.gaveUp).c_str(),
+                  EventStepper::waitFrames(c), way(pick.way).c_str());
+    }
+    if (pick.worked >= 0 && p.order(pick.dir).size() > 1) {
+        log::info("controls: %s with %s%s", movedText(c, pick.dir, true).c_str(), way(pick.worked).c_str(),
+                  pick.promoted ? " (not the first way: first from now on)" : "");
+    }
+    if (pick.promoted && ctx_.wayWorked) ctx_.wayWorked(ctx_.wayCtx, c, pick.dir, p.ways()[static_cast<size_t>(pick.worked)]);
+    Slot& s = pick.way <= 0 ? first : extra_[ci][static_cast<size_t>(pick.way - 1)];
+    applySlot(c, s, f, force || pick.fresh);
+}
+
+void ControlDriver::applySlot(Control c, Slot& s, const Frame& f, bool force) {
     const ControlMethod& m = s.method;
     switch (m.kind) {
         case MethodKind::InputSet:
@@ -363,10 +440,6 @@ void ControlDriver::applyEvent(Control c, Slot& s, const Frame& f, bool force) {
     const double target = eventTarget(c, f);
     if (!std::isfinite(target)) return;
     const char* label = controlSpec(c).label;
-    if (c == Control::Gear && ev.withKeys) {
-        applyOwnGear(s, ev, target, now, force);
-        return;
-    }
     if (ev.mode == EventMethod::Mode::Position) {
         const int32_t param = eventParam(ev, target);
         const double minStep = 0.003 * std::fabs(ev.scale);  // an axis: as AXIS_SPOILER_SET's 48
@@ -382,56 +455,11 @@ void ControlDriver::applyEvent(Control c, Slot& s, const Frame& f, bool force) {
     if (dir == 0) return;
     const bool back = dir < 0 && ev.mode == EventMethod::Mode::Steps;
     sendEvent(s, back ? 1 : 0, back ? ev.lowerParam : ev.param);
+    if (back ? ev.lowerClick : ev.click) sendEvent(s, back ? 1 : 0, back ? ev.lowerRelease : ev.release);  // a click's release
     ++s.sends;
     log::info("controls: %s %s (event %s; at %.3g, the clip %.3g)", label,
               ev.mode == EventMethod::Mode::Toggle ? "toggled" : (dir > 0 ? "a step up" : "a step down"),
               s.method.var.c_str(), now, target);
-}
-
-// The PMDG 777's gear ("#69927+keys"). Its lever event raises the gear but ignores DOWN. The key
-// events lowered it after that event had raised it, but after the pilot raised it they only moved
-// the lever half way. Sent together, or just after a needless DOWN, the event didn't raise it. So
-// each way on its own, only when the gear isn't already going that way, and if it hasn't started
-// after a while (EventStepper) the next way of moving the lever: a click on it as the pilot's
-// mouse does (the SDK's mouse flags), "toggle gear", the other button. The log says which it
-// followed.
-void ControlDriver::applyOwnGear(Slot& s, const EventMethod& ev, double target, double now, bool force) {
-    constexpr int32_t kLeftClick = 0x20000000, kLeftRelease = 0x00020000;  // PMDG's MOUSE_FLAG_*
-    constexpr int32_t kRightClick = static_cast<int32_t>(0x80000000u), kRightRelease = 0x00080000;
-    static const char* const kUpWays[] = {"its lever event (UP)", "a left click on the lever", "a right click on the lever"};
-    static const char* const kDownWays[] = {"the gear key events", "a left click on the lever", "toggle gear (GEAR_TOGGLE)",
-                                            "a right click on the lever"};
-    if (s.gearTry > 0 && std::isfinite(now) && std::fabs(now - target) < 0.5) {
-        log::info("controls: the gear is going %s after %s", target > 0.5 ? "down" : "up",
-                  target > 0.5 ? kDownWays[(s.gearTry - 1) % 4] : kUpWays[(s.gearTry - 1) % 3]);
-        s.gearTry = 0;
-    }
-    const int dir = s.stepper.step(target, now, 1.0, EventStepper::waitFrames(Control::Gear), force);
-    if (dir == 0) return;
-    if (dir != s.gearDir) s.gearTry = 0;  // the other way: from its first way again
-    s.gearDir = dir;
-    const int way = s.gearTry++ % (dir > 0 ? 4 : 3);
-    ++s.sends;
-    auto click = [&](int32_t press, int32_t release) {
-        sendEvent(s, 0, press);
-        sendEvent(s, 0, release);
-    };
-    if (dir < 0) {
-        if (way == 0) sendEvent(s, 0, eventParam(ev, 0.0));
-        else if (way == 1) click(kLeftClick, kLeftRelease);
-        else click(kRightClick, kRightRelease);
-    } else if (way == 0) {
-        keyEvent(KEY_GEAR_SET, 1);
-        keyEvent(KEY_GEAR_DOWN, 0);
-    } else if (way == 1) {
-        click(kLeftClick, kLeftRelease);
-    } else if (way == 2) {
-        keyEvent(KEY_GEAR_TOGGLE, 0);
-    } else {
-        click(kRightClick, kRightRelease);
-    }
-    log::info("controls: gear %s (%s, event %s; the gear %s)", dir > 0 ? "down" : "up",
-              dir > 0 ? kDownWays[way] : kUpWays[way], s.method.var.c_str(), now > 0.5 ? "down" : "up");
 }
 
 DWORD ControlDriver::ownEventId(const std::string& name) {
@@ -725,9 +753,16 @@ void ControlDriver::restoreLVars(Control c) {
 }
 
 void ControlDriver::end(Control c) {
-    Slot& s = slots_[static_cast<int>(c)];
+    const int ci = static_cast<int>(c);
+    Slot& s = slots_[ci];
     if (!s.active) return;
     s.active = false;
+    for (const Slot& w : extra_[ci]) {
+        log::info("controls: %d value(s) sent to the %s with %s", w.sends, controlSpec(c).label, describeMethod(c, w.method).c_str());
+        if (w.errors > 0) log::warn("controls: %d error(s) driving the %s with %s", w.errors, controlSpec(c).label,
+                                    describeMethod(c, w.method).c_str());
+    }
+    extra_[ci].clear();
     log::info(s.method.kind == MethodKind::SimVar ? "controls: %d frame(s) written to the %s with %s"
                                                   : "controls: %d value(s) sent to the %s with %s",
               s.sends, controlSpec(c).label, describeMethod(c, s.method).c_str());

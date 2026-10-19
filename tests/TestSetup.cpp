@@ -100,9 +100,12 @@ struct FakeAircraft : IControlSim {
     // The PMDG 777's gear instead: no variable the scan sees is its lever, but each leg has an
     // L:var animating it (0..1000), which moves with the gear and moves nothing else when written.
     bool pmdgGear = false;
-    // And as the real one took the replays: its lever event (#69927) raises the gear (0) but
-    // ignores DOWN (1); GEAR_SET/GEAR_DOWN lower it, GEAR_UP doesn't raise it.
+    // And as the real one took the replays: its lever event's position (#69927) raises the gear (0)
+    // but ignores DOWN (1); GEAR_SET/GEAR_DOWN lower it, but only after a replay raised it (GEAR_UP
+    // doesn't raise it); after the pilot raised it only a left click on the lever does (the event
+    // with PMDG's mouse flags, "#69927(536870912,131072)").
     bool pmdg777 = false;
+    bool raisedByPilot = false;  // who last raised the gear: the pilot (setGearLever) or a replay
     bool pmdgLeverVars = false;  // and its lever's switch_295_a (0..100), and a sound flag while the legs move
     double gearRate = 0.25;     // the gear simvars' travel a second
     double legAnimRate = 0.0;   // the leg animations' (pmdgGear), if not the same
@@ -129,7 +132,15 @@ struct FakeAircraft : IControlSim {
     ControlMethod driven;
     bool refuseInputValue = false;
 
-    void setGearLever(double v) {
+    void setGearLever(double v) {  // the pilot's hand
+        if (v < 0.5 && gearLever >= 0.5) raisedByPilot = true;
+        moveGearLever(v);
+    }
+    void replayGearLever(double v) {  // what a replay's method did
+        if (v < 0.5 && gearLever >= 0.5) raisedByPilot = false;
+        moveGearLever(v);
+    }
+    void moveGearLever(double v) {
         if (v != gearLever) gearLeverChangedAt = t;
         gearLever = v;
     }
@@ -323,19 +334,18 @@ struct FakeAircraft : IControlSim {
         } else if (c == Control::Gear && pmdg777) {
             const double command = eventTarget(c, f);
             EventMethod ev;
-            const bool own = parseEventMethod(driven, ev) && ev.mode == EventMethod::Mode::Position && ev.id == 69927;
-            if (own && ev.withKeys) {
-                // Like ControlDriver: up by the event, down by the key events, a step at a time.
-                const int dir = stepper.step(command, gearFollow.update(gearPos), 1.0, EventStepper::waitFrames(c), force);
-                if (dir != 0) {
-                    ++clicks;
-                    setGearLever(dir > 0 ? 1.0 : 0.0);
-                }
-                return;
+            const bool own = parseEventMethod(driven, ev) && ev.id == 69927;
+            if (own && ev.mode == EventMethod::Mode::Position) {
+                if (command < 0.5) replayGearLever(0.0);  // UP; DOWN does nothing
+            } else if (own && ev.mode == EventMethod::Mode::Toggle) {
+                // Clicked like ControlDriver: toward the command, once the legs show the last click.
+                const int dir = stepper.step(command, gearFollow.update(gearPos), ev.scale, EventStepper::waitFrames(c), force);
+                if (dir != 0) ++clicks;
+                const bool leftClick = ev.click && ev.param == 0x20000000 && ev.release == 0x00020000;
+                if (dir > 0 && leftClick && raisedByPilot) replayGearLever(1.0);
+            } else if (driven.kind == MethodKind::KeyEvent && driven.var.empty()) {
+                if (command >= 0.5 && !raisedByPilot) replayGearLever(1.0);
             }
-            const bool keys = driven.kind == MethodKind::KeyEvent && driven.var.empty();
-            if (own && command < 0.5) setGearLever(0.0);
-            if (keys && command >= 0.5) setGearLever(1.0);
         } else if (c == Control::Gear && driven == gearWorks) {
             EventMethod ev;
             if (parseEventMethod(driven, ev) && ev.mode != EventMethod::Mode::Position) {
@@ -344,13 +354,13 @@ struct FakeAircraft : IControlSim {
                 const int dir = stepper.step(eventTarget(c, f), live, ev.scale, EventStepper::waitFrames(c), force);
                 if (dir != 0) {
                     ++clicks;
-                    setGearLever(ev.mode == EventMethod::Mode::Toggle ? 1.0 - gearLever : (dir > 0 ? 1.0 : 0.0));
+                    replayGearLever(ev.mode == EventMethod::Mode::Toggle ? 1.0 - gearLever : (dir > 0 ? 1.0 : 0.0));
                 }
                 return;
             }
             // Key events (an event's position too) from the gear command, like ControlDriver.
             const double v = driven.kind == MethodKind::KeyEvent ? f.v[kGearHandle] : f.v[kInputGear];
-            if (std::isfinite(v)) setGearLever(v >= 0.5 ? 1.0 : 0.0);
+            if (std::isfinite(v)) replayGearLever(v >= 0.5 ? 1.0 : 0.0);
         }
     }
     void endControl(Control) override {
@@ -383,6 +393,12 @@ struct SetupHarness {
     std::string lastPhase;
     std::vector<std::string> prompts;  // every main text shown, in order
     bool sawTaskDone = false;          // the last instruction was shown as done
+    // When the setup asks to move the control away once more ("away"): the pilot raises the gear,
+    // or deploys the spoilers, unless the test says otherwise.
+    std::function<void()> away;
+    // What the setup tried bringing the control back with on its own ("back"); aircraft.tried
+    // keeps the replays of the whole movement.
+    std::vector<ControlMethod> backTried;
 
     SetupHarness() {
         g_setupLog.clear();
@@ -419,11 +435,17 @@ struct SetupHarness {
         for (double s = 0.0; s < seconds; s += kDt) {
             const std::string before = phase();
             if (pilot && (before == "prepare" || before == "user" || before == "takeoff" || before == "positions")) pilot(s);
+            if (before == "away") moveAway();
+            const size_t tries = aircraft.tried.size();
             aircraft.step(kDt);
             flow.onFrame(kDt, aircraft.live(), facts);
             t += kDt;
             const JsonValue st = status();
             const std::string p = flow.active() ? st.getString("phase", "") : "idle";
+            if (p == "back" && aircraft.tried.size() > tries) {
+                backTried.insert(backTried.end(), aircraft.tried.begin() + static_cast<std::ptrdiff_t>(tries), aircraft.tried.end());
+                aircraft.tried.resize(tries);
+            }
             const std::string prompt = st.getString("prompt", "");
             if (!prompt.empty() && (prompts.empty() || prompts.back() != prompt)) prompts.push_back(prompt);
             if (st.getBool("taskDone", false)) sawTaskDone = true;
@@ -441,6 +463,16 @@ struct SetupHarness {
         if (!ok) std::printf("         answer %s failed: %s\n", a, err.c_str());
         lastPhase = phase();
         return ok;
+    }
+
+    void moveAway() {
+        if (away) {
+            away();
+            return;
+        }
+        const std::string step = status().getString("step", "");
+        if (step == "gear") aircraft.setGearLever(0.0);
+        if (step == "spoilers") aircraft.spoilerHandle = 1.0;
     }
 };
 
@@ -598,7 +630,11 @@ TEST(Setup_FailingMethodsAreSkippedWithoutAskingAndANoTriesTheNext) {
     CHECK(rest[2] == MethodKind::LVar);
     CHECK(h.aircraft.tried[6].var == "SPOILER_ANIMATION");
     CHECK(rest[3] == MethodKind::InputValue);
-    CHECK_EQ(h.aircraft.ends, static_cast<int>(h.aircraft.tried.size()));
+    CHECK_EQ(h.aircraft.ends, static_cast<int>(h.aircraft.tried.size() + h.backTried.size()));
+    // Before those, the way back from where the pilot left them: both preset scalings didn't
+    // retract them, the key event did.
+    REQUIRE(h.backTried.size() == 3);
+    CHECK(h.backTried[2] == h.aircraft.spoilersWork);
     CHECK(h.status().getString("note", "").find("Couldn't replay the spoilers") != std::string::npos);
 }
 
@@ -1531,11 +1567,25 @@ TEST(Setup_GearAfterTakeoffFindsTheLeverAheadOfTheLegs) {
     CHECK(h.flow.profile()[Control::Gear].state == ControlState::Ok);
 }
 
-// The PMDG 777 (in the air, so only the gear), as it took the replays: its lever event raises the
-// gear but doesn't lower it, the key events lower it but don't raise it, and no variable the scan
-// sees is its lever, but its legs' animations move with the gear. Its own gear lever event with
-// the key events is tried first; the animations aren't tried at all (each swung only its leg).
-TEST(Setup_Pmdg777GearUsesItsOwnLeverEventNotTheLegAnimations) {
+namespace {
+
+const ControlMethod kLever777{MethodKind::KeyEvent, "#69927", 1.0};                    // its position
+const ControlMethod kClick777{MethodKind::KeyEvent, "#69927(536870912,131072)", 1.0};  // a left click
+const ControlMethod kGearKeys{MethodKind::KeyEvent, "", 1.0};
+constexpr int kDown = static_cast<int>(Direction::Extend);
+constexpr int kUp = static_cast<int>(Direction::Retract);
+
+}  // namespace
+
+// The PMDG 777 (in the air, so only the gear), as it took the replays: its lever event's position
+// raises the gear but doesn't lower it; the key events lower it, but only after a replay raised
+// it; after the pilot raised it only a left click on the lever does. No variable the scan sees is
+// its lever, and its legs' animations, which move with the gear, aren't tried at all (each swung
+// only its leg). From its table entry the setup tries the event's position and a click on it.
+// The way back from where the pilot left the gear finds the click; the whole movement, the event
+// raising it; and from where that left it, the key events lowering it. The profile keeps both
+// ways down, without anything the 777's own beyond the event's number.
+TEST(Setup_Pmdg777GearLearnsEachWayOnItsOwn) {
     SetupHarness h;
     h.key = "simobjects/airplanes/pmdg 777";
     h.aircraft.onGround = false;
@@ -1545,35 +1595,133 @@ TEST(Setup_Pmdg777GearUsesItsOwnLeverEventNotTheLegAnimations) {
     // them by the legs' time, but seconds all the same.
     h.aircraft.gearRate = 0.1;
     h.aircraft.legAnimRate = 0.25;
-    const ControlMethod own = ownGearLever(h.key);
-    REQUIRE(own == (ControlMethod{MethodKind::KeyEvent, "#69927+keys", 1.0}));
+    const std::vector<ControlMethod> own = ownGearWays(h.key);
+    REQUIRE(own.size() == 2);
+    CHECK(own[0] == kLever777);
+    CHECK(own[1] == kClick777);
     REQUIRE(h.start());
     // Lever up at 2 s (the legs follow from 4 s), down again at 16 s.
     auto pilot = [&](double s) { h.aircraft.setGearLever(s >= 2.0 && s < 16.0 ? 0.0 : 1.0); };
-    CHECK(h.run(150.0, pilot, "ask"));
+    CHECK(h.run(400.0, pilot, "ask"));
+    CHECK(inOrder(h.prompts, {"Raise the gear", "Lower the gear", "Raise the gear", "Watch the gear",
+                              "Did the gear retract and extend again?"}));
+    // From where the pilot left it: the event's DOWN did nothing, the click lowered it. Then the
+    // whole movement: the event raised it but didn't lower it, and from there the click didn't,
+    // the key events did.
+    REQUIRE(h.backTried.size() == 4);
+    CHECK(h.backTried[0] == kLever777);
+    CHECK(h.backTried[1] == kClick777);
     REQUIRE(h.aircraft.tried.size() == 1);
-    CHECK(h.aircraft.tried[0] == own);
+    CHECK(h.aircraft.tried[0] == kLever777);
+    CHECK(h.backTried[2] == kClick777);
+    CHECK(h.backTried[3] == kGearKeys);
     CHECK_NEAR(h.aircraft.gearPos, 1.0, 1e-6);
     CHECK(logged("L:var 7X7XleftMLGExt took 3."));
     CHECK(logged("it follows them (their animation, not the lever); not trying it"));
+    CHECK(logged("\"Raise the gear\" once more: the way back is tried from where you leave the gear"));
+    CHECK(logged("the aircraft's own event #69927 didn't bring the gear back from where you left it (it didn't move)"));
+    CHECK(logged("the aircraft's own event #69927 (536870912, then 131072) as a toggle brought the gear back from where you "
+                 "left it"));
+    CHECK(logged("the aircraft's own event #69927 moved the gear 100% as far as you did, but didn't bring it back"));
+    CHECK(logged("(536870912, then 131072) as a toggle didn't bring the gear back from where the replay left it"));
+    CHECK(logged("key events GEAR_SET/GEAR_UP/GEAR_DOWN brought the gear back from where the replay left it"));
+    // Each command and where the gear went, in every replay.
     CHECK(logged("gear up at "));
     CHECK(logged("the gear went from 1.00 to 0.00"));
-    CHECK(logged("the gear went from 0.00 to 1.00"));
-    CHECK_EQ(h.aircraft.clicks, 2);  // up once, down once: none while the gear was already there
+    CHECK(logged("gear down at 0.0 s: the gear went from 0.00 to 1.00"));
     REQUIRE(h.answer("yes"));
-    CHECK(h.flow.profile()[Control::Gear].state == ControlState::Ok);
-    CHECK(h.flow.profile()[Control::Gear].method == own);
-    CHECK_EQ(describeMethod(Control::Gear, own), std::string("the aircraft's own event #69927 up, the gear key events down"));
-    EventMethod ev;
-    REQUIRE(parseEventMethod(own, ev));
-    CHECK(ev.withKeys && ev.mode == EventMethod::Mode::Position && ev.id == 69927u);
-    CHECK(eventMethod(ev) == own);
+    const ControlProfile& gp = h.flow.profile()[Control::Gear];
+    CHECK(gp.state == ControlState::Ok);
+    CHECK(gp.method == kLever777);
+    REQUIRE(gp.ways[kUp].size() == 1);
+    CHECK(gp.ways[kUp][0] == kLever777);
+    REQUIRE(gp.ways[kDown].size() == 2);
+    CHECK(gp.ways[kDown][0] == kGearKeys);
+    CHECK(gp.ways[kDown][1] == kClick777);
+    CHECK_EQ(describeControl(Control::Gear, gp),
+             std::string("down: key events GEAR_SET/GEAR_UP/GEAR_DOWN, then the aircraft's own event #69927 (536870912, "
+                         "then 131072) as a toggle; up: the aircraft's own event #69927"));
+}
+
+// Playback with that profile, through the picker ControlDriver uses (as the fake's methods act as
+// ControlDriver's would). The clip lowers the gear the pilot raised: the key events first, which
+// don't, then the click, which does and goes first. It raises it with the event, and lowers it
+// again: the click first now, which doesn't after a replay raised it, then the key events, which
+// do and go first again. Each goes to the front of its list in the profile too.
+TEST(Playback_GearTriesTheNextWayAndKeepsTheOneThatWorked) {
+    FakeAircraft a;
+    a.onGround = false;
+    a.pmdgGear = true;
+    a.pmdg777 = true;
+    ControlProfile gp;
+    gp.state = ControlState::Ok;
+    gp.method = kLever777;
+    gp.ways[kDown] = {kGearKeys, kClick777};
+    gp.ways[kUp] = {kLever777};
+    // The pilot raised the gear.
+    a.setGearLever(0.0);
+    for (int i = 0; i < 60 * 8; ++i) a.step(kDt);
+    REQUIRE(a.gearPos < 1e-6);
+
+    WayPicker picker;
+    picker.begin(Control::Gear, gp);
+    REQUIRE(picker.ways().size() == 3);
+    int active = -1, gaveUp = 0;
+    std::vector<std::pair<Direction, ControlMethod>> promoted;
+    std::vector<double> at;  // the gear at 50 s, 105 s and 160 s
+    for (double t = 0.0; t < 165.0; t += kDt) {
+        // The clip's gear command: up (as the pilot left it), down from 5 s, up from 60 s, down from 115 s.
+        Frame f;
+        for (double& v : f.v) v = NAN;
+        f.v[kGearHandle] = (t >= 5.0 && t < 60.0) || t >= 115.0 ? 1.0 : 0.0;
+        const WayPicker::Pick p = picker.step(eventTarget(Control::Gear, f), a.live());
+        if (p.way != active) {
+            if (active >= 0) a.endControl(Control::Gear);
+            std::string why;
+            REQUIRE(a.beginControl(Control::Gear, picker.ways()[static_cast<size_t>(p.way)], why));
+            active = p.way;
+        }
+        a.applyControl(Control::Gear, f, p.fresh);
+        if (p.gaveUp >= 0) ++gaveUp;
+        if (p.promoted) {
+            const ControlMethod& m = picker.ways()[static_cast<size_t>(p.worked)];
+            promoted.push_back({p.dir, m});
+            CHECK(promoteWay(gp, p.dir, m));
+        }
+        a.step(kDt);
+        for (const double check : {50.0, 105.0, 160.0}) {
+            if (t < check && t + kDt >= check) at.push_back(a.gearPos);
+        }
+    }
+    REQUIRE(at.size() == 3);
+    CHECK_NEAR(at[0], 1.0, 1e-6);
+    CHECK_NEAR(at[1], 0.0, 1e-6);
+    CHECK_NEAR(at[2], 1.0, 1e-6);
+    CHECK_EQ(gaveUp, 2);
+    REQUIRE(promoted.size() == 2);
+    CHECK(promoted[0].first == Direction::Extend && promoted[0].second == kClick777);
+    CHECK(promoted[1].first == Direction::Extend && promoted[1].second == kGearKeys);
+    // The ways in the order each was driven: the event (up, as the gear was), the key events,
+    // the click; the event; the click (first by then), the key events.
+    REQUIRE(a.tried.size() == 6);
+    CHECK(a.tried[0] == kLever777);
+    CHECK(a.tried[1] == kGearKeys);
+    CHECK(a.tried[2] == kClick777);
+    CHECK(a.tried[3] == kLever777);
+    CHECK(a.tried[4] == kClick777);
+    CHECK(a.tried[5] == kGearKeys);
+    REQUIRE(gp.ways[kDown].size() == 2);
+    CHECK(gp.ways[kDown][0] == kGearKeys);
+    CHECK(gp.ways[kDown][1] == kClick777);
+    CHECK(!promoteWay(gp, Direction::Extend, kGearKeys));  // first already
+    CHECK(!promoteWay(gp, Direction::Retract, kGearKeys));  // not that way
 }
 
 // A replay that starts with the gear left up (the last method raised it but couldn't lower it):
 // the gear goes back down first, and only movement from there counts. The key events can lower
-// the 777's gear but not raise it, so they don't pass; counted from where the gear was, they
-// moved it all the way and back.
+// the 777's gear (after a replay raised it) but not raise it, so they don't pass; counted from
+// where the gear was, they moved it all the way and back. (From where the pilot left it they
+// didn't bring it back at all.)
 TEST(Setup_ReplayCountsOnlyFromWhereThePilotStarted) {
     SetupHarness h;
     h.aircraft.onGround = false;
@@ -1582,7 +1730,11 @@ TEST(Setup_ReplayCountsOnlyFromWhereThePilotStarted) {
     REQUIRE(h.start());
     auto pilot = [&](double s) { h.aircraft.setGearLever(s >= 2.0 && s < 16.0 ? 0.0 : 1.0); };
     REQUIRE(h.run(150.0, pilot, "replay"));
-    h.aircraft.setGearLever(0.0);
+    REQUIRE(h.backTried.size() == 1);
+    CHECK(logged("none of the method(s) brought the gear back from where you left it"));
+    // Up, as if the last method had raised it.
+    h.aircraft.replayGearLever(1.0);
+    h.aircraft.replayGearLever(0.0);
     h.aircraft.gearPos = 0.0;
     h.aircraft.gearHandleSimvar = 0.0;
     CHECK(h.run(300.0, nullptr, "done"));
@@ -1626,12 +1778,12 @@ TEST(Setup_GearTriesTheVariableThatLedFirst) {
 }
 
 TEST(Setup_OwnGearLeverOnlyForAircraftWithOne) {
-    CHECK(ownGearLever("simobjects/airplanes/pmdg 777").kind == MethodKind::KeyEvent);
-    CHECK(ownGearLever("simobjects/airplanes/pmdg 777f").kind == MethodKind::KeyEvent);
-    CHECK(ownGearLever("simobjects/airplanes/pmdg 737").kind == MethodKind::None);
-    CHECK(ownGearLever("simobjects/airplanes/a350").kind == MethodKind::None);
-    CHECK(ownGearLever("").kind == MethodKind::None);
-    CHECK(isOwnEvent(ownGearLever("simobjects/airplanes/pmdg 777")));
+    CHECK_EQ(ownGearWays("simobjects/airplanes/pmdg 777").size(), size_t(2));
+    CHECK_EQ(ownGearWays("simobjects/airplanes/pmdg 777f").size(), size_t(2));
+    CHECK(ownGearWays("simobjects/airplanes/pmdg 737").empty());
+    CHECK(ownGearWays("simobjects/airplanes/a350").empty());
+    CHECK(ownGearWays("").empty());
+    for (const ControlMethod& m : ownGearWays("simobjects/airplanes/pmdg 777")) CHECK(isOwnEvent(m));
     CHECK(!isOwnEvent(ControlMethod{MethodKind::KeyEvent, kKeyFlapsNotches, 1.0}));
     CHECK(!isOwnEvent(ControlMethod{MethodKind::LVar, "#1", 1.0}));
 }
@@ -1714,17 +1866,22 @@ TEST(Setup_LearnsAToggleGearEventFromCockpitClicks) {
     CHECK(h.run(150.0, pilot, "ask"));
     REQUIRE(h.aircraft.tried.size() == 1);
     CHECK(h.aircraft.tried[0] == h.aircraft.gearWorks);
-    CHECK_EQ(h.aircraft.clicks, 2);
+    REQUIRE(h.backTried.size() == 1);
+    CHECK(h.backTried[0] == h.aircraft.gearWorks);
+    CHECK_EQ(h.aircraft.clicks, 3);  // down from where the pilot left it; then up and down again
     CHECK_NEAR(h.aircraft.gearPos, 1.0, 1e-6);
     CHECK(logged("#70002 (third-party +370) (536870912) fired with it 2 time(s): a toggle"));
     CHECK(logged("#70500 (third-party +868) (536870912) fired 1 time(s); the gear command didn't move after 1"));
     REQUIRE(h.answer("yes"));
+    // It did it all, from where the pilot left the gear too: one method, both ways.
     CHECK(h.flow.profile()[Control::Gear].method == h.aircraft.gearWorks);
+    CHECK(!h.flow.profile()[Control::Gear].perDirection());
     CHECK_EQ(describeMethod(Control::Gear, h.aircraft.gearWorks),
              std::string("the aircraft's own event #70002 (536870912) as a toggle"));
 }
 
-// The PMDG 777 with its lever's event seen firing: tried once, as seen, not again from the table.
+// The PMDG 777 with its lever's event seen firing: tried once, as seen, not again from the table;
+// the table's click is still tried.
 TEST(Setup_GearEventSeenIsNotTriedAgainFromTheTable) {
     SetupHarness h;
     h.key = "simobjects/airplanes/pmdg 777";
@@ -1738,9 +1895,12 @@ TEST(Setup_GearEventSeenIsNotTriedAgainFromTheTable) {
         h.aircraft.setGearLever(lever);
     };
     CHECK(h.run(400.0, pilot, "done"));
-    REQUIRE(h.aircraft.tried.size() == 2);
-    CHECK(h.aircraft.tried[0] == ownGearLever(h.key));
-    CHECK(h.aircraft.tried[1] == (ControlMethod{MethodKind::KeyEvent, std::string(), 1.0}));
+    REQUIRE(h.aircraft.tried.size() == 3);
+    CHECK(h.aircraft.tried[0] == kLever777);
+    CHECK(h.aircraft.tried[1] == kClick777);
+    CHECK(h.aircraft.tried[2] == kGearKeys);
+    CHECK_EQ(h.backTried.size(), size_t(3));
+    CHECK(h.flow.profile()[Control::Gear].state == ControlState::Failed);
 }
 
 // An event that fired steadily before the movement's window isn't kept from then on (only
@@ -1770,11 +1930,17 @@ TEST(Setup_KeyEventTrackerKeepsOnlyWhatDidntFireSteadily) {
 }
 
 TEST(Setup_EventMethodVars) {
-    const char* const vars[] = {"#69927", "#70010@-16383", "#66587(29501)", "#69940(536870912)/#69940(-2147483648)",
-                                "#70011(1)/#70012(0)"};
+    const char* const vars[] = {"#69927",
+                                "#70010@-16383",
+                                "#66587(29501)",
+                                "#69940(536870912)/#69940(-2147483648)",
+                                "#70011(1)/#70012(0)",
+                                "#69927(536870912,131072)",
+                                "#69940(536870912,131072)/#69940(-2147483648,524288)"};
     const EventMethod::Mode modes[] = {EventMethod::Mode::Position, EventMethod::Mode::Position, EventMethod::Mode::Toggle,
-                                       EventMethod::Mode::Steps, EventMethod::Mode::Steps};
-    for (size_t i = 0; i < 5; ++i) {
+                                       EventMethod::Mode::Steps,    EventMethod::Mode::Steps,    EventMethod::Mode::Toggle,
+                                       EventMethod::Mode::Steps};
+    for (size_t i = 0; i < 7; ++i) {
         EventMethod e;
         REQUIRE(parseEventMethod(ControlMethod{MethodKind::KeyEvent, vars[i], 2.0}, e));
         CHECK(e.mode == modes[i]);
@@ -1793,10 +1959,18 @@ TEST(Setup_EventMethodVars) {
     REQUIRE(parseEventMethod(ControlMethod{MethodKind::KeyEvent, "#70010@-16383", 32766.0}, e));
     CHECK_EQ(eventParam(e, 0.0), -16383);
     CHECK_EQ(eventParam(e, 1.0), 16383);
-    REQUIRE(parseEventMethod(ownGearLever("simobjects/airplanes/pmdg 777"), e));
+    REQUIRE(parseEventMethod(ownGearWays("simobjects/airplanes/pmdg 777")[0], e));
     CHECK_EQ(eventParam(e, 0.0), 0);
     CHECK_EQ(eventParam(e, 1.0), 1);
-    for (const char* bad : {"#", "#0", "#12(", "#12(3", "#12(3)/", "#12(3)/#13", "#12@", "#12@x", "#12x", "FLAPS_INCR"}) {
+    // A click: the button, then its release, on the same event (and either step's).
+    REQUIRE(parseEventMethod(ownGearWays("simobjects/airplanes/pmdg 777")[1], e));
+    CHECK(e.mode == EventMethod::Mode::Toggle && e.click && e.param == 0x20000000 && e.release == 0x00020000);
+    REQUIRE(parseEventMethod(ControlMethod{MethodKind::KeyEvent, "#69940(536870912,131072)/#69940(-2147483648,524288)", 1.0}, e));
+    CHECK(e.click && e.release == 131072 && e.lowerClick && e.lowerParam == INT32_MIN && e.lowerRelease == 524288);
+    REQUIRE(parseEventMethod(ControlMethod{MethodKind::KeyEvent, "#69940(1)/#69940(2,3)", 1.0}, e));
+    CHECK(!e.click && e.lowerClick && e.lowerRelease == 3);
+    for (const char* bad : {"#", "#0", "#12(", "#12(3", "#12(3)/", "#12(3)/#13", "#12@", "#12@x", "#12x", "FLAPS_INCR",
+                            "#12(3,)", "#12(3,x)", "#12(3,4", "#69927+keys"}) {
         CHECK(!parseEventMethod(ControlMethod{MethodKind::KeyEvent, bad, 1.0}, e));
     }
     CHECK(!parseEventMethod(ControlMethod{MethodKind::LVar, "#12", 1.0}, e));
@@ -2076,6 +2250,87 @@ TEST(Profile_JsonRoundTrip) {
     CHECK(back.find("x")->controls[3].state == ControlState::Pending);  // "ok" without a method
 }
 
+// Profiles from before the per-direction ways: one method both ways, read and written as they
+// were, and played back with that one method whatever the aircraft does. The gear's "+keys" of
+// the builds just before becomes its ways: up by the event, down by the key events, then the click.
+TEST(Profile_OldProfilesKeepOneMethodBothWays) {
+    const char* old =
+        "{\"version\":1,\"aircraft\":[{\"key\":\"simobjects/airplanes/a320neo\",\"controls\":{"
+        "\"gear\":{\"state\":\"ok\",\"method\":\"input_set\",\"var\":\"LANDING_GEAR_GEAR\",\"scale\":1,\"confirmed\":true},"
+        "\"spoilers\":{\"state\":\"ok\",\"method\":\"key_event\",\"var\":\"\",\"scale\":1}}},"
+        "{\"key\":\"simobjects/airplanes/pmdg 777\",\"controls\":{"
+        "\"gear\":{\"state\":\"ok\",\"method\":\"key_event\",\"var\":\"#69927+keys\",\"scale\":1,\"confirmed\":true}}}]}";
+    ProfileStore s;
+    std::string err;
+    REQUIRE(s.fromJson(old, std::strlen(old), &err));
+    REQUIRE(s.find("simobjects/airplanes/a320neo"));
+    const AircraftProfile& a = *s.find("simobjects/airplanes/a320neo");
+    const ControlMethod gearSet{MethodKind::InputSet, "LANDING_GEAR_GEAR", 1.0};
+    for (const Control c : {Control::Gear, Control::Spoilers}) {
+        CHECK(!a[c].perDirection());
+        for (const Direction d : {Direction::Extend, Direction::Retract}) {
+            const std::vector<ControlMethod> ways = a[c].waysTo(d);
+            REQUIRE(ways.size() == 1);
+            CHECK(ways[0] == a[c].method);
+        }
+    }
+    CHECK(a[Control::Gear].method == gearSet);
+    CHECK_EQ(describeControl(Control::Gear, a[Control::Gear]), describeMethod(Control::Gear, gearSet));
+    // Written back as it was: no lists.
+    ProfileStore justA;
+    justA.upsert(a.key) = a;
+    std::string json;
+    justA.toJson(json);
+    CHECK(json.find("\"down\"") == std::string::npos && json.find("\"up\"") == std::string::npos);
+    CHECK(json.find("\"extend\"") == std::string::npos && json.find("\"retract\"") == std::string::npos);
+    CHECK(!promoteWay(justA.upsert(a.key)[Control::Gear], Direction::Extend, gearSet));
+
+    // Playback: always that one method, sent as before, though the gear doesn't follow it.
+    WayPicker p;
+    p.begin(Control::Gear, a[Control::Gear]);
+    CHECK(!p.multi());
+    REQUIRE(p.ways().size() == 1);
+    FakeAircraft fake;
+    for (int i = 0; i < 60 * 30; ++i) {
+        Frame f;
+        for (double& v : f.v) v = NAN;
+        f.v[kGearHandle] = i < 60 * 15 ? 0.0 : 1.0;
+        const WayPicker::Pick pick = p.step(eventTarget(Control::Gear, f), fake.live());
+        CHECK(pick.way == 0 && !pick.fresh && pick.gaveUp < 0 && pick.worked < 0 && !pick.promoted);
+        fake.step(kDt);
+    }
+
+    // The 777's "+keys".
+    REQUIRE(s.find("simobjects/airplanes/pmdg 777"));
+    const ControlProfile& g = (*s.find("simobjects/airplanes/pmdg 777"))[Control::Gear];
+    CHECK(g.state == ControlState::Ok);
+    CHECK(g.method == kLever777);
+    REQUIRE(g.ways[kUp].size() == 1 && g.ways[kDown].size() == 2);
+    CHECK(g.ways[kUp][0] == kLever777);
+    CHECK(g.ways[kDown][0] == kGearKeys);
+    CHECK(g.ways[kDown][1] == kClick777);
+
+    // The lists round-trip, in their order, under each control's names.
+    ProfileStore lists;
+    AircraftProfile& l = lists.upsert("l");
+    l[Control::Gear] = g;
+    l[Control::Spoilers] = {ControlState::Ok, ControlMethod{MethodKind::KeyEvent, "", 1.0}, true};
+    l[Control::Spoilers].ways[kUp] = {ControlMethod{MethodKind::KeyEvent, "", 1.0}, ControlMethod{MethodKind::SimVar, "", 1.0}};
+    lists.toJson(json);
+    CHECK(json.find("\"down\":[{\"method\":\"key_event\",\"var\":\"\",\"scale\":1}") != std::string::npos);
+    CHECK(json.find("\"retract\":[") != std::string::npos);
+    CHECK(json.find("\"extend\"") == std::string::npos);
+    ProfileStore back;
+    REQUIRE(back.fromJson(json.data(), json.size(), &err));
+    REQUIRE(back.find("l"));
+    const AircraftProfile& b = *back.find("l");
+    CHECK(b[Control::Gear].ways[kDown] == g.ways[kDown]);
+    CHECK(b[Control::Gear].ways[kUp] == g.ways[kUp]);
+    CHECK(b[Control::Spoilers].ways[kUp] == l[Control::Spoilers].ways[kUp]);
+    CHECK(b[Control::Spoilers].ways[kDown].empty());
+    REQUIRE(b[Control::Spoilers].waysTo(Direction::Extend).size() == 1);  // that way: its method
+}
+
 TEST(Profile_ChannelsAndNames) {
     CHECK_EQ(engineVar("ENGINE_THROTTLE_#", 2), std::string("ENGINE_THROTTLE_2"));
     CHECK_EQ(engineVar("A32NX_THROTTLE", 2), std::string("A32NX_THROTTLE"));
@@ -2221,9 +2476,12 @@ struct EngineSetupHarness {
     }
     void run(double seconds, const std::function<void(double)>& pilot = nullptr) {
         for (double s = 0.0; s < seconds; s += kDt) {
-            if (pilot) {
-                const std::string phase = setupStatus().getString("phase", "");
-                if (phase == "prepare" || phase == "user") pilot(s);  // hands off during replays
+            const JsonValue st = setupStatus();
+            const std::string phase = st.getString("phase", "");
+            if (pilot && (phase == "prepare" || phase == "user")) pilot(s);  // hands off during replays
+            if (phase == "away") {  // once more, to try the way back from there
+                if (st.getString("step", "") == "spoilers") aircraft.spoilerHandle = 1.0;
+                if (st.getString("step", "") == "gear") aircraft.setGearLever(0.0);
             }
             aircraft.step(kDt);
             FrameInput in;
@@ -2402,4 +2660,47 @@ TEST(EngineSetup_ClipsListTheVariablesTheirChannelsRecorded) {
     REQUIRE(clip.meta.vars.size() == 2);
     CHECK_EQ(clip.meta.vars[0].first, std::string("ie_flaps"));
     CHECK_EQ(clip.meta.vars[1].second, std::string("XMLVAR_SPOILERS"));
+}
+
+// A way that worked in a replay where the one before it didn't goes first in the aircraft's
+// profile, logged and saved, so later replays (and a restart) try it first.
+TEST(EngineSetup_AWayThatWorkedInAReplayGoesFirstInTheProfile) {
+    g_setupLog.clear();
+    MemStore storage;
+    {
+        ProfileStore store;
+        ControlProfile& gp = store.upsert("simobjects/airplanes/pmdg 777")[Control::Gear];
+        gp = {ControlState::Ok, kLever777, true};
+        gp.ways[kDown] = {kGearKeys, kClick777};
+        gp.ways[kUp] = {kLever777};
+        std::string json;
+        store.toJson(json);
+        storage.files["aircraft.json"].assign(json.begin(), json.end());
+    }
+    ProfileSpy spy;
+    Engine engine(storage);
+    engine.setLogger(&testLog, nullptr);
+    engine.setSimOutput(&spy);
+    engine.init();
+    engine.setAircraftKey("simobjects/airplanes/pmdg 777-300er/presets/pmdg/pmdg 777-300er/config");
+    const int applied = spy.applied;
+    CHECK(engine.promoteWay(Control::Gear, Direction::Extend, kClick777));
+    CHECK(logged("control profile: the gear down with the aircraft's own event #69927 (536870912, then 131072) as a "
+                 "toggle first from now on"));
+    CHECK_EQ(spy.applied, applied + 1);
+    REQUIRE(spy.last[Control::Gear].ways[kDown].size() == 2);
+    CHECK(spy.last[Control::Gear].ways[kDown][0] == kClick777);
+    CHECK(!engine.promoteWay(Control::Gear, Direction::Extend, kClick777));  // first already
+    CHECK(!engine.promoteWay(Control::Gear, Direction::Retract, kGearKeys));  // not that way
+    CHECK(!engine.promoteWay(Control::Flaps, Direction::Extend, kGearKeys));   // no list
+    CHECK_EQ(spy.applied, applied + 1);
+
+    Engine again(storage);
+    again.init();
+    again.setAircraftKey("simobjects/airplanes/pmdg 777-200lr/presets/pmdg/pmdg 777-200lr/config");
+    REQUIRE(again.currentProfile());
+    const ControlProfile& back = (*again.currentProfile())[Control::Gear];
+    REQUIRE(back.ways[kDown].size() == 2);
+    CHECK(back.ways[kDown][0] == kClick777);
+    CHECK(back.ways[kDown][1] == kGearKeys);
 }

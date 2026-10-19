@@ -115,6 +115,9 @@ private:
 
     static void CALLBACK dispatchThunk(SIMCONNECT_RECV* data, DWORD size, void* ctx);
     static void keyEventThunk(FsEventId id, FsVarParamArray* params, void* ctx);
+    // The driver found a way that moved a control where the one before it didn't: the profile
+    // gets it first (Engine::promoteWay).
+    static void wayWorkedThunk(void* ctx, Control c, Direction d, const ControlMethod& m);
     // Hardware throttle key events: tracks the pilot's throttle axis for the thr_axis_N channels.
     // During the setup's scan it also keeps every key event for it (scanKeyEvents).
     void onKeyEvent(FsEventId id, const FsVarParamArray* params);
@@ -361,7 +364,7 @@ private:
     bool throttleAxisLogged_ = false;
     // Before a jump onto the ground with the gear down, on an aircraft whose gear can't be snapped:
     // lower it where the aircraft is first (see prepareJump).
-    static constexpr int64_t kPrepareGearMaxMs = 50000;  // the PMDG 777's gear: four ways of lowering it, 10 s apart
+    static constexpr int64_t kPrepareGearMaxMs = 50000;  // a profile's ways of lowering it, each 6 to 10 s (WayPicker)
     int64_t prepareStartMs_ = 0;
     bool prepareGearSent_ = false;
     bool prepareUnfrozen_ = false;  // in the air, not frozen while the gear comes down
@@ -393,6 +396,13 @@ private:
     int restoreThrottleFrames_ = 0;
     void checkRestoreThrottle();
     void finishRestoreThrottle();
+    // Stop with a gear that has ways for each direction: it's driven back to where it was for a
+    // few more frames, until it's there, so the next way can take over if the first doesn't move
+    // it (WayPicker), 50 s at most.
+    static constexpr int kRestoreGearMaxFrames = 3000;
+    int restoreGearFrames_ = 0;
+    void checkRestoreGearWays();
+    void finishRestoreGearWays();
     // Diagnostics for the engine sound: does each engine's N1 follow the clip, or hunt? (N1 itself
     // can't be replayed: written every frame, the A350, the CJ4 and the PMDG 737 all kept their own.)
     int64_t engineStartMs_ = 0;
