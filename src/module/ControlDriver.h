@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "AircraftProfile.h"
+#include "PlaybackController.h"
 
 namespace br {
 
@@ -24,6 +25,9 @@ struct InputEventInfo {
 
 class ControlDriver {
 public:
+    // Client event IDs from here on are the aircraft's own events (isOwnEvent), one per name.
+    static constexpr DWORD kOwnEventFirst = 700;
+
     struct Context {
         HANDLE h = 0;
         const Frame* live = nullptr;  // the latest values from the sim
@@ -72,6 +76,9 @@ public:
     void end(Control c);
     void endAll();
     bool active(Control c) const { return slots_[static_cast<int>(c)].active; }
+    bool anyActive() const;
+    // A key event of ours is being sent now (the key event handler sees it too).
+    static bool sending() { return sending_; }
     // What was last sent for output i of control c (a key event's value), and how many sends so far.
     double lastSent(Control c, int i) const { return slots_[static_cast<int>(c)].sent[i]; }
     int sends(Control c) const { return slots_[static_cast<int>(c)].sends; }
@@ -96,6 +103,12 @@ private:
         double original[4] = {NAN, NAN, NAN, NAN};  // the L:vars when the method began
         SimVarTarget simvars[4];
         int simvarCount = 0;
+        EventMethod event;             // an event by its number (isOwnEvent)
+        DWORD eventClient[2] = {};     // and its client event IDs where it's the aircraft's own (0: a sim key event)
+        EventStepper stepper;          // a toggle or steps
+        GearCommandFollower gearLive;  // the gear's command from its legs, for a toggle or steps
+        int gearDir = 0;               // applyOwnGear: the way it last sent the gear (+1 down)
+        int gearTry = 0;               // and how many ways it has tried so far that way
         double sent[4] = {NAN, NAN, NAN, NAN};
         int since[4] = {};
         int64_t lastingFromMs[4] = {};  // dueWhenLasting: since when the value has been off what was sent
@@ -133,13 +146,25 @@ private:
     static constexpr int64_t kLastingMs = 500;
     void applyKeyEvent(Control c, Slot& s, const Frame& f, bool force);
     static constexpr int kNotchFrames = 8;       // FLAPS_INCR/DECR: at least this far apart
-    static constexpr int kNotchWaitFrames = 60;  // and waiting this long for the handle to show it
+    // And waiting this long for the handle to show it: the PMDG 777's shows a notch only once the
+    // flaps start moving, more than 60 frames on, and a notch sent meanwhile overshot to full.
+    static constexpr int kNotchWaitFrames = 300;
     void stepFlaps(Slot& s, double target, bool force);
+    // An event by its number: a position sent when the control's value changes; a toggle or steps
+    // one at a time toward the clip's value (EventStepper), as a pilot clicking would.
+    void applyEvent(Control c, Slot& s, const Frame& f, bool force);
+    void applyOwnGear(Slot& s, const EventMethod& ev, double target, double now, bool force);
+    void sendEvent(Slot& s, int which, int32_t param);  // which: 0 the event (steps: up), 1 steps' way back
     static void keyEvent(int id, int32_t value);
+    // The client event ID mapped to the aircraft's own event `name` ("#69927"), mapping it the
+    // first time; 0 if that failed.
+    DWORD ownEventId(const std::string& name);
 
+    static bool sending_;
     Context ctx_;
     Slot slots_[kControlCount];
     FsUnitId number_ = FS_INVALID_UNIT;
+    std::vector<std::string> ownEvents_;  // mapped to kOwnEventFirst + index
 };
 
 }  // namespace br

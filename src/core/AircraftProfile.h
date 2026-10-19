@@ -30,8 +30,8 @@ enum class MethodKind : uint8_t {
     LVar,        // the aircraft's L:var, set to the recorded value
     SimVar,      // the control's simvars, written every frame
     KeyEvent,    // key events, like hardware bindings send. `var` names the family: empty for
-                 // THROTTLEn_AXIS_SET_EX1, FLAPS_SET, SPOILERS_SET, GEAR_SET/UP/DOWN, or one of the
-                 // kKey* variants below
+                 // THROTTLEn_AXIS_SET_EX1, FLAPS_SET, SPOILERS_SET, GEAR_SET/UP/DOWN, one of the
+                 // kKey* variants below, or one event by its number ("#69927", EventMethod)
 };
 
 // KeyEvent variants (ControlMethod::var), for aircraft that ignore FLAPS_SET and SPOILERS_SET but
@@ -46,9 +46,75 @@ struct ControlMethod {
     // stands for the engine number (ENGINE_THROTTLE_#); a name without it is one variable for all
     // engines.
     std::string var;
-    double scale = 1.0;  // InputSet: 0.01 when the event reads in percent but its preset takes 0..1
+    double scale = 1.0;  // InputSet: 0.01 when the event reads in percent but its preset takes 0..1;
+                         // an event by its number: see EventMethod
 
     bool operator==(const ControlMethod& o) const { return kind == o.kind && var == o.var && scale == o.scale; }
+};
+
+// A KeyEvent method with one event by its number ('#' starts its var): the aircraft's own event
+// (kThirdPartyEventFirst and up, numbered as its SDK gives them to external apps) or a sim key
+// event, from the aircraft's SDK (ownGearLever) or seen firing while the pilot moved the control
+// in the setup. Not for the throttle. The var says how it drives the control's value (eventTarget):
+//   "#69927"         a position: sent with round(value * scale) (the PMDG 777's gear lever, 0 UP,
+//   "#70010@-16383"  1 DOWN); after '@', an offset added to that (an axis)
+//   "#66587(29501)"  a toggle, sent with that parameter: each one flips the control (ROTOR_BRAKE
+//                    with a PMDG cockpit click's code)
+//   "#69940(536870912)/#69940(-2147483648)"
+//                    a step each way: the first toward higher values (more flap, spoilers out,
+//                    gear down), the second back (a click on a lever: left and right button)
+//   "#69927+keys"    the gear up by that event's position (0), down by the gear key events
+//                    (GEAR_SET, GEAR_DOWN), each only when the gear isn't already going that way
+//                    and again if it hasn't started after a while (EventStepper): the PMDG 777's
+//                    lever event raises its gear but ignores DOWN, the key events lower it but
+//                    don't raise it, and the event sent with them didn't raise it either
+// For a toggle or steps `scale` is how far one moves the control.
+bool isOwnEvent(const ControlMethod& m);
+constexpr uint32_t kThirdPartyEventFirst = 0x11000;  // THIRD_PARTY_EVENT_ID_MIN (69632)
+struct EventMethod {
+    enum class Mode : uint8_t { Position, Toggle, Steps };
+    Mode mode = Mode::Position;
+    uint32_t id = 0;        // Steps: the one toward higher values
+    int32_t param = 0;      // Toggle, Steps
+    uint32_t lowerId = 0;   // Steps: the one back
+    int32_t lowerParam = 0;
+    double offset = 0.0;    // Position
+    double scale = 1.0;
+    bool withKeys = false;  // Position, the gear: down by the gear key events instead ("+keys")
+};
+bool parseEventMethod(const ControlMethod& m, EventMethod& out);
+ControlMethod eventMethod(const EventMethod& e);
+int32_t eventParam(const EventMethod& e, double value);  // a position's parameter for the control's value
+// The control's value an event method goes by, in a clip's frame (the KeyEvent method's channel):
+// the gear command (0 up, 1 down), the flap handle index, the spoiler handle (0..1). NaN for the
+// throttle.
+double eventTarget(Control c, const Frame& f);
+// For the log: "#69927 (third-party +295)", "GEAR_TOGGLE (65570)", "key event 66587".
+std::string keyEventName(uint32_t id);
+// The aircraft's own gear lever event, for an aircraft whose SDK documents one and which doesn't
+// take the gear key events both ways (the PMDG 777: EVT_GEAR_LEVER, 0 UP, 1 DOWN, with the key
+// events, "#69927+keys"); else a method of kind None.
+// `aircraftKey` is the profile's key (aircraftFamily). The setup tries it when it didn't see the
+// lever's own event fire as the pilot moved it.
+ControlMethod ownGearLever(const std::string& aircraftKey);
+
+// Steps a control toward the clip's value with an EventMethod toggle or steps, as a pilot clicking
+// would (ControlDriver::stepFlaps does the same with FLAPS_INCR/DECR): one event when the
+// aircraft's value is half a step or more off the clip's, the next once the aircraft shows it (or
+// after `waitFrames`), kMinFrames apart at least. `force` skips only the latter: a toggle sent
+// again before the aircraft shows the last one would undo it.
+class EventStepper {
+public:
+    // +1: send the event toward higher values (a toggle: the toggle), -1: the one back, 0: none now.
+    int step(double target, double live, double size, int waitFrames, bool force);
+    static int waitFrames(Control c);  // the gear legs start moving seconds after the lever
+    static constexpr int kMinFrames = 8;
+    static constexpr int kWaitFrames = 60;
+    static constexpr int kGearWaitFrames = 360;
+
+private:
+    double expect_ = NAN;  // where the last step should take the control
+    int since_ = 1 << 20;  // frames since it
 };
 
 enum class ControlState : uint8_t {

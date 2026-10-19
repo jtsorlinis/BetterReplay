@@ -293,6 +293,18 @@ void SimBridge::keyEventThunk(FsEventId id, FsVarParamArray* params, void* ctx) 
 // the lever simvar isn't on every aircraft (on the A320neo V2 under autothrust it's the thrust
 // demand), so they're recorded as the thr_axis_N channels for the key-event throttle method.
 void SimBridge::onKeyEvent(FsEventId id, const FsVarParamArray* params) {
+    // The control setup watches every key event while the pilot moves a control: the aircraft's
+    // own (a cockpit click) show nowhere else. Not while we're sending any ourselves.
+    if (scanKeys_ && !playing_ && !restoreWaiting_ && !driver_.anyActive() && !ControlDriver::sending()) {
+        double v = NAN;
+        if (params && params->size > 0 && params->array) {
+            const FsVarParamVariant& p = params->array[0];
+            if (p.type == FsVarParamTypeInteger) v = static_cast<int32_t>(p.intValue);
+            else if (p.type == FsVarParamTypeDouble) v = p.doubleValue;
+        }
+        if (keysSeen_.size() < kMaxKeysSeen) keysSeen_.push_back({static_cast<uint32_t>(id), v});
+        else ++keysDropped_;
+    }
     // While playback or the control setup drives the throttle, these are our own events.
     if (playing_ || driver_.active(Control::Throttle)) return;
     struct Mapping {
@@ -383,6 +395,10 @@ void SimBridge::dispatch(SIMCONNECT_RECV* p, DWORD size) {
             log::warn("SimConnect exception %s (%lu) from \"%s\", parameter %lu", exceptionName(e->dwException),
                       static_cast<unsigned long>(e->dwException), describe(e->dwSendID),
                       static_cast<unsigned long>(e->dwIndex));
+            if (enumeratePacket_ != 0 && e->dwSendID == enumeratePacket_ && !inputEventsListed_) {
+                log::info("aircraft input events: none (the aircraft has none to list)");
+                finishInputEvents();
+            }
             break;
         }
         case SIMCONNECT_RECV_ID_EVENT: {
@@ -619,6 +635,8 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
         inputEventsLogged_ = 0;
         resetInputEvents(true);
         track(SimConnect_EnumerateInputEvents(h_, REQ_INPUT_EVENTS), "EnumerateInputEvents");
+        DWORD id = 0;
+        enumeratePacket_ = SUCCEEDED(SimConnect_GetLastSentPacketID(h_, &id)) ? id : 0;
     }
 
     requestAirports();
@@ -1033,6 +1051,7 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     restoreWaiting_ = false;  // a new clip started while still settling a restore: playback wins
     restoreDeferred_ = false;
     prepareGearSent_ = false;
+    prepareUnfrozen_ = false;
     snapFramesLeft_ = 0;
     snapCheckFrames_ = 0;
     flapsHold_ = false;
@@ -1251,31 +1270,43 @@ void SimBridge::commandGearDown(const Frame& target) {
 }
 
 // A jump onto the ground with the gear down while the aircraft's gear is up: unless gear
-// positions are known to snap on this aircraft, lower the gear first, here, frozen where the
-// aircraft is. Lowering it after the jump puts the extending gear into the runway, and on the
-// A320neo V2 the gear then stops half way.
+// positions are known to snap on this aircraft, lower the gear first, here, where the aircraft
+// is. Lowering it after the jump puts the extending gear into the runway, and on the A320neo V2
+// the gear then stops half way. In the air it isn't frozen meanwhile (it flies on until the jump):
+// frozen, neither the PMDG 777's gear nor the A380's came down.
 bool SimBridge::prepareJump(const Frame& target) {
     if (!h_ || !playing_) return true;
     const double live = liveGearExtension();
     const bool needed = !snapAccepted_ && target.v[kOnGround] >= 0.5 && gearExtensionOf(target) >= 0.95 &&
                         std::isfinite(live) && live < 0.95;
     const int64_t now = utcNowMs();
+    auto done = [&]() {
+        prepareGearSent_ = false;
+        if (prepareUnfrozen_) sendFreeze(true);
+        prepareUnfrozen_ = false;
+        return true;
+    };
     if (!needed) {
         if (prepareGearSent_) log::info("playback: gear down after %.1f s; going to the clip", (now - prepareStartMs_) / 1000.0);
-        prepareGearSent_ = false;
-        return true;
+        return done();
     }
     if (!prepareGearSent_) {
         prepareGearSent_ = true;
         prepareStartMs_ = now;
-        log::info("playback: lowering the gear before going to the runway (gear at %.2f)", live);
+        if (input_.raw.v[kOnGround] < 0.5) {
+            sendFreeze(false);
+            prepareUnfrozen_ = true;
+        }
+        log::info("playback: lowering the gear before going to the runway (gear at %.2f, %.0f kt IAS%s)", live, liveIas_,
+                  prepareUnfrozen_ ? ", not frozen meanwhile" : "");
         commandGearDown(target);
+    } else if (profileDrives_[static_cast<int>(Control::Gear)]) {
+        driver_.apply(Control::Gear, target, false);  // again if it hasn't started coming down
     }
     if (now - prepareStartMs_ >= kPrepareGearMaxMs) {
-        log::warn("playback: the gear didn't come down within %d s; going to the clip anyway",
-                  static_cast<int>(kPrepareGearMaxMs / 1000));
-        prepareGearSent_ = false;
-        return true;
+        log::warn("playback: the gear didn't come down within %d s (gear at %.2f, %.0f kt IAS); going to the clip anyway",
+                  static_cast<int>(kPrepareGearMaxMs / 1000), live, liveIas_);
+        return done();
     }
     return false;
 }
@@ -1542,12 +1573,17 @@ void SimBridge::onInputEvents(const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS* list
     if (list->dwEntryNumber + 1 >= list->dwOutOf) {
         if (inputEventsLogged_ == 0) log::info("aircraft input events: none for gear, throttle, flaps or spoilers");
         log::info("aircraft input events: %zu numeric in total", inputEvents_.size());
-        inputEventsListed_ = true;
-        matchInputChannels();
-        resolveInputEvents();
-        resolveLVarChannels();
-        logLVars();
+        finishInputEvents();
     }
+}
+
+void SimBridge::finishInputEvents() {
+    enumeratePacket_ = 0;
+    inputEventsListed_ = true;
+    matchInputChannels();
+    resolveInputEvents();
+    resolveLVarChannels();
+    logLVars();
 }
 
 // Each input event channel records the input event its control's profile names (if it chose
@@ -1874,6 +1910,7 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     logOverrides();
     logEngines();
     playing_ = false;
+    prepareGearSent_ = prepareUnfrozen_ = false;  // stopped while lowering the gear: unfrozen below
     playChannelCount_ = 0;
     directChannelCount_ = 0;
     driver_.clearAutothrust();  // the snapshot below isn't the clip
@@ -2035,8 +2072,20 @@ void SimBridge::scanBegin(std::vector<ScanVar>& vars) {
         vars.push_back({name, true});
         scanL_.push_back(id);
     }
-    log::info("setup scan: %zu input event(s), %d of them readable, and %zu L:var(s)", scanB_.size(), readable,
-              scanL_.size());
+    log::info("setup scan: %zu input event(s), %d of them readable, and %zu L:var(s); and the key events", scanB_.size(),
+              readable, scanL_.size());
+    keysSeen_.clear();
+    keysDropped_ = 0;
+    scanKeys_ = true;
+}
+
+void SimBridge::scanKeyEvents(std::vector<SeenKeyEvent>& events) {
+    events.clear();
+    events.swap(keysSeen_);
+    if (keysDropped_ > 0) {
+        log::warn("setup scan: %zu key event(s) in a frame weren't kept", keysDropped_);
+        keysDropped_ = 0;
+    }
 }
 
 void SimBridge::scanRead(std::vector<double>& values) {
@@ -2057,6 +2106,8 @@ void SimBridge::scanRead(std::vector<double>& values) {
 void SimBridge::scanEnd() {
     std::vector<FsBVarId>().swap(scanB_);
     std::vector<FsLVarId>().swap(scanL_);
+    scanKeys_ = false;
+    std::vector<SeenKeyEvent>().swap(keysSeen_);
 }
 
 bool SimBridge::beginControl(Control c, const ControlMethod& m, std::string& why) {

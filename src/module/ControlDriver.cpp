@@ -146,6 +146,28 @@ bool ControlDriver::begin(Control c, const ControlMethod& m, std::string& why) {
             break;
         }
         case MethodKind::KeyEvent:
+            if (isOwnEvent(m)) {
+                if (c == Control::Throttle) {
+                    why = "an event by its number doesn't drive the throttle";
+                    return false;
+                }
+                if (!parseEventMethod(m, s.event)) {
+                    why = "can't read the event " + m.var;
+                    return false;
+                }
+                // The aircraft's own go through SimConnect, mapped by number; sim key events are
+                // triggered directly.
+                const uint32_t ids[2] = {s.event.id, s.event.mode == EventMethod::Mode::Steps ? s.event.lowerId : 0u};
+                for (int i = 0; i < 2; ++i) {
+                    if (ids[i] < kThirdPartyEventFirst) continue;
+                    s.eventClient[i] = ownEventId("#" + std::to_string(ids[i]));
+                    if (s.eventClient[i] == 0) {
+                        why = "can't map the event #" + std::to_string(ids[i]);
+                        return false;
+                    }
+                }
+                break;
+            }
             if (c == Control::Flaps && m.var != kKeyFlapsNotches && (!ctx_.flapPositions || *ctx_.flapPositions < 2)) {
                 why = "FLAPS_SET needs the number of flap positions";
                 return false;
@@ -289,6 +311,8 @@ void ControlDriver::apply(Control c, const Frame& f, bool force) {
     }
 }
 
+bool ControlDriver::sending_ = false;
+
 void ControlDriver::keyEvent(int id, int32_t value) {
     FsVarParamVariant param;
     param.type = FsVarParamTypeInteger;
@@ -296,10 +320,135 @@ void ControlDriver::keyEvent(int id, int32_t value) {
     FsVarParamArray params;
     params.size = 1;
     params.array = &param;
+    sending_ = true;
     fsEventsTriggerKeyEvent(id, params);
+    sending_ = false;
+}
+
+void ControlDriver::sendEvent(Slot& s, int which, int32_t param) {
+    const uint32_t id = which == 0 ? s.event.id : s.event.lowerId;
+    const DWORD client = s.eventClient[which];
+    if (client == 0) {
+        keyEvent(static_cast<int>(id), param);
+        return;
+    }
+    sending_ = true;
+    const HRESULT hr = SimConnect_TransmitClientEvent_EX1(ctx_.h, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, client,
+                                                          SIMCONNECT_GROUP_PRIORITY_HIGHEST,
+                                                          SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY, static_cast<DWORD>(param), 0);
+    sending_ = false;
+    if (FAILED(hr) && s.errors++ < 5) log::warn("controls: sending event #%lu failed", static_cast<unsigned long>(id));
+}
+
+void ControlDriver::applyEvent(Control c, Slot& s, const Frame& f, bool force) {
+    const EventMethod& ev = s.event;
+    // Where the aircraft's control is: the gear's command from its legs (its handle simvar may
+    // lag them, or not be the lever at all), every frame.
+    double now = NAN;
+    if (ctx_.live) {
+        const Frame& live = *ctx_.live;
+        if (c == Control::Gear) {
+            double sum = 0.0;
+            int n = 0;
+            for (const int ch : {kGearCenter, kGearLeft, kGearRight}) {
+                if (!std::isfinite(live.v[ch])) continue;
+                sum += live.v[ch];
+                ++n;
+            }
+            now = s.gearLive.update(n > 0 ? sum / n : NAN);
+        } else {
+            now = live.v[c == Control::Flaps ? kFlapsHandleIndex : kSpoilersHandle];
+        }
+    }
+    const double target = eventTarget(c, f);
+    if (!std::isfinite(target)) return;
+    const char* label = controlSpec(c).label;
+    if (c == Control::Gear && ev.withKeys) {
+        applyOwnGear(s, ev, target, now, force);
+        return;
+    }
+    if (ev.mode == EventMethod::Mode::Position) {
+        const int32_t param = eventParam(ev, target);
+        const double minStep = 0.003 * std::fabs(ev.scale);  // an axis: as AXIS_SPOILER_SET's 48
+        if (!dueOnChange(s, 0, param, force, minStep > 1.0 ? minStep : 1.0)) return;
+        sendEvent(s, 0, param);
+        if (c == Control::Gear) {
+            log::info("controls: gear %s (event %s, parameter %ld)", target > 0.5 ? "down" : "up", s.method.var.c_str(),
+                      static_cast<long>(param));
+        }
+        return;
+    }
+    const int dir = s.stepper.step(target, now, ev.scale, EventStepper::waitFrames(c), force);
+    if (dir == 0) return;
+    const bool back = dir < 0 && ev.mode == EventMethod::Mode::Steps;
+    sendEvent(s, back ? 1 : 0, back ? ev.lowerParam : ev.param);
+    ++s.sends;
+    log::info("controls: %s %s (event %s; at %.3g, the clip %.3g)", label,
+              ev.mode == EventMethod::Mode::Toggle ? "toggled" : (dir > 0 ? "a step up" : "a step down"),
+              s.method.var.c_str(), now, target);
+}
+
+// The PMDG 777's gear ("#69927+keys"). Its lever event raises the gear but ignores DOWN. The key
+// events lowered it after that event had raised it, but after the pilot raised it they only moved
+// the lever half way. Sent together, or just after a needless DOWN, the event didn't raise it. So
+// each way on its own, only when the gear isn't already going that way, and if it hasn't started
+// after a while (EventStepper) the next way of moving the lever: a click on it as the pilot's
+// mouse does (the SDK's mouse flags), "toggle gear", the other button. The log says which it
+// followed.
+void ControlDriver::applyOwnGear(Slot& s, const EventMethod& ev, double target, double now, bool force) {
+    constexpr int32_t kLeftClick = 0x20000000, kLeftRelease = 0x00020000;  // PMDG's MOUSE_FLAG_*
+    constexpr int32_t kRightClick = static_cast<int32_t>(0x80000000u), kRightRelease = 0x00080000;
+    static const char* const kUpWays[] = {"its lever event (UP)", "a left click on the lever", "a right click on the lever"};
+    static const char* const kDownWays[] = {"the gear key events", "a left click on the lever", "toggle gear (GEAR_TOGGLE)",
+                                            "a right click on the lever"};
+    if (s.gearTry > 0 && std::isfinite(now) && std::fabs(now - target) < 0.5) {
+        log::info("controls: the gear is going %s after %s", target > 0.5 ? "down" : "up",
+                  target > 0.5 ? kDownWays[(s.gearTry - 1) % 4] : kUpWays[(s.gearTry - 1) % 3]);
+        s.gearTry = 0;
+    }
+    const int dir = s.stepper.step(target, now, 1.0, EventStepper::waitFrames(Control::Gear), force);
+    if (dir == 0) return;
+    if (dir != s.gearDir) s.gearTry = 0;  // the other way: from its first way again
+    s.gearDir = dir;
+    const int way = s.gearTry++ % (dir > 0 ? 4 : 3);
+    ++s.sends;
+    auto click = [&](int32_t press, int32_t release) {
+        sendEvent(s, 0, press);
+        sendEvent(s, 0, release);
+    };
+    if (dir < 0) {
+        if (way == 0) sendEvent(s, 0, eventParam(ev, 0.0));
+        else if (way == 1) click(kLeftClick, kLeftRelease);
+        else click(kRightClick, kRightRelease);
+    } else if (way == 0) {
+        keyEvent(KEY_GEAR_SET, 1);
+        keyEvent(KEY_GEAR_DOWN, 0);
+    } else if (way == 1) {
+        click(kLeftClick, kLeftRelease);
+    } else if (way == 2) {
+        keyEvent(KEY_GEAR_TOGGLE, 0);
+    } else {
+        click(kRightClick, kRightRelease);
+    }
+    log::info("controls: gear %s (%s, event %s; the gear %s)", dir > 0 ? "down" : "up",
+              dir > 0 ? kDownWays[way] : kUpWays[way], s.method.var.c_str(), now > 0.5 ? "down" : "up");
+}
+
+DWORD ControlDriver::ownEventId(const std::string& name) {
+    for (size_t i = 0; i < ownEvents_.size(); ++i) {
+        if (ownEvents_[i] == name) return kOwnEventFirst + static_cast<DWORD>(i);
+    }
+    const DWORD id = kOwnEventFirst + static_cast<DWORD>(ownEvents_.size());
+    if (FAILED(SimConnect_MapClientEventToSimEvent(ctx_.h, id, name.c_str()))) return 0;
+    ownEvents_.push_back(name);
+    return id;
 }
 
 void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force) {
+    if (isOwnEvent(s.method)) {
+        applyEvent(c, s, f, force);
+        return;
+    }
     switch (c) {
         case Control::Throttle: {
             // Reverse thrust as the setup found this aircraft takes it. "Hold": THROTTLE_DECR every
@@ -538,19 +687,33 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
 }
 
 // Like a hardware flap switch: one notch toward the clip's handle index, the next once the
-// aircraft's handle shows the last one (or after a second, if it doesn't report it).
+// aircraft's handle shows the last one (or after kNotchWaitFrames, if it doesn't report it).
 void ControlDriver::stepFlaps(Slot& s, double target, bool force) {
     const double live = ctx_.live ? ctx_.live->v[kFlapsHandleIndex] : NAN;
     if (!std::isfinite(live)) return;
     ++s.since[0];
-    if (std::fabs(live - target) < 0.5) return;
-    const bool arrived = !std::isfinite(s.sent[0]) || std::fabs(live - s.sent[0]) < 0.5;
-    if (!force && (s.since[0] < kNotchFrames || (!arrived && s.since[0] < kNotchWaitFrames))) return;
-    const bool extend = target > live;
+    // Where the notches sent put the lever (sent[0]), which the handle may show seconds later (the
+    // PMDG 777's: a notch sent before it did ran the flaps past the clip's). Only once the handle
+    // has held still for kNotchWaitFrames since the last notch (one didn't take) does it go by the
+    // handle again. sent[1]: the handle when it last moved, since[1] frames since then.
+    if (!std::isfinite(s.sent[1]) || std::fabs(live - s.sent[1]) >= 0.5) {
+        s.sent[1] = std::round(live);
+        s.since[1] = 0;
+    } else {
+        ++s.since[1];
+    }
+    if (!std::isfinite(s.sent[0]) || (s.since[0] >= kNotchWaitFrames && s.since[1] >= kNotchWaitFrames)) {
+        s.sent[0] = std::round(live);
+    }
+    if (std::fabs(s.sent[0] - target) < 0.5) return;
+    if (!force && s.since[0] < kNotchFrames) return;
+    const bool extend = target > s.sent[0];
     keyEvent(extend ? KEY_FLAPS_INCR : KEY_FLAPS_DECR, 0);
-    s.sent[0] = std::round(live) + (extend ? 1.0 : -1.0);
+    s.sent[0] += extend ? 1.0 : -1.0;
     s.since[0] = 0;
     ++s.sends;
+    log::info("controls: flaps a notch %s (FLAPS_%s; the handle at %.0f, the lever to %.0f, the clip %.0f)",
+              extend ? "down" : "up", extend ? "INCR" : "DECR", live, s.sent[0], target);
 }
 
 void ControlDriver::restoreLVars(Control c) {
@@ -598,6 +761,13 @@ void ControlDriver::end(Control c) {
 
 void ControlDriver::endAll() {
     for (int i = 0; i < kControlCount; ++i) end(controlAt(i));
+}
+
+bool ControlDriver::anyActive() const {
+    for (const Slot& s : slots_) {
+        if (s.active) return true;
+    }
+    return false;
 }
 
 bool ControlDriver::wantsThrottleMask() const {

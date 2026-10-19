@@ -3,11 +3,12 @@
 //
 // For each control the pilot moves it once (spoilers, flaps and throttle on the runway with the
 // engines running; the gear after takeoff). Meanwhile every input event and L:var the aircraft
-// has is watched, to find the ones that moved with the control whatever they're called. Then the
-// movement is replayed with each candidate method, through the same code playback uses
-// (IControlSim), and checked: did the spoilers / flaps / gear / engines do what they did when the
-// pilot moved them? A method that passes is put to the pilot ("did the engines spool up and back
-// down?"); a "no" tries the next. The result is the aircraft's ControlProfile.
+// has is watched, to find the ones that moved with the control whatever they're called, and so is
+// every key event that fires (a cockpit click, a binding: the aircraft's own events, which no
+// variable shows). Then the movement is replayed with each candidate method, through the same
+// code playback uses (IControlSim), and checked: did the spoilers / flaps / gear / engines do what
+// they did when the pilot moved them? A method that passes is put to the pilot ("did the engines
+// spool up and back down?"); a "no" tries the next. The result is the aircraft's ControlProfile.
 //
 // The throttle's lever simvar isn't the lever on every aircraft (on the A320neo V2 it's the
 // autothrust's thrust demand). So the pilot's throttle movement holds the lever at about halfway
@@ -51,6 +52,13 @@ struct ScanVar {
     bool lvar = false;  // false: input event
 };
 
+// A key event the sim saw while the pilot moved a control: a cockpit click or one of the pilot's
+// bindings (a sim key event, or from kThirdPartyEventFirst an aircraft's own).
+struct SeenKeyEvent {
+    uint32_t id = 0;
+    double value = NAN;  // its first parameter (a signed integer), NaN without one
+};
+
 // What the setup needs from the sim (the module implements it).
 class IControlSim {
 public:
@@ -60,6 +68,9 @@ public:
     virtual void scanBegin(std::vector<ScanVar>& vars) = 0;
     virtual void scanRead(std::vector<double>& values) = 0;
     virtual void scanEnd() = 0;
+    // The key events the sim saw since scanBegin or the last call, oldest first, without those
+    // BetterReplay sent itself (the setup's replays, playback).
+    virtual void scanKeyEvents(std::vector<SeenKeyEvent>& events) = 0;
     // Drives a control with a method, from a frame's channels (methodSourceChannel): the same
     // code playback uses for an aircraft's profile. `force` resends unchanged values.
     virtual bool beginControl(Control c, const ControlMethod& m, std::string& why) = 0;
@@ -132,6 +143,12 @@ public:
         int values = 0;      // distinct values it took (a lever passes through many; an index jumps)
     };
     Holds holds(size_t index, double from, double to, double holdSec, double stillFraction) const;
+    // How long variable `index` took, between from and to, from leaving where it was to (nearly)
+    // as far as it went: a lever moves in a moment, what follows the control (the gear legs'
+    // animations) as long as the control does. referenceTravelSec: the same for the outcome
+    // reference. NaN if it didn't move.
+    double travelSec(size_t index, double from, double to) const;
+    double referenceTravelSec(double from, double to) const;
 
     const ScanVar& var(size_t index) const { return vars_[index]; }
     size_t size() const { return vars_.size(); }
@@ -154,6 +171,46 @@ private:
     std::vector<double> refOutcome_;
     std::unordered_map<std::string, size_t> byName_;
     size_t stored_ = 0;
+};
+
+// The key events the sim saw while the pilot moved a control, by event. Firings before the
+// movement's window are only counted: an event that fired kSteadyBefore times there fires steadily
+// (noise, like a variable that changed there), and from then on its firings aren't kept either, so
+// an aircraft that keeps firing its own events can't crowd out the lever's. The rest are kept with
+// their time and parameter.
+class KeyEventTracker {
+public:
+    static constexpr size_t kMaxStored = 6000;
+    static constexpr size_t kSteadyBefore = 2;
+    static constexpr size_t kValues = 4;  // parameter values listed for the log
+
+    struct Firing {
+        double t;
+        double value;
+    };
+    struct Event {
+        uint32_t id = 0;
+        size_t count = 0;   // every firing seen
+        size_t before = 0;  // dropped by dropBefore
+        std::vector<Firing> firings;
+        bool steady() const { return before >= kSteadyBefore; }
+        // Every firing's parameter, for the log: the first kValues values with their counts, and
+        // the range (`many`: more values than that).
+        std::vector<std::pair<double, size_t>> values;
+        bool many = false;
+        double lo = INFINITY, hi = -INFINITY;
+    };
+    void clear();
+    void add(double t, uint32_t id, double value);
+    void dropBefore(double t);
+    const std::vector<Event>& events() const { return events_; }
+    size_t stored() const { return stored_; }
+    size_t lost() const { return lost_; }  // firings not kept for want of room
+
+private:
+    std::vector<Event> events_;
+    size_t stored_ = 0;
+    size_t lost_ = 0;
 };
 
 // Whether a clip carries what a profile's method needs: the channel it reads, recorded from
@@ -241,11 +298,21 @@ private:
     void parkThrottle();  // the sweep's throttle back to idle, reverser stowed
     std::string leverPattern(const std::string& name) const;
     double buildMethods();  // returns when the variables they use first changed
+    void logKeyEvents() const;  // what fired while the pilot moved the control
+    // KeyEvent methods with the events that fired with the movement; `first` gets the earliest
+    // firing they replay.
+    std::vector<ControlMethod> learnEvents(double& first);
+    std::vector<double> eventSeries() const;  // eventTarget over capture_ (the gear from its legs)
     std::string enginePattern(const std::string& name, bool lvar) const;
     void startMethod(size_t i);
     void replayFrame(double dt, const Frame& live);
     void holdFrame(const Frame& live);
     void track(const Frame& live);
+    double restTol() const;  // how near where the pilot started the control counts as there
+    bool atRest(const Frame& live) const;
+    // The gear's replay, for the log: each command (0 up, 1 down) and where the gear went until the next.
+    void noteGearCommand(double command, const Frame& live);
+    void logGearCommand() const;
     bool rolling(const Frame& live) const;
     void evaluate(const Frame& live);
     void nextMethod();
@@ -283,6 +350,8 @@ private:
     CandidateTracker tracker_;
     std::vector<ScanVar> scanVars_;
     std::vector<double> scanValues_;
+    KeyEventTracker keys_;
+    std::vector<SeenKeyEvent> keysSeen_;
     double handleRest_ = NAN;
     double outcomeRest_ = NAN;
     double handlePeak_ = 0.0;
@@ -312,6 +381,12 @@ private:
 
     // replay
     Clip mini_;  // the pilot's movement, t from 0
+    std::vector<double> keyColumn_;  // its KeyEvent channel as built (a learned position overwrites it)
+    struct LearnedEvent {
+        ControlMethod method;
+        std::vector<KeyEventTracker::Firing> firings;  // a position's: what its replay sends, and when
+    };
+    std::vector<LearnedEvent> learned_;
     std::vector<ControlMethod> methods_;
     size_t method_ = 0;
     std::vector<std::string> attempts_;  // how each method before method_ ended (statusJson)
@@ -323,6 +398,9 @@ private:
     double replayAnchor_ = NAN;
     double replayStable_ = 0.0;
     bool stoppedEarly_ = false;
+    bool started_ = false;   // the control was back where the pilot started it (or the wait ran out)
+    bool seenRest_ = false;  // it has been there during this replay: movement counts from then on
+    double gearCommand_ = NAN, gearCommandAt_ = 0.0, gearFrom_ = NAN, gearTo_ = NAN;
 
     // the throttle lever (aircraft whose lever simvar isn't the lever)
     AircraftProfile before_;  // the profile when the run started: a skipped step keeps its result

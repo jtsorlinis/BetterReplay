@@ -4,7 +4,7 @@ Work through these in order. Each step says what to do, what you should see, and
 
 The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\Microsoft Flight Simulator 2024\WASM\MSFS2024\betterreplay-recorder\work\`. The previous sim session's log is `betterreplay.prev.log`. So after a test you can send that file, or have it read from there, instead of copying lines from the console.
 
-**If anything differs, note the step and copy the surrounding console lines.** Most of the unknowns flagged in the README show up here as a specific warning.
+**If anything differs, note the step and copy the surrounding console lines.** Most of the unknowns in [Known gaps](DEVELOPMENT.md#known-gaps) show up here as a specific warning.
 
 ## 0. Setup
 
@@ -164,7 +164,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
   - If you see `could not turn … freeze on`, playback will fight the sim.
 - [ ] The aircraft jumps to the clip start and flies the recorded path smoothly. Note any jitter, drift or stutter.
 - [ ] The log has `playback: position, attitude and velocities set directly every frame (N of 60 frames off)` with N near 0, and `playback: the rotation rates follow the clip (written x0.305)` a few seconds in.
-- [ ] The engine sound stays steady at speed, in the cabin near the engines too: no flutter, and no squeaks when the sim stutters for a frame. If you hear one, note roughly when in the clip, and replay it with the trace on (`kPlaybackTrace`): its `wall_dt_ms` and `step_ms` columns show the frame times and the step the replay took for each. On the A350, small pitch jitters in the fan's whine on FLX takeoffs from about 80 kt are a known open issue (see *A350 engine whine in replays* in the README's Known gaps).
+- [ ] The engine sound stays steady at speed, in the cabin near the engines too: no flutter, and no squeaks when the sim stutters for a frame. If you hear one, note roughly when in the clip, and replay it with the trace on (`kPlaybackTrace`): its `wall_dt_ms` and `step_ms` columns show the frame times and the step the replay took for each. On the A350, small pitch jitters in the fan's whine on FLX takeoffs from about 80 kt are a known open issue (see *A350 engine whine in replays* in [Known gaps](DEVELOPMENT.md#known-gaps)).
 - [ ] The panel switches to the player: the clip's name, a large seek bar with the amber touchdown mark at 2:00, round play/pause and stop buttons, and the speeds.
 - [ ] The PFD airspeed and vertical speed follow the clip (body velocities are written every frame), not the speed you had before pressing Play.
 - [ ] **Throttle** (clips recorded with throttle support): the thrust levers follow the clip.

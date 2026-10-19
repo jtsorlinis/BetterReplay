@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "Json.h"
@@ -110,6 +113,169 @@ std::string engineVar(const std::string& pattern, int engine) {
     return out;
 }
 
+bool isOwnEvent(const ControlMethod& m) { return m.kind == MethodKind::KeyEvent && !m.var.empty() && m.var[0] == '#'; }
+
+namespace {
+
+// Gear lever events from aircraft SDKs, by the aircraft's profile key (any variant).
+struct OwnGearLever {
+    const char* key;
+    const char* event;  // THIRD_PARTY_EVENT_ID_MIN (69632) + the SDK's offset
+    double down;        // the lever's DOWN position (UP is 0)
+};
+const OwnGearLever kOwnGearLevers[] = {
+    // PMDG_777X_SDK.h: EVT_GEAR_LEVER, + 295. In the sim it raised the gear (0) but didn't lower it
+    // (1); GEAR_SET/GEAR_DOWN lowered it, GEAR_UP didn't raise it; sent together it didn't raise it.
+    {"simobjects/airplanes/pmdg 777", "#69927+keys", 1.0},
+};
+
+}  // namespace
+
+ControlMethod ownGearLever(const std::string& aircraftKey) {
+    for (const OwnGearLever& g : kOwnGearLevers) {
+        if (aircraftKey.compare(0, std::strlen(g.key), g.key) == 0) return {MethodKind::KeyEvent, g.event, g.down};
+    }
+    return ControlMethod();
+}
+
+namespace {
+
+const char* const kWithKeys = "+keys";  // the gear: up by the event, down by the gear key events
+
+// "#<id>" at s[i], then "(<param>)" when `withParam`; advances i.
+bool readEvent(const std::string& s, size_t& i, bool withParam, uint32_t& id, int32_t& param) {
+    if (i >= s.size() || s[i] != '#') return false;
+    const char* begin = s.c_str() + i + 1;
+    char* end = nullptr;
+    const unsigned long long n = std::strtoull(begin, &end, 10);
+    if (end == begin || n == 0 || n > 0xFFFFFFFFull) return false;
+    id = static_cast<uint32_t>(n);
+    i = static_cast<size_t>(end - s.c_str());
+    if (!withParam) return true;
+    if (i >= s.size() || s[i] != '(') return false;
+    begin = s.c_str() + i + 1;
+    const long long p = std::strtoll(begin, &end, 10);
+    if (end == begin || *end != ')' || p < INT32_MIN || p > INT32_MAX) return false;
+    param = static_cast<int32_t>(p);
+    i = static_cast<size_t>(end - s.c_str()) + 1;
+    return true;
+}
+
+}  // namespace
+
+bool parseEventMethod(const ControlMethod& m, EventMethod& out) {
+    if (!isOwnEvent(m)) return false;
+    EventMethod e;
+    e.scale = m.scale;
+    const std::string& s = m.var;
+    size_t i = 0;
+    const bool withParam = s.find('(') != std::string::npos;
+    if (!readEvent(s, i, withParam, e.id, e.param)) return false;
+    if (!withParam) {
+        e.mode = EventMethod::Mode::Position;
+        if (i < s.size() && s[i] == '@') {
+            const char* begin = s.c_str() + i + 1;
+            char* end = nullptr;
+            e.offset = std::strtod(begin, &end);
+            if (end == begin || !std::isfinite(e.offset)) return false;
+            i = static_cast<size_t>(end - s.c_str());
+        }
+        if (s.compare(i, std::string::npos, kWithKeys) == 0) {
+            e.withKeys = true;
+            i = s.size();
+        }
+    } else if (i == s.size()) {
+        e.mode = EventMethod::Mode::Toggle;
+    } else {
+        e.mode = EventMethod::Mode::Steps;
+        if (s[i++] != '/' || !readEvent(s, i, true, e.lowerId, e.lowerParam)) return false;
+    }
+    if (i != s.size() || !std::isfinite(e.scale)) return false;
+    out = e;
+    return true;
+}
+
+ControlMethod eventMethod(const EventMethod& e) {
+    auto event = [](uint32_t id, int32_t param, bool withParam) {
+        std::string s = "#" + std::to_string(id);
+        if (withParam) s += "(" + std::to_string(param) + ")";
+        return s;
+    };
+    ControlMethod m{MethodKind::KeyEvent, std::string(), e.scale};
+    switch (e.mode) {
+        case EventMethod::Mode::Position: {
+            m.var = event(e.id, 0, false);
+            if (e.offset != 0.0) {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "@%.10g", e.offset);
+                m.var += buf;
+            }
+            if (e.withKeys) m.var += kWithKeys;
+            break;
+        }
+        case EventMethod::Mode::Toggle: m.var = event(e.id, e.param, true); break;
+        case EventMethod::Mode::Steps: m.var = event(e.id, e.param, true) + "/" + event(e.lowerId, e.lowerParam, true); break;
+    }
+    return m;
+}
+
+int32_t eventParam(const EventMethod& e, double value) {
+    const double p = std::round(e.offset + value * e.scale);
+    if (!(p > static_cast<double>(INT32_MIN))) return INT32_MIN;
+    if (!(p < static_cast<double>(INT32_MAX))) return INT32_MAX;
+    return static_cast<int32_t>(p);
+}
+
+double eventTarget(Control c, const Frame& f) {
+    switch (c) {
+        case Control::Spoilers: return f.v[kSpoilersHandle];
+        case Control::Flaps: return std::isfinite(f.v[kFlapsHandleIndex]) ? std::round(f.v[kFlapsHandleIndex]) : NAN;
+        case Control::Gear: return std::isfinite(f.v[kGearHandle]) ? (f.v[kGearHandle] >= 0.5 ? 1.0 : 0.0) : NAN;
+        case Control::Throttle: break;
+    }
+    return NAN;
+}
+
+std::string keyEventName(uint32_t id) {
+    if (id >= kThirdPartyEventFirst) {
+        return "#" + std::to_string(id) + " (third-party +" + std::to_string(id - kThirdPartyEventFirst) + ")";
+    }
+    // KEY_ID_MIN (0x10000) + n, from MSFS_EventsEnum.h: what the controls' own bindings send, and
+    // what's often seen alongside.
+    static const struct {
+        uint32_t n;
+        const char* name;
+    } kNames[] = {
+        {34, "GEAR_TOGGLE"},         {52, "BRAKES"},          {53, "SPOILERS_TOGGLE"},  {59, "FLAPS_UP"},
+        {67, "FLAPS_DOWN"},          {162, "FLAPS_SET"},      {164, "GEAR_SET"},        {216, "PARKING_BRAKES"},
+        {222, "FLAPS_INCR"},         {223, "FLAPS_DECR"},     {226, "AXIS_ELEVATOR_SET"}, {227, "AXIS_AILERONS_SET"},
+        {228, "AXIS_RUDDER_SET"},    {229, "AXIS_THROTTLE_SET"}, {230, "AXIS_ELEV_TRIM_SET"}, {250, "SPOILERS_SET"},
+        {316, "GEAR_PUMP"},          {317, "SPOILERS_ARM_TOGGLE"}, {528, "SPOILERS_ON"},  {529, "SPOILERS_OFF"},
+        {530, "SPOILERS_ARM_ON"},    {531, "SPOILERS_ARM_OFF"}, {532, "SPOILERS_ARM_SET"}, {543, "GEAR_UP"},
+        {544, "GEAR_DOWN"},          {846, "AXIS_SPOILER_SET"}, {851, "AXIS_LEFT_BRAKE_SET"}, {852, "AXIS_RIGHT_BRAKE_SET"},
+        {998, "AXIS_FLAPS_SET"},     {1051, "ROTOR_BRAKE"},   {1560, "THROTTLE_AXIS_SET_EX1"},
+    };
+    for (const auto& k : kNames) {
+        if (id == 0x10000 + k.n) return std::string(k.name) + " (" + std::to_string(id) + ")";
+    }
+    return "key event " + std::to_string(id);
+}
+
+int EventStepper::waitFrames(Control c) { return c == Control::Gear ? kGearWaitFrames : kWaitFrames; }
+
+int EventStepper::step(double target, double live, double size, int waitFrames, bool force) {
+    if (since_ < (1 << 20)) ++since_;
+    if (!std::isfinite(target) || !std::isfinite(live) || !(size > 0.0)) return 0;
+    const double half = 0.5 * size;
+    if (std::fabs(live - target) < half) return 0;
+    const bool arrived = std::isnan(expect_) || std::fabs(live - expect_) < half;
+    if ((!force && since_ < kMinFrames) || (!arrived && since_ < waitFrames)) return 0;
+    const int dir = target > live ? 1 : -1;
+    expect_ = live + dir * size;
+    since_ = 0;
+    return dir;
+}
+
 std::string describeMethod(Control c, const ControlMethod& m) {
     switch (m.kind) {
         case MethodKind::None: return "nothing";
@@ -119,6 +285,24 @@ std::string describeMethod(Control c, const ControlMethod& m) {
         case MethodKind::LVar: return "L:var " + m.var;
         case MethodKind::SimVar: return "simvars";
         case MethodKind::KeyEvent:
+            if (isOwnEvent(m)) {
+                EventMethod e;
+                if (!parseEventMethod(m, e)) return "event " + m.var;
+                auto name = [](uint32_t id) {
+                    return id >= kThirdPartyEventFirst ? "the aircraft's own event #" + std::to_string(id)
+                                                       : "key event #" + std::to_string(id);
+                };
+                switch (e.mode) {
+                    case EventMethod::Mode::Position:
+                        if (e.withKeys) return name(e.id) + " up, the gear key events down";
+                        return name(e.id) + (e.offset != 0.0 ? " (from " + m.var + ")" : "");
+                    case EventMethod::Mode::Toggle: return name(e.id) + " (" + std::to_string(e.param) + ") as a toggle";
+                    case EventMethod::Mode::Steps:
+                        return name(e.id) + " (" + std::to_string(e.param) + ") and " +
+                               (e.lowerId == e.id ? "(" : name(e.lowerId) + " (") + std::to_string(e.lowerParam) +
+                               "), a step at a time";
+                }
+            }
             if (m.var == kKeyFlapsNotches) return "key events FLAPS_INCR/FLAPS_DECR";
             if (!m.var.empty()) return "key event " + m.var;
             switch (c) {

@@ -5,6 +5,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 
 #include "Interp.h"
 #include "Json.h"
@@ -28,6 +29,26 @@ constexpr double kPassPeak = 0.6;    // a replay must move the control at least 
 constexpr double kPassReturn = 0.15; // and bring it back to within 15% of that
 constexpr double kMaxRollKt = 3.0;   // the throttle replay stops if the aircraft starts to roll
 constexpr double kTaskStillSec = 0.75;  // a control held this long has finished that instruction
+// The gear: a variable that took this long to travel, or this share of the time the legs took
+// (where they took that long), follows them (a leg's animation, not the lever).
+constexpr double kLegFollowShare = 0.7;
+constexpr double kLegTravelMinSec = 2.0;
+// Before each replay the control goes back to where the pilot's movement started it (the last
+// method may have left it elsewhere: the PMDG 777's lever event raised the gear but didn't lower
+// it), for up to this long; only movement from there counts.
+constexpr double kRestWaitSec = 30.0;
+// Key events seen while the pilot moved the control (those that fired steadily before it are
+// noise: KeyEventTracker::kSteadyBefore). A position's value is where the control was
+// kKeySettleSec after it fired (or when it fired again); a click's effect is the control's first
+// move within kKeyFollowSec. A toggle or a step that fired more often than kKeyMaxSteps isn't one,
+// and a position's parameter must follow the control's value (|correlation| kKeyPositionFit). At
+// most kMaxLearned of them are tried.
+constexpr double kKeySettleSec = 5.0;
+constexpr double kKeyFollowSec = 5.0;
+constexpr size_t kKeyMaxSteps = 16;
+constexpr double kKeyPositionFit = 0.9;
+constexpr size_t kMaxLearned = 2;
+constexpr size_t kKeyLogKinds = 12;  // the log lists the most frequent ones
 
 // The throttle lever. A lever-like variable (one that took this many values while the pilot
 // moved the throttle) holding within 0.5% of its range for 2 s is the pilot's hand being still;
@@ -227,6 +248,58 @@ const char* stateLabel(ControlState s) {
 }
 
 bool isDigit(char ch) { return ch >= '0' && ch <= '9'; }
+
+// What the control's own KeyEvent methods send already (KEY_ID_MIN + n): seen fire, they aren't
+// learned again.
+bool sentByKeyMethod(Control c, uint32_t id) {
+    static const uint32_t kSpoilers[] = {250, 846};           // SPOILERS_SET, AXIS_SPOILER_SET
+    static const uint32_t kFlaps[] = {162, 222, 223, 998};    // FLAPS_SET, FLAPS_INCR, FLAPS_DECR, AXIS_FLAPS_SET
+    static const uint32_t kGear[] = {164, 543, 544};          // GEAR_SET, GEAR_UP, GEAR_DOWN
+    auto in = [id](const uint32_t* first, const uint32_t* last) {
+        return std::find(first, last, id >= 0x10000 ? id - 0x10000 : 0xFFFFFFFFu) != last;
+    };
+    switch (c) {
+        case Control::Spoilers: return in(std::begin(kSpoilers), std::end(kSpoilers));
+        case Control::Flaps: return in(std::begin(kFlaps), std::end(kFlaps));
+        case Control::Gear: return in(std::begin(kGear), std::end(kGear));
+        case Control::Throttle: return true;
+    }
+    return false;
+}
+
+const char* eventValueName(Control c) {
+    switch (c) {
+        case Control::Spoilers: return "spoiler handle";
+        case Control::Flaps: return "flap handle index";
+        case Control::Gear: return "gear command";
+        case Control::Throttle: return "throttle";
+    }
+    return "";
+}
+
+// CandidateTracker::travelSec over samples k0..k1: from the first sample 5% of the way to the
+// furthest point to the first within 10% of it.
+template <typename At>
+double travelOf(const std::vector<double>& times, long k0, long k1, At at) {
+    if (k1 < k0 + 2) return NAN;
+    const double base = at(k0);
+    if (!std::isfinite(base)) return NAN;
+    double extreme = base;
+    for (long s = k0; s <= k1; ++s) {
+        const double x = at(s);
+        if (std::isfinite(x) && std::fabs(x - base) > std::fabs(extreme - base)) extreme = x;
+    }
+    const double span = std::fabs(extreme - base);
+    if (!(span > 1e-9)) return NAN;
+    double left = NAN;
+    for (long s = k0; s <= k1; ++s) {
+        const double x = at(s);
+        if (!std::isfinite(x)) continue;
+        if (std::isnan(left) && std::fabs(x - base) > 0.05 * span) left = times[static_cast<size_t>(s)];
+        if (std::isfinite(left) && std::fabs(x - extreme) <= 0.1 * span) return times[static_cast<size_t>(s)] - left;
+    }
+    return NAN;
+}
 
 }  // namespace
 
@@ -442,6 +515,20 @@ CandidateTracker::Holds CandidateTracker::holds(size_t index, double from, doubl
     return out;
 }
 
+double CandidateTracker::travelSec(size_t index, double from, double to) const {
+    if (!changed(index)) return NAN;
+    const Track& tr = tracks_[index];
+    const long k0 = static_cast<long>(std::lower_bound(times_.begin(), times_.end(), from) - times_.begin());
+    const long k1 = static_cast<long>(std::upper_bound(times_.begin(), times_.end(), to) - times_.begin()) - 1;
+    return travelOf(times_, k0, k1, [&](long s) { return sampleValue(tr, static_cast<size_t>(s)); });
+}
+
+double CandidateTracker::referenceTravelSec(double from, double to) const {
+    const long k0 = static_cast<long>(std::lower_bound(times_.begin(), times_.end(), from) - times_.begin());
+    const long k1 = static_cast<long>(std::upper_bound(times_.begin(), times_.end(), to) - times_.begin()) - 1;
+    return travelOf(times_, k0, k1, [&](long s) { return refOutcome_[static_cast<size_t>(s)]; });
+}
+
 std::vector<CandidateTracker::Found> CandidateTracker::find(double from, double to, bool lvars, bool byOutcome,
                                                             const char* const* words, size_t max) const {
     std::vector<Found> out;
@@ -496,6 +583,53 @@ std::vector<CandidateTracker::Found> CandidateTracker::find(double from, double 
     std::sort(out.begin(), out.end(), [](const Found& a, const Found& b) { return a.score > b.score; });
     if (out.size() > max) out.resize(max);
     return out;
+}
+
+// ---------------------------------------------------------------------------- key events
+
+void KeyEventTracker::clear() {
+    std::vector<Event>().swap(events_);
+    stored_ = 0;
+    lost_ = 0;
+}
+
+void KeyEventTracker::add(double t, uint32_t id, double value) {
+    Event* e = nullptr;
+    for (Event& x : events_) {
+        if (x.id == id) e = &x;
+    }
+    if (!e) {
+        events_.emplace_back();
+        e = &events_.back();
+        e->id = id;
+    }
+    ++e->count;
+    if (std::isfinite(value)) {
+        e->lo = std::min(e->lo, value);
+        e->hi = std::max(e->hi, value);
+        auto it = std::find_if(e->values.begin(), e->values.end(), [value](const std::pair<double, size_t>& v) { return v.first == value; });
+        if (it != e->values.end()) ++it->second;
+        else if (e->values.size() < kValues) e->values.push_back({value, 1});
+        else e->many = true;
+    }
+    if (e->steady()) return;
+    if (stored_ >= kMaxStored) {
+        ++lost_;
+        return;
+    }
+    e->firings.push_back({t, value});
+    ++stored_;
+}
+
+void KeyEventTracker::dropBefore(double t) {
+    for (Event& e : events_) {
+        size_t n = 0;
+        while (n < e.firings.size() && e.firings[n].t < t) ++n;
+        if (n == 0) continue;
+        e.firings.erase(e.firings.begin(), e.firings.begin() + static_cast<std::ptrdiff_t>(n));
+        e.before += n;
+        stored_ -= n;
+    }
 }
 
 // ---------------------------------------------------------------------------- clip check
@@ -773,10 +907,11 @@ void SetupFlow::beginUser() {
     scanning_ = true;
     size_t lvars = 0;
     for (const ScanVar& v : vars) lvars += v.lvar ? 1 : 0;
-    logf(0, "control setup: watching %zu input event(s) and %zu L:var(s) while you move the %s", vars.size() - lvars,
-         lvars, controlSpec(control()).label);
+    logf(0, "control setup: watching %zu input event(s), %zu L:var(s) and the key events while you move the %s",
+         vars.size() - lvars, lvars, controlSpec(control()).label);
     tracker_.begin(std::move(vars));
     scanValues_.assign(tracker_.size(), NAN);
+    keys_.clear();
 }
 
 void SetupFlow::userFrame(double dt, const Frame& live) {
@@ -802,11 +937,16 @@ void SetupFlow::userFrame(double dt, const Frame& live) {
         }
     }
     scanFrame(h, o);
+    // Every frame, at the setup's time: a cockpit click is a single event.
+    sim_->scanKeyEvents(keysSeen_);
+    for (const SeenKeyEvent& k : keysSeen_) keys_.add(t_, k.id, k.value);
+    if (!moved_) keys_.dropBefore(t_ - kSearchLeadSec - 1.0);
 
     if (!moved_ && (dh > tu.handleStart || dout > tu.outcomeStart)) {
         moved_ = true;
         movedAt_ = t_;
         tracker_.dropChangedBefore(t_ - kSearchLeadSec);
+        keys_.dropBefore(t_ - kSearchLeadSec);
         logf(0, "control setup: the %s started moving (%.3g -> %.3g, outcome %.3g -> %.3g); %zu variable(s) changing",
              controlSpec(control()).label, handleRest_, h, outcomeRest_, o, tracker_.stored());
     }
@@ -860,6 +1000,7 @@ void SetupFlow::userFrame(double dt, const Frame& live) {
     if (phaseT_ > tu.waitMaxSec) {
         endScan();
         tracker_.clear();
+        keys_.clear();
         capture_.clear();
         phase_ = Phase::Retry;
         phaseT_ = 0.0;
@@ -927,8 +1068,9 @@ void SetupFlow::analyze() {
     attempts_.clear();
     note_.clear();  // a note about the previous step has been seen by now
     // The replay starts just before whatever changed first: the control's simvar, or one of the
-    // variables the methods use.
+    // variables (or key events) the methods use.
     windowFrom_ = std::max(0.0, movedAt_ - kSearchLeadSec);
+    logKeyEvents();
     const double firstChange = buildMethods();
     if (c == Control::Throttle) leverVerdict_ = checkLever();
     windowFrom_ = std::max(0.0, std::min(movedAt_, firstChange) - kLeadInSec);
@@ -941,6 +1083,11 @@ void SetupFlow::analyze() {
     }
     std::vector<Frame>().swap(capture_);
     if (c == Control::Gear) deriveGearCommand(mini_);
+    keyColumn_.clear();
+    if (c != Control::Throttle) {
+        const int ch = methodSourceChannel(c, MethodKind::KeyEvent, 0);
+        for (const Frame& f : mini_.frames) keyColumn_.push_back(f.v[ch]);
+    }
     judgeOutcome_ = outcomePeak_ >= tu.outcomeNeed;
     userPeak_ = judgeOutcome_ ? outcomePeak_ : handlePeak_;
     logf(0, "control setup: you moved the %s over %.1f s (handle moved %.3g, outcome %.3g; checking replays on the %s); "
@@ -976,8 +1123,11 @@ double SetupFlow::buildMethods() {
     methods_.clear();
     const Control c = control();
     const bool byOutcome = handlePeak_ < tuning(c).handleStart;
-    const std::vector<CandidateTracker::Found> inputs = tracker_.find(windowFrom_, t_, false, byOutcome, wordsFor(c), 4);
-    const std::vector<CandidateTracker::Found> lvars = tracker_.find(windowFrom_, t_, true, byOutcome, wordsFor(c), 4);
+    const bool gear = c == Control::Gear;
+    // More for the gear: its legs' animations rank high and are dropped below.
+    const size_t most = gear ? 8 : 4;
+    std::vector<CandidateTracker::Found> inputs = tracker_.find(windowFrom_, t_, false, byOutcome, wordsFor(c), most);
+    std::vector<CandidateTracker::Found> lvars = tracker_.find(windowFrom_, t_, true, byOutcome, wordsFor(c), most);
     double firstChange = INFINITY;
     for (const auto& f : inputs) {
         logf(0, "control setup:   input event %s moved with it (score %.2f, peak %.3g)", tracker_.var(f.index).name.c_str(),
@@ -986,6 +1136,34 @@ double SetupFlow::buildMethods() {
     for (const auto& f : lvars) {
         logf(0, "control setup:   L:var %s moved with it (score %.2f, peak %.3g)", tracker_.var(f.index).name.c_str(), f.score,
              f.peak);
+    }
+    // A gear leg's own animation (the PMDG 777's 7X7XleftMLGExt) moves with the gear, but written
+    // it only swings that leg on screen. The lever gets where it's going in a moment; a variable
+    // that took seconds, or most of the time the legs took, follows them. (On the 777 the gear
+    // simvars and its own animations didn't travel alike, so the time alone has to do.)
+    const double legsSec = gear ? tracker_.referenceTravelSec(windowFrom_, t_) : NAN;
+    auto followsLegs = [&](const CandidateTracker::Found& f) {
+        if (!gear) return false;
+        const double sec = tracker_.travelSec(f.index, windowFrom_, t_);
+        const bool follows =
+            sec >= kLegTravelMinSec || (legsSec >= kLegTravelMinSec && sec >= kLegFollowShare * legsSec);
+        logf(0, "control setup:   %s %s took %.1f s to travel, the gear legs %.1f s: %s",
+             tracker_.var(f.index).lvar ? "L:var" : "input event", tracker_.var(f.index).name.c_str(), sec, legsSec,
+             follows ? "it follows them (their animation, not the lever); not trying it" : "kept");
+        return follows;
+    };
+    inputs.erase(std::remove_if(inputs.begin(), inputs.end(), followsLegs), inputs.end());
+    lvars.erase(std::remove_if(lvars.begin(), lvars.end(), followsLegs), lvars.end());
+    if (gear) {
+        // The lever leads: what changed first comes first (the PMDG 777's lever, switch_295_a,
+        // before the sound and airflow flags that follow the legs).
+        auto first = [&](const CandidateTracker::Found& f) {
+            const double t = tracker_.firstChange(f.index);
+            return std::isfinite(t) ? t : INFINITY;
+        };
+        auto earlier = [&](const CandidateTracker::Found& a, const CandidateTracker::Found& b) { return first(a) < first(b); };
+        std::stable_sort(inputs.begin(), inputs.end(), earlier);
+        std::stable_sort(lvars.begin(), lvars.end(), earlier);
     }
     const bool perEngine = c == Control::Throttle && engineCount(facts_) > 1;
     std::vector<std::string> seen;
@@ -1020,6 +1198,30 @@ double SetupFlow::buildMethods() {
             methods_.push_back({MethodKind::InputSet, var, 1.0});
         }
     }
+    // The key events that fired with the movement (the cockpit's lever, the pilot's binding):
+    // aircraft like the PMDG 777 ignore the generic ones below, and no variable shows their own.
+    double firstFiring = INFINITY;
+    std::vector<ControlMethod> learned = learnEvents(firstFiring);
+    firstChange = std::min(firstChange, firstFiring);
+    // The aircraft's own gear lever event, where its SDK documents one, unless it was seen above:
+    // for when the lever's event didn't show (the PMDG 777 ignores the gear key events). Seen as a
+    // position, the table's version takes its place: it knows what else the aircraft needs.
+    if (gear) {
+        const ControlMethod own = ownGearLever(profile_.key);
+        EventMethod ownEv, ev;
+        bool fired = false;
+        for (ControlMethod& m : learned) {
+            if (!parseEventMethod(own, ownEv) || !parseEventMethod(m, ev) || (ev.id != ownEv.id && ev.lowerId != ownEv.id)) {
+                continue;
+            }
+            fired = true;
+            if (ev.mode == EventMethod::Mode::Position) m = own;
+        }
+        methods_.insert(methods_.end(), learned.begin(), learned.end());
+        if (own.kind != MethodKind::None && !fired) methods_.push_back(own);
+    } else {
+        methods_.insert(methods_.end(), learned.begin(), learned.end());
+    }
     if (c != Control::Flaps || facts_.flapPositions > 1) methods_.push_back({MethodKind::KeyEvent, std::string(), 1.0});
     // What hardware bindings send, for aircraft that ignore the events above (the PMDG 737).
     // Before the simvars: writing those moves the outcome the check reads even where the aircraft
@@ -1043,6 +1245,314 @@ double SetupFlow::buildMethods() {
     if (!firstInput.empty()) methods_.push_back({MethodKind::InputValue, firstInput, 1.0});
     if (methods_.size() > kMaxMethods) methods_.resize(kMaxMethods);
     return firstChange;
+}
+
+// One line per kind of key event (the most frequent with the movement first): how often it fired
+// with the movement and before it, when (from the moment the control moved) and with what. Enough
+// to see in one run what an aircraft's cockpit lever and the pilot's bindings send.
+void SetupFlow::logKeyEvents() const {
+    const char* label = controlSpec(control()).label;
+    const std::vector<KeyEventTracker::Event>& evs = keys_.events();
+    if (evs.empty()) {
+        logf(0, "control setup: no key events while you moved the %s", label);
+        return;
+    }
+    size_t all = 0, with = 0;
+    for (const auto& e : evs) {
+        all += e.count;
+        with += e.firings.size();
+    }
+    logf(0, "control setup: %zu key event(s) of %zu kind(s) while you moved the %s, %zu kept from %.0f s before it "
+         "moved (times from when it moved):",
+         all, evs.size(), label, with, kSearchLeadSec);
+    std::vector<size_t> order(evs.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        if (evs[a].firings.size() != evs[b].firings.size()) return evs[a].firings.size() > evs[b].firings.size();
+        return evs[a].count > evs[b].count;
+    });
+    char buf[200];
+    for (size_t n = 0; n < order.size() && n < kKeyLogKinds; ++n) {
+        const KeyEventTracker::Event& e = evs[order[n]];
+        std::snprintf(buf, sizeof(buf), ": %zu in all", e.count);
+        std::string line = keyEventName(e.id) + buf;
+        if (e.steady()) {
+            std::snprintf(buf, sizeof(buf), ", %zu of them before it moved: steadily", e.before);
+            line += buf;
+        } else {
+            if (e.before > 0) {
+                std::snprintf(buf, sizeof(buf), ", %zu before it moved", e.before);
+                line += buf;
+            }
+            if (!e.firings.empty()) {
+                const double t0 = e.firings.front().t - movedAt_, t1 = e.firings.back().t - movedAt_;
+                if (e.firings.size() == 1) std::snprintf(buf, sizeof(buf), ", %zu with it at %.1f s", e.firings.size(), t0);
+                else std::snprintf(buf, sizeof(buf), ", %zu with it at %.1f .. %.1f s", e.firings.size(), t0, t1);
+                line += buf;
+            }
+        }
+        if (e.values.empty()) {
+            line += ", no parameter";
+        } else if (e.many) {
+            std::snprintf(buf, sizeof(buf), ", parameters %.10g .. %.10g (more than %zu values)", e.lo, e.hi,
+                          KeyEventTracker::kValues);
+            line += buf;
+        } else {
+            std::vector<std::pair<double, size_t>> values = e.values;
+            std::sort(values.begin(), values.end());
+            line += values.size() == 1 ? ", parameter" : ", parameters";
+            for (size_t i = 0; i < values.size(); ++i) {
+                std::snprintf(buf, sizeof(buf), "%s %.10g (%zu)", i == 0 ? "" : ",", values[i].first, values[i].second);
+                line += buf;
+            }
+        }
+        logf(0, "control setup:   %s", line.c_str());
+    }
+    if (order.size() > kKeyLogKinds) logf(0, "control setup:   and %zu more kind(s)", order.size() - kKeyLogKinds);
+    if (keys_.lost() > 0) logf(1, "control setup: %zu key event(s) weren't kept: too many", keys_.lost());
+}
+
+std::vector<double> SetupFlow::eventSeries() const {
+    const Control c = control();
+    std::vector<double> out;
+    out.reserve(capture_.size());
+    GearCommandFollower gear;  // the gear handle simvar lags the lever (the A320's), the legs don't
+    for (const Frame& f : capture_) out.push_back(c == Control::Gear ? gear.update(meanOf(f, kGearCenter, 3)) : eventTarget(c, f));
+    return out;
+}
+
+// Key events that fired with the movement, as methods: each event the control's value (eventTarget)
+// followed, whatever it's called. One whose parameter followed the value is a position (a lever's
+// position, an axis; on the gear two values will do, elsewhere it takes three); otherwise each of
+// its parameters is a click: a toggle if the control moved one way after one and back after the
+// next, or a step if it always moved the same way, paired with one that moved it back.
+std::vector<ControlMethod> SetupFlow::learnEvents(double& first) {
+    learned_.clear();
+    first = INFINITY;
+    std::vector<ControlMethod> out;
+    const Control c = control();
+    const std::vector<KeyEventTracker::Event>& evs = keys_.events();
+    if (evs.empty() || capture_.empty()) return out;
+    if (c == Control::Throttle) {
+        logf(0, "control setup:   (the throttle's key events aren't tried on their own: its key-event method sends the axis)");
+        return out;
+    }
+    const std::vector<double> kv = eventSeries();
+    // The capture frame before time t (the aircraft as it was when an event fired), or at it.
+    auto before = [&](double t) {
+        const auto it = std::lower_bound(capture_.begin(), capture_.end(), t, [](const Frame& f, double x) { return f.t < x; });
+        return it == capture_.begin() ? size_t(0) : static_cast<size_t>(it - capture_.begin()) - 1;
+    };
+    double lo = INFINITY, hi = -INFINITY;
+    for (size_t k = before(windowFrom_); k < kv.size(); ++k) {
+        if (!std::isfinite(kv[k])) continue;
+        lo = std::min(lo, kv[k]);
+        hi = std::max(hi, kv[k]);
+    }
+    const double range = hi - lo;
+    const char* what = eventValueName(c);
+    if (!(range > 0.0)) {
+        logf(0, "control setup:   the %s didn't move, so no key event can be matched to it", what);
+        return out;
+    }
+    const double moveMin = c == Control::Gear ? 0.5 : tuning(c).handleStart;
+    // Which way the control first moved within kKeyFollowSec after time t: +1, -1, or 0 (it didn't).
+    auto firstMove = [&](double t) {
+        size_t k = before(t);
+        const double base = kv[k];
+        if (!std::isfinite(base)) return 0;
+        for (++k; k < kv.size() && capture_[k].t <= t + kKeyFollowSec; ++k) {
+            if (std::isfinite(kv[k]) && std::fabs(kv[k] - base) >= moveMin) return kv[k] > base ? 1 : -1;
+        }
+        return 0;
+    };
+
+    struct Candidate {
+        EventMethod ev;
+        int rank;        // 0 a position, 1 a toggle, 2 steps
+        double quality;  // within a rank: higher first
+        double first;    // its first firing
+        const KeyEventTracker::Event* event;
+    };
+    std::vector<Candidate> found;
+    struct Half {
+        uint32_t id;
+        int32_t param;
+        size_t moves;
+        double first;
+    };
+    std::vector<Half> raises, lowers;
+    size_t noise = 0;
+    for (const KeyEventTracker::Event& e : evs) {
+        if (e.firings.empty()) continue;
+        const std::string name = keyEventName(e.id);
+        if (e.steady()) {
+            ++noise;
+            continue;
+        }
+        if (sentByKeyMethod(c, e.id)) {
+            logf(0, "control setup:   %s is what the %s's key-event method sends: not tried on its own", name.c_str(),
+                 controlSpec(c).label);
+            continue;
+        }
+        // A position: its parameter against where the control went, kKeySettleSec on (or until it
+        // fired again).
+        double sx = 0.0, sy = 0.0, sxx = 0.0, syy = 0.0, sxy = 0.0;
+        size_t n = 0;
+        std::vector<double> params, values;
+        for (size_t i = 0; i < e.firings.size(); ++i) {
+            const KeyEventTracker::Firing& f = e.firings[i];
+            if (!std::isfinite(f.value)) continue;
+            double settle = std::min(f.t + kKeySettleSec, t_);
+            if (i + 1 < e.firings.size()) settle = std::min(settle, e.firings[i + 1].t);
+            const double x = kv[before(settle)];
+            if (!std::isfinite(x)) continue;
+            sx += x;
+            sy += f.value;
+            sxx += x * x;
+            syy += f.value * f.value;
+            sxy += x * f.value;
+            ++n;
+            params.push_back(f.value);
+            values.push_back(x);
+        }
+        auto distinct = [](std::vector<double> v) {
+            std::sort(v.begin(), v.end());
+            return static_cast<size_t>(std::unique(v.begin(), v.end()) - v.begin());
+        };
+        if (n >= 2 && distinct(params) >= (c == Control::Gear ? 2u : 3u) && distinct(values) >= 2) {
+            const double mx = sx / n, my = sy / n;
+            const double vx = sxx / n - mx * mx, vy = syy / n - my * my, cxy = sxy / n - mx * my;
+            const double r = vx > 0.0 && vy > 0.0 ? cxy / std::sqrt(vx * vy) : 0.0;
+            const double b = vx > 0.0 ? std::round(cxy / vx * 1000.0) / 1000.0 : 0.0;
+            if (std::fabs(r) >= kKeyPositionFit && b != 0.0) {
+                EventMethod ev;
+                ev.mode = EventMethod::Mode::Position;
+                ev.id = e.id;
+                ev.scale = b;
+                ev.offset = std::round(my - b * mx);
+                logf(0, "control setup:   %s fired with it %zu time(s): a position (parameter %.10g + %.10g x the %s, fit "
+                     "%.2f)",
+                     name.c_str(), e.firings.size(), ev.offset, ev.scale, what, std::fabs(r));
+                found.push_back({ev, 0, std::fabs(r), e.firings.front().t, &e});
+                continue;
+            }
+        }
+        // Clicks: each parameter on its own (none: 0). A click has one or two (a mouse button, the
+        // wheel either way); more that don't follow the control are something else's axis.
+        if (distinct(params) > 4) {
+            logf(0, "control setup:   %s fired %zu time(s) with %zu parameters that didn't follow the %s", name.c_str(),
+                 e.firings.size(), distinct(params), what);
+            continue;
+        }
+        auto paramOf = [](double v) {
+            if (!std::isfinite(v)) return int32_t(0);
+            return static_cast<int32_t>(std::max(-2147483648.0, std::min(2147483647.0, std::round(v))));
+        };
+        std::vector<int32_t> seen;
+        for (const KeyEventTracker::Firing& f0 : e.firings) {
+            const int32_t p = paramOf(f0.value);
+            if (std::find(seen.begin(), seen.end(), p) != seen.end()) continue;
+            seen.push_back(p);
+            std::vector<int> dirs;
+            size_t fired = 0, still = 0;
+            double t0 = INFINITY;
+            for (const KeyEventTracker::Firing& f : e.firings) {
+                if (paramOf(f.value) != p) continue;
+                ++fired;
+                t0 = std::min(t0, f.t);
+                const int d = firstMove(f.t);
+                if (d == 0) ++still;
+                else dirs.push_back(d);
+            }
+            const std::string label = name + " (" + std::to_string(p) + ")";
+            if (fired > kKeyMaxSteps) {
+                logf(0, "control setup:   %s fired %zu times: too often for a click", label.c_str(), fired);
+                continue;
+            }
+            if (dirs.empty() || (still > 0 && (fired <= 4 || 4 * still > fired))) {
+                logf(0, "control setup:   %s fired %zu time(s); the %s didn't move after %zu", label.c_str(), fired, what,
+                     still);
+                continue;
+            }
+            bool up = false, down = false, alternate = true;
+            for (size_t i = 0; i < dirs.size(); ++i) {
+                up |= dirs[i] > 0;
+                down |= dirs[i] < 0;
+                if (i > 0 && dirs[i] == dirs[i - 1]) alternate = false;
+            }
+            if (up && down && alternate) {
+                EventMethod ev;
+                ev.mode = EventMethod::Mode::Toggle;
+                ev.id = e.id;
+                ev.param = p;
+                ev.scale = std::round(range * 1000.0) / 1000.0;
+                logf(0, "control setup:   %s fired with it %zu time(s): a toggle", label.c_str(), fired);
+                found.push_back({ev, 1, static_cast<double>(dirs.size()), t0, &e});
+            } else if (up != down) {
+                (up ? raises : lowers).push_back({e.id, p, dirs.size(), t0});
+            } else {
+                logf(0, "control setup:   %s moved the %s both ways, not one after the other", label.c_str(), what);
+            }
+        }
+    }
+    if (noise > 0) {
+        logf(0, "control setup:   %zu kind(s) of key event fired steadily (%zu times or more before the %s moved): not its own",
+             noise, KeyEventTracker::kSteadyBefore, controlSpec(c).label);
+    }
+    // A step each way: those that moved it up, paired with those that moved it back (the same
+    // event's other parameter first: a lever's left and right click).
+    std::vector<bool> pairedLower(lowers.size(), false);
+    for (const Half& r : raises) {
+        size_t best = lowers.size();
+        for (size_t i = 0; i < lowers.size(); ++i) {
+            if (pairedLower[i]) continue;
+            if (best == lowers.size()) best = i;
+            const bool same = lowers[i].id == r.id, bestSame = lowers[best].id == r.id;
+            if ((same && !bestSame) || (same == bestSame && lowers[i].moves > lowers[best].moves)) best = i;
+        }
+        if (best == lowers.size()) {
+            logf(0, "control setup:   %s (%d) only ever moved the %s up", keyEventName(r.id).c_str(), r.param, what);
+            continue;
+        }
+        pairedLower[best] = true;
+        const Half& l = lowers[best];
+        EventMethod ev;
+        ev.mode = EventMethod::Mode::Steps;
+        ev.id = r.id;
+        ev.param = r.param;
+        ev.lowerId = l.id;
+        ev.lowerParam = l.param;
+        ev.scale = std::round(range / static_cast<double>(std::max(r.moves, l.moves)) * 1000.0) / 1000.0;
+        logf(0, "control setup:   %s (%d) and %s (%d) fired with it: a step each way", keyEventName(r.id).c_str(), r.param,
+             keyEventName(l.id).c_str(), l.param);
+        found.push_back({ev, 2, static_cast<double>(r.moves + l.moves), std::min(r.first, l.first), nullptr});
+    }
+    for (size_t i = 0; i < lowers.size(); ++i) {
+        if (!pairedLower[i]) {
+            logf(0, "control setup:   %s (%d) only ever moved the %s down", keyEventName(lowers[i].id).c_str(),
+                 lowers[i].param, what);
+        }
+    }
+    std::stable_sort(found.begin(), found.end(), [](const Candidate& a, const Candidate& b) {
+        return a.rank != b.rank ? a.rank < b.rank : a.quality > b.quality;
+    });
+    for (const Candidate& k : found) {
+        if (out.size() == kMaxLearned) break;
+        if (!(k.ev.scale != 0.0)) continue;
+        const ControlMethod m = eventMethod(k.ev);
+        out.push_back(m);
+        first = std::min(first, k.first);
+        if (k.rank == 0 && k.event) {
+            LearnedEvent le;
+            le.method = m;
+            for (const KeyEventTracker::Firing& f : k.event->firings) {
+                if (std::isfinite(f.value)) le.firings.push_back(f);
+            }
+            learned_.push_back(std::move(le));
+        }
+    }
+    return out;
 }
 
 void SetupFlow::startMethod(size_t i) {
@@ -1069,22 +1579,73 @@ void SetupFlow::startMethod(size_t i) {
             for (Frame& f : mini_.frames) f.v[ch] = have ? tracker_.valueAt(idx, windowFrom_ + f.t) : NAN;
         }
     }
+    // A key event that's a position replays the parameters it fired with, when it fired: its
+    // channel then holds the values they stand for. Other key-event methods read it as built.
+    if (m.kind == MethodKind::KeyEvent && !keyColumn_.empty()) {
+        const int ch = methodSourceChannel(c, m.kind, 0);
+        for (size_t k = 0; k < mini_.frames.size() && k < keyColumn_.size(); ++k) mini_.frames[k].v[ch] = keyColumn_[k];
+        EventMethod ev;
+        for (const LearnedEvent& le : learned_) {
+            if (!(le.method == m) || !parseEventMethod(m, ev) || ev.mode != EventMethod::Mode::Position || ev.scale == 0.0) {
+                continue;
+            }
+            size_t j = 0;
+            double v = NAN;
+            for (Frame& f : mini_.frames) {
+                for (; j < le.firings.size() && le.firings[j].t <= windowFrom_ + f.t + 1e-9; ++j) {
+                    if (std::isfinite(le.firings[j].value)) v = (le.firings[j].value - ev.offset) / ev.scale;
+                }
+                if (std::isfinite(v)) f.v[ch] = v;
+            }
+        }
+    }
     replayT_ = 0.0;
     hint_ = 0;
     firstApply_ = true;
     replayPeak_ = 0.0;
     stoppedEarly_ = false;
+    started_ = seenRest_ = false;
+    gearCommand_ = gearFrom_ = gearTo_ = NAN;
+    gearCommandAt_ = 0.0;
     phase_ = Phase::Replay;
     phaseT_ = 0.0;
     logf(0, "control setup: replaying the %s with %s (method %zu of %zu)", controlSpec(c).label,
          describeMethod(c, m).c_str(), i + 1, methods_.size());
 }
 
-void SetupFlow::track(const Frame& live) {
+double SetupFlow::restTol() const {
+    const Tuning tu = tuning(control());
+    return std::max(judgeOutcome_ ? tu.outcomeStart : tu.handleStart, kPassReturn * userPeak_);
+}
+
+bool SetupFlow::atRest(const Frame& live) const {
     const double v = judgeOutcome_ ? outcomeSignal(live) : handleSignal(live);
-    const double rest = judgeOutcome_ ? outcomeRest_ : handleRest_;
-    const double d = absDiff(v, rest);
+    return std::isfinite(v) && absDiff(v, judgeOutcome_ ? outcomeRest_ : handleRest_) <= restTol();
+}
+
+// Only from where the pilot started the control: a replay that starts elsewhere (the last method
+// left the gear up) doesn't get its way back there counted as the movement.
+void SetupFlow::track(const Frame& live) {
+    if (!seenRest_) seenRest_ = atRest(live);
+    if (!seenRest_) return;
+    const double v = judgeOutcome_ ? outcomeSignal(live) : handleSignal(live);
+    const double d = absDiff(v, judgeOutcome_ ? outcomeRest_ : handleRest_);
     if (d > replayPeak_) replayPeak_ = d;
+}
+
+void SetupFlow::noteGearCommand(double command, const Frame& live) {
+    gearTo_ = outcomeSignal(live);
+    if (!std::isfinite(command) || command == gearCommand_) return;
+    logGearCommand();
+    gearCommand_ = command;
+    gearCommandAt_ = replayT_;
+    gearFrom_ = gearTo_;
+}
+
+void SetupFlow::logGearCommand() const {
+    if (!std::isfinite(gearCommand_)) return;
+    logf(0, "control setup:   gear %s at %.1f s: the gear went from %.2f to %.2f", gearCommand_ > 0.5 ? "down" : "up",
+         gearCommandAt_, gearFrom_, gearTo_);
 }
 
 bool SetupFlow::rolling(const Frame& live) const {
@@ -1093,12 +1654,29 @@ bool SetupFlow::rolling(const Frame& live) const {
 
 void SetupFlow::replayFrame(double dt, const Frame& live) {
     const Control c = control();
+    const char* label = controlSpec(c).label;
+    if (!started_) {
+        // First back to where the pilot's movement started (the movement's first frame), held
+        // until the control is there.
+        sim_->applyControl(c, mini_.frames.front(), firstApply_);
+        firstApply_ = false;
+        const bool there = atRest(live);
+        if (!there && phaseT_ < kRestWaitSec) return;
+        started_ = true;
+        if (!there) {
+            logf(1, "control setup: the %s didn't go back to where you started it within %.0f s; replaying anyway", label,
+                 kRestWaitSec);
+        } else if (phaseT_ > 0.5) {
+            logf(0, "control setup: the %s was back where you started it after %.1f s", label, phaseT_);
+        }
+    }
     replayT_ += dt;
     const double dur = mini_.duration();
     sampleFrames(mini_.frames.data(), mini_.frames.size(), replayT_ < dur ? replayT_ : dur, frame_, &hint_);
     sim_->applyControl(c, frame_, firstApply_);
     firstApply_ = false;
     track(live);
+    if (c == Control::Gear) noteGearCommand(eventTarget(c, frame_), live);
     if (rolling(live)) {
         stoppedEarly_ = true;
         sim_->applyControl(c, mini_.frames.front(), true);
@@ -1121,6 +1699,7 @@ void SetupFlow::holdFrame(const Frame& live) {
     // Keep asserting the movement's end (the control at rest) while things settle.
     sim_->applyControl(c, mini_.frames.back(), false);
     track(live);
+    if (c == Control::Gear) noteGearCommand(eventTarget(c, mini_.frames.back()), live);
     const double v = judgeOutcome_ ? outcomeSignal(live) : handleSignal(live);
     const double tol = 0.5 * (judgeOutcome_ ? tu.outcomeStart : tu.handleStart);
     if (movedFrom(v, replayAnchor_, tol)) {
@@ -1141,12 +1720,11 @@ void SetupFlow::holdFrame(const Frame& live) {
 
 void SetupFlow::evaluate(const Frame& live) {
     const Control c = control();
-    const Tuning tu = tuning(c);
+    if (c == Control::Gear) logGearCommand();
     const double end = judgeOutcome_ ? outcomeSignal(live) : handleSignal(live);
     const double rest = judgeOutcome_ ? outcomeRest_ : handleRest_;
-    const double tol = std::max(judgeOutcome_ ? tu.outcomeStart : tu.handleStart, kPassReturn * userPeak_);
     const bool reached = replayPeak_ >= kPassPeak * userPeak_;
-    const bool returned = absDiff(end, rest) <= tol;
+    const bool returned = absDiff(end, rest) <= restTol();
     const int pct = userPeak_ > 0.0 ? static_cast<int>(std::lround(100.0 * replayPeak_ / userPeak_)) : 0;
     const std::string desc = describeMethod(c, methods_[method_]);
     if (stoppedEarly_ || (reached && returned)) {
@@ -1740,7 +2318,10 @@ void SetupFlow::finishStep(ControlState state, const ControlMethod& method, bool
     }
     changed_ = true;
     tracker_.clear();
+    keys_.clear();
     mini_ = Clip();
+    std::vector<double>().swap(keyColumn_);
+    learned_.clear();
     methods_.clear();
     attempts_.clear();
     std::vector<Frame>().swap(capture_);
@@ -1766,7 +2347,10 @@ void SetupFlow::cancel(const char* why) {
     endDrive();
     endScan();
     tracker_.clear();
+    keys_.clear();
     mini_ = Clip();
+    std::vector<double>().swap(keyColumn_);
+    learned_.clear();
     methods_.clear();
     std::vector<Frame>().swap(capture_);
     phase_ = Phase::Idle;

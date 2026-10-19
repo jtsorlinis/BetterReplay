@@ -37,35 +37,37 @@ bool deriveGearCommand(Clip& clip) {
     }
     if (!(hi - lo > 0.1)) return false;  // no gear positions, or the gear never moved
 
-    // The command flips when the gear moves the other way by more than the threshold from its
-    // furthest point since the last flip, so a gear in mid-travel doesn't flip-flop.
-    constexpr double kMoveThreshold = 0.03;  // ignore noise at the end stops
-    double state = NAN;                      // 1 = down, 0 = up
-    double extreme = NAN;                    // most extended (state 1) / most retracted (state 0)
+    GearCommandFollower follow;
     for (Frame& f : clip.frames) {
-        const double g = gearExtension(f, clip.present);
-        if (!std::isnan(g)) {
-            if (std::isnan(state)) {
-                state = g >= 0.5 ? 1.0 : 0.0;
-                extreme = g;
-            } else if (state == 1.0) {
-                if (g > extreme) extreme = g;
-                if (g < extreme - kMoveThreshold) {
-                    state = 0.0;  // started retracting
-                    extreme = g;
-                }
-            } else {
-                if (g < extreme) extreme = g;
-                if (g > extreme + kMoveThreshold) {
-                    state = 1.0;  // started extending
-                    extreme = g;
-                }
-            }
-        }
+        const double state = follow.update(gearExtension(f, clip.present));
         f.v[kGearHandle] = std::isnan(state) ? f.v[kGearHandle] : state;
     }
     clip.present.set(static_cast<size_t>(kGearHandle));
     return true;
+}
+
+// The command flips when the gear moves the other way by more than the threshold from its
+// furthest point since the last flip, so a gear in mid-travel doesn't flip-flop.
+double GearCommandFollower::update(double g) {
+    constexpr double kMoveThreshold = 0.03;  // ignore noise at the end stops
+    if (std::isnan(g)) return state_;
+    if (std::isnan(state_)) {
+        state_ = g >= 0.5 ? 1.0 : 0.0;
+        extreme_ = g;
+    } else if (state_ == 1.0) {
+        if (g > extreme_) extreme_ = g;
+        if (g < extreme_ - kMoveThreshold) {
+            state_ = 0.0;  // started retracting
+            extreme_ = g;
+        }
+    } else {
+        if (g < extreme_) extreme_ = g;
+        if (g > extreme_ + kMoveThreshold) {
+            state_ = 1.0;  // started extending
+            extreme_ = g;
+        }
+    }
+    return state_;
 }
 
 void dropEmptyChannels(Clip& clip) {

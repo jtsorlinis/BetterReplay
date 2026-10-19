@@ -12,6 +12,17 @@ namespace br {
 // extending. Leaves the clip alone if it has no gear positions or the gear never moved (fixed gear).
 // Returns true if the channel was rewritten.
 bool deriveGearCommand(Clip& clip);
+// The same, frame by frame, from the legs' mean extension as it comes (the live aircraft): 1 down,
+// 0 up, NaN until the first reading.
+class GearCommandFollower {
+public:
+    double update(double extension);
+    double state() const { return state_; }
+
+private:
+    double state_ = NAN;
+    double extreme_ = NAN;  // most extended (state 1) / most retracted (state 0) since the last flip
+};
 
 // Clears `present` for channels the clip has but never recorded a value for (all NaN), e.g. an
 // input event the recording aircraft didn't have, so playback leaves them alone.

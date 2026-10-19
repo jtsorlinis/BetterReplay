@@ -42,6 +42,7 @@ public:
     void scanBegin(std::vector<ScanVar>& vars) override;
     void scanRead(std::vector<double>& values) override;
     void scanEnd() override;
+    void scanKeyEvents(std::vector<SeenKeyEvent>& events) override;
     bool beginControl(Control c, const ControlMethod& m, std::string& why) override;
     void applyControl(Control c, const Frame& f, bool force) override;
     void endControl(Control c) override;
@@ -60,6 +61,7 @@ private:
         EVT_CHANNEL_OFF_FIRST = 400,   // + channel index, ChannelDef::playEventOff
         EVT_MASK_FIRST = 500,          // + index into kMaskedInputEvents
         EVT_THROTTLE_AXIS_FIRST = 600, // + engine - 1: THROTTLEn_AXIS_SET_EX1, to drive the levers
+        // 700 on: ControlDriver::kOwnEventFirst, the aircraft's own events
     };
     enum Group : DWORD { GROUP_INPUT_MASK = 1 };
     enum Freeze { kFreezeLatLon, kFreezeAlt, kFreezeAtt, kFreezeCount };
@@ -114,6 +116,7 @@ private:
     static void CALLBACK dispatchThunk(SIMCONNECT_RECV* data, DWORD size, void* ctx);
     static void keyEventThunk(FsEventId id, FsVarParamArray* params, void* ctx);
     // Hardware throttle key events: tracks the pilot's throttle axis for the thr_axis_N channels.
+    // During the setup's scan it also keeps every key event for it (scanKeyEvents).
     void onKeyEvent(FsEventId id, const FsVarParamArray* params);
     void dispatch(SIMCONNECT_RECV* data, DWORD size);
     void onSystemEvent(DWORD id, DWORD data);
@@ -190,6 +193,7 @@ private:
     void yieldChannel(int channel, int overriddenPct);
     void rebuildPlaybackDefinition();
     void onInputEvents(const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS* list, DWORD size);
+    void finishInputEvents();  // the list is complete (or the aircraft has none): resolve what uses it
     void onAircraftChanged();
     double liveGearExtension() const;
     // The airports in the sim's facilities cache (around the aircraft), for the Engine to name
@@ -263,9 +267,14 @@ private:
     bool profileDrives_[kControlCount] = {};  // this playback: the profile drives the control
     bool throttleByProfile_ = false;
     bool setupMasking_ = false;  // the setup is driving the throttle simvars: hardware masked
-    // the setup's scan: input events (B: vars) then L:vars
+    // the setup's scan: input events (B: vars) then L:vars, and the key events seen meanwhile
+    // (none of ours) until the setup takes them, each frame
     std::vector<FsBVarId> scanB_;
     std::vector<FsLVarId> scanL_;
+    bool scanKeys_ = false;
+    std::vector<SeenKeyEvent> keysSeen_;
+    size_t keysDropped_ = 0;
+    static constexpr size_t kMaxKeysSeen = 4000;
     int flapPositions_ = 0;
 
     // playback
@@ -352,9 +361,10 @@ private:
     bool throttleAxisLogged_ = false;
     // Before a jump onto the ground with the gear down, on an aircraft whose gear can't be snapped:
     // lower it where the aircraft is first (see prepareJump).
-    static constexpr int64_t kPrepareGearMaxMs = 30000;
+    static constexpr int64_t kPrepareGearMaxMs = 50000;  // the PMDG 777's gear: four ways of lowering it, 10 s apart
     int64_t prepareStartMs_ = 0;
     bool prepareGearSent_ = false;
+    bool prepareUnfrozen_ = false;  // in the air, not frozen while the gear comes down
     bool snapAccepted_ = false;    // a gear snap held on this aircraft: no need to lower it first
     bool restoreDeferred_ = false;  // Stop: lowering the gear before putting the aircraft back
     static double gearExtensionOf(const Frame& f);
@@ -424,6 +434,9 @@ private:
     // Aircraft input events (B: vars) are listed once per flight, to find gear and throttle
     // controls that ignore the legacy key events.
     uint64_t enumerateAtFrame_ = 120;
+    // The EnumerateInputEvents request's packet: an exception from it means the aircraft has none
+    // to list (the PMDG 777).
+    DWORD enumeratePacket_ = 0;
     int inputEventsLogged_ = 0;
     bool wantFreeze_ = false;
     bool freezeState_[kFreezeCount] = {};
