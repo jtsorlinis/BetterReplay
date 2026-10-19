@@ -366,6 +366,7 @@ private:
     int snapChannels_[kChannelCount] = {};
     int snapChannelCount_ = 0;
     double snapBuffer_[kChannelCount] = {};
+    double snapBefore_[kChannelCount] = {};  // the aircraft's, as the snap began (snapVerdict)
     bool snapDefDefined_ = false;
     int snapFramesLeft_ = 0;
     static constexpr int kSnapCheckFrames = 30;
@@ -426,7 +427,7 @@ private:
     int enginesMove(const Frame& target) const;
     void writeClipSpeed(const Frame& target);
     void moveFlapLever(const Frame& target, bool force);
-    bool snapAccepted_ = false;    // a gear snap held on this aircraft: no need to lower it first
+    bool snapAccepted_ = false;    // a gear snap moved this aircraft's gear and held: no need to lower it first
     bool restoreDeferred_ = false;  // Stop: lowering the gear before putting the aircraft back
     static double gearExtensionOf(const Frame& f);
     void commandGearDown(const Frame& target);
@@ -441,6 +442,9 @@ private:
     static constexpr double kFlapsSpeedMatchKt = 20.0;
     bool flapsHold_ = false;            // playback: the flap lever is left where the aircraft has it
     bool restoreFlapsPending_ = false;  // Stop: the profile puts the flaps back once settled
+    // Then it drives them there until the lever's back (FLAPS_INCR/DECR a notch at a time), 10 s at most.
+    static constexpr int kRestoreFlapsMaxFrames = 600;
+    int restoreFlapsFrames_ = 0;  // counting down once the lever is moving back
     int64_t flapsHoldStartMs_ = 0;
     int64_t flapsMatchSinceMs_ = 0;
     void holdFlaps();
@@ -473,6 +477,7 @@ private:
     bool flapsArrived(const Frame& target);
     void checkRestoreFlaps();
     void cancelRestoreFlaps();
+    void dropRestore(const char* why);
     // Stop on a "toggle reverse" aircraft still in reverse: the throttle is driven to where it was
     // for a few more frames, so the levers come back to idle and reverse is toggled back out
     // before it's let go (ControlDriver::reverseToggled), 10 s at most.

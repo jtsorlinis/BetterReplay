@@ -102,7 +102,10 @@ struct EngineConfig {
     double bufferSeconds = 600.0;  // about 12 MB of frames
     size_t maxAutoClipsPerAircraft = 10;  // newest takeoff/landing clips kept of each; manual saves are never auto-deleted
     double maxFrameDtSec = 0.5;  // longer gaps (hitches, loading) are clamped
-    double restoreMaxSec = 10.0;  // after Stop, the longest the aircraft stays frozen settling (the panel counts it down)
+    // After Stop, the longest the aircraft stays frozen settling (the panel counts it down). The
+    // A350's gear took about 16 s from fully up (its doors, then 12 s of leg travel); at 10 s it was
+    // put back with its gear half down.
+    double restoreMaxSec = 20.0;
 };
 
 // Everything the module reads from the sim once per frame.

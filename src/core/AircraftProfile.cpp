@@ -301,6 +301,33 @@ std::string keyEventName(uint32_t id) {
 
 int EventStepper::waitFrames(Control c) { return c == Control::Gear ? kGearWaitFrames : kWaitFrames; }
 
+void FlapNotches::begin(int64_t nowMs) {
+    if (!(nowMs - notchMs_ < kSettleMs)) lever_ = NAN;
+    since_ = 1 << 20;
+}
+
+int FlapNotches::step(double target, double handle, int64_t nowMs, bool force) {
+    if (!std::isfinite(handle)) return 0;
+    if (since_ < (1 << 20)) ++since_;
+    const double h = std::round(handle);
+    if (!(h == handle_)) {
+        handle_ = h;
+        movedMs_ = nowMs;
+    }
+    if (!std::isfinite(lever_) || nowMs - movedMs_ >= kSettleMs) lever_ = h;
+    if (!std::isfinite(target) || std::fabs(lever_ - target) < 0.5) return 0;
+    if (!force && since_ < kFrames) return 0;
+    const int dir = target > lever_ ? 1 : -1;
+    lever_ += dir;
+    movedMs_ = notchMs_ = nowMs;
+    since_ = 0;
+    return dir;
+}
+
+bool FlapNotches::at(double target) const {
+    return !std::isfinite(lever_) || !std::isfinite(target) || std::fabs(lever_ - target) < 0.5;
+}
+
 int EventStepper::step(double target, double live, double size, int waitFrames, bool force) {
     if (since_ < (1 << 20)) ++since_;
     if (!std::isfinite(target) || !std::isfinite(live) || !(size > 0.0)) return 0;

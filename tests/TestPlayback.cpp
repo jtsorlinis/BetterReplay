@@ -254,6 +254,36 @@ TEST(Playback_FlapsDestinationWithoutFlaps) {
     CHECK_NEAR(flapsDestination(Clip(), 2.0).t, 0.0, 0);
 }
 
+TEST(Playback_GearSnapCountsOnlyWhereItMovedTheGear) {
+    const double down[3] = {1.0, 1.0, 1.0};
+    const double up[3] = {0.0, 0.0, 0.0};
+    int which = -1;
+    // The PMDG 737 on the runway, a takeoff replay starting there: the gear written down where it
+    // was down already. It held, but that says nothing about the aircraft.
+    CHECK(snapVerdict(down, down, down, 3, &which) == SnapVerdict::Unknown);
+    // Stop after it, the gear up in the air: written down, and the 737 moved it straight back.
+    const double back[3] = {0.06, 0.06, 0.06};
+    CHECK(snapVerdict(up, down, back, 3, &which) == SnapVerdict::Rejected);
+    CHECK_EQ(which, 0);
+    // The landing replay's jump into the air: written up from down, back to 0.99.
+    const double stayedDown[3] = {0.99, 1.0, 1.0};
+    CHECK(snapVerdict(down, up, stayedDown, 3) == SnapVerdict::Rejected);
+    // An aircraft that takes it: written down from up, and it stayed there.
+    CHECK(snapVerdict(up, down, down, 3) == SnapVerdict::Held);
+    // One leg moved back is enough; a leg the aircraft doesn't report doesn't count.
+    const double rightBack[3] = {1.0, 1.0, 0.1};
+    which = -1;
+    CHECK(snapVerdict(up, down, rightBack, 3, &which) == SnapVerdict::Rejected);
+    CHECK_EQ(which, 2);
+    const double noNose[3] = {NAN, 1.0, 1.0};
+    CHECK(snapVerdict(up, down, noNose, 3) == SnapVerdict::Held);
+    // Where the gear was isn't known, or it was nearly there: no telling that the snap moved it.
+    const double unknown[3] = {NAN, NAN, NAN};
+    CHECK(snapVerdict(unknown, down, down, 3) == SnapVerdict::Unknown);
+    const double nearly[3] = {0.9, 0.9, 0.9};
+    CHECK(snapVerdict(nearly, down, down, 3) == SnapVerdict::Unknown);
+}
+
 TEST(Playback_ChannelsWithoutValuesAreNotPlayed) {
     // e.g. an input event the recording aircraft didn't have: in the file, but all NaN.
     Clip c = makeClip(2.0);
@@ -932,7 +962,7 @@ TEST(EnginePlayback_RecordingWaitsWhileSimIsRestoring) {
     CHECK(h.engine.bufferedFrames() > before);
 }
 
-TEST(EnginePlayback_RestoreWaitEndsAfterTenSeconds) {
+TEST(EnginePlayback_RestoreWaitEndsAfterTwentySeconds) {
     PlaybackHarness h;
     std::string err;
     REQUIRE(h.engine.play(h.clipFile, err));
@@ -941,15 +971,15 @@ TEST(EnginePlayback_RestoreWaitEndsAfterTenSeconds) {
     h.sim.busyRestoring = true;  // the gear never comes down
     REQUIRE(h.engine.stopPlayback(err));
     h.frames(60, -33.0);  // 1 s
-    CHECK_NEAR(h.engine.restoreSecondsLeft(), 9.0, 0.05);
+    CHECK_NEAR(h.engine.restoreSecondsLeft(), 19.0, 0.05);
     std::string json;
     h.engine.statusJson(json);
-    CHECK(json.find("\"restoreIn\":8.9") != std::string::npos || json.find("\"restoreIn\":9") != std::string::npos);
-    CHECK(json.find("\"restoreMax\":10") != std::string::npos);
-    h.frames(60 * 8, -33.0);  // 9 s
+    CHECK(json.find("\"restoreIn\":18.9") != std::string::npos || json.find("\"restoreIn\":19") != std::string::npos);
+    CHECK(json.find("\"restoreMax\":20") != std::string::npos);
+    h.frames(60 * 18, -33.0);  // 19 s: the A350's gear from fully up is still within it
     CHECK_EQ(h.sim.finishes, 0);
     CHECK_EQ(std::string(h.engine.suspendReason()), std::string("restoring aircraft"));
-    h.frames(60 + 2, -33.0);  // just past 10 s: let go
+    h.frames(60 + 2, -33.0);  // just past 20 s: let go
     CHECK_EQ(h.sim.finishes, 1);
     CHECK_NEAR(h.engine.restoreSecondsLeft(), 0.0, 0);
     h.frames(60, -33.0);

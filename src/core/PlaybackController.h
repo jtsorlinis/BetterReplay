@@ -1,6 +1,7 @@
 // Playhead over a loaded clip: play/pause, seek, speed, and the interpolated frame to write.
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include "Clip.h"
@@ -27,6 +28,19 @@ private:
     double state_ = NAN;
     double extreme_ = NAN;  // most extended (state 1) / most retracted (state 0) since the last flip
 };
+
+// A gear snap (the gear positions written for a few frames after a jump or Stop, so the gear doesn't
+// animate from where it was), checked half a second after its last write: `before`, the aircraft's
+// values when it began; `written`, what it wrote last; `after`, the aircraft's now. Rejected: the
+// aircraft moved one back, more than kSnapBackTol from what was written (it keeps its own gear
+// state, like the A320neo V2 and the PMDGs); `which` is that one. Held: they stuck, and the snap
+// moved the gear (one value more than kSnapBackTol from where it was). Unknown: they stuck, but the
+// gear was there already, which says nothing: the PMDG 737's held so at the start of a takeoff
+// replay, and Stop, going by it, unfroze the aircraft on the ground with its gear still coming down.
+enum class SnapVerdict : uint8_t { Unknown, Held, Rejected };
+SnapVerdict snapVerdict(const double* before, const double* written, const double* after, int count,
+                        int* which = nullptr);
+constexpr double kSnapBackTol = 0.25;
 
 // Clears `present` for channels the clip has but never recorded a value for (all NaN), e.g. an
 // input event the recording aircraft didn't have, so playback leaves them alone.

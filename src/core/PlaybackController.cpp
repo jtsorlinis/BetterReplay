@@ -128,6 +128,18 @@ double GearCommandFollower::update(double g) {
     return state_;
 }
 
+SnapVerdict snapVerdict(const double* before, const double* written, const double* after, int count, int* which) {
+    bool moved = false;
+    for (int i = 0; i < count; ++i) {
+        if (std::isfinite(after[i]) && std::fabs(after[i] - written[i]) > kSnapBackTol) {
+            if (which) *which = i;
+            return SnapVerdict::Rejected;
+        }
+        moved |= std::isfinite(before[i]) && std::fabs(written[i] - before[i]) > kSnapBackTol;
+    }
+    return moved ? SnapVerdict::Held : SnapVerdict::Unknown;
+}
+
 void dropEmptyChannels(Clip& clip) {
     for (int c = 0; c < kChannelCount; ++c) {
         if (!clip.present.test(static_cast<size_t>(c))) continue;

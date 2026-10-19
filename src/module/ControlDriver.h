@@ -81,7 +81,10 @@ public:
     double throttleOff(const Frame& clip) const;
     // The aircraft was reset (flight loaded, main menu, another aircraft): it's out of any reverse
     // we toggled, so end() mustn't toggle it.
-    void forgetReverse();  // and the flap lever (stepFlaps)
+    void forgetReverse();  // and the flap lever (FlapNotches)
+    // Whether the flap lever has been sent where `f` has it: with FLAPS_INCR/DECR, a notch at a
+    // time, once the notches sent have taken it there; any other way at once.
+    bool flapsSentTo(const Frame& f) const;
     // Drives the control from the frame's channels (methodSourceChannel). Values are sent when
     // they change, and every few frames anyway; `force` sends them now.
     void apply(Control c, const Frame& f, bool force);
@@ -165,18 +168,9 @@ private:
                                int64_t nowMs);
     static constexpr int64_t kLastingMs = 500;
     void applyKeyEvent(Control c, Slot& s, const Frame& f, bool force);
-    static constexpr int kNotchFrames = 8;  // FLAPS_INCR/DECR: at least this far apart
-    // The handle counts again once it has held still this long since it last moved and the last
-    // notch: the PMDG 777's follows its flaps, a detent every ten seconds or so.
-    static constexpr int64_t kNotchSettleMs = 30000;
     void stepFlaps(Slot& s, double target, bool force);
-    // The flap lever as the notches sent left it (stepFlaps), kept across replays (the handle can
-    // show it long after); NaN: go by the handle. When the handle last moved or a notch was sent,
-    // and when the last notch was sent.
-    double flapLever_ = NAN;
-    double flapHandle_ = NAN;
-    int64_t flapMovedMs_ = 0;
-    int64_t flapNotchMs_ = 0;
+    // The flap lever as the notches sent left it (FlapNotches), kept across replays.
+    FlapNotches notches_;
     // An event by its number: a position sent when the control's value changes; a toggle or steps
     // one at a time toward the clip's value (EventStepper), as a pilot clicking would.
     void applyEvent(Control c, Slot& s, const Frame& f, bool force);

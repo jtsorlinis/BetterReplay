@@ -61,7 +61,7 @@ const commBusMock = `
   const listeners = {};
   // gearSec, flapsSec, enginesSec: Play first holds, frozen, until each has taken that long
   // ("lowering the gear", "extending the flaps", "spooling up the engines", together; 0: not part
-  // of it); restoreSec: Stop keeps the aircraft frozen that long, "waiting for the gear" (10 s at
+  // of it); restoreSec: Stop keeps the aircraft frozen that long, "waiting for the gear" (20 s at
   // most, like EngineConfig::restoreMaxSec); fail: { op: 'error' } fails the next command of that
   // op with that error. setAircraft(title, known): another aircraft (known false: not identified
   // yet), which clips replay changing with it.
@@ -104,7 +104,7 @@ const commBusMock = `
     const restoring = !state.play.active && state.restoreLeft > 0;
     return { v: 1, rec: state.rec && !state.play.active && !restoring,
       why: state.play.active ? 'playback' : restoring ? 'restoring aircraft' : state.why,
-      restoreIn: restoring ? state.restoreLeft : 0, restoreMax: 10,
+      restoreIn: restoring ? state.restoreLeft : 0, restoreMax: 20,
       armed: state.armed, armIn: state.armIn, phase: state.phase, bufferSec: state.buffer, bufferMax: 600,
       aircraft: state.aircraft, clipsRev: state.rev, clipCount: clips.length, lastSaved: '', error: '',
       play: Object.assign({}, state.play), setup: window.harnessSetup.status() };
@@ -153,7 +153,7 @@ const commBusMock = `
       case 'seek': state.play.t = Math.max(0, Math.min(state.play.dur, cmd.t)); return reply(cmd.id, cmd.op, true);
       case 'speed': state.play.speed = Math.max(0.25, Math.min(4, cmd.x)); return reply(cmd.id, cmd.op, true);
       case 'stop': state.play.active = false; state.play.playing = false; state.play.preparing = false; state.play.prep = noPrep;
-        state.restoreLeft = Math.min(10, window.harness.restoreSec); return reply(cmd.id, cmd.op, true);
+        state.restoreLeft = Math.min(20, window.harness.restoreSec); return reply(cmd.id, cmd.op, true);
       default: return reply(cmd.id, cmd.op, false, 'unknown command: ' + cmd.op);
     }
   }

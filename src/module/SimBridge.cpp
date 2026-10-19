@@ -525,6 +525,7 @@ void SimBridge::onFlowEvent(DWORD flow, const char* path) {
     log::info("flow event %s%s%s", flowName(flow), path && path[0] ? ": " : "", path ? path : "");
     switch (flow) {
         case SIMCONNECT_FLOW_EVENT_FLT_LOADED:
+            dropRestore("flight loaded");
             engine_.onFlightLoaded("FLT_LOADED flow event");
             engine_.setAtMainMenu(false);
             nextAirportsMs_ = 0;
@@ -535,6 +536,7 @@ void SimBridge::onFlowEvent(DWORD flow, const char* path) {
             break;
         case SIMCONNECT_FLOW_EVENT_BACK_TO_MAIN_MENU:
         case SIMCONNECT_FLOW_EVENT_FLIGHT_END:
+            dropRestore("the flight ended");
             engine_.setAtMainMenu(true);
             break;
         case SIMCONNECT_FLOW_EVENT_TELEPORT_START:
@@ -730,9 +732,9 @@ void SimBridge::verifyFreeze() {
 }
 
 int SimBridge::buildDefinition(DWORD def, bool& defined, PlayMode mode, const ChannelMask* present, int* channels) {
-    // Clearing a definition that was never built raises UNRECOGNIZED_ID, so only clear after the first.
+    // Clearing a definition SimConnect doesn't have raises UNRECOGNIZED_ID: one never built, or built
+    // with no channels (a replay that left every surface to the aircraft), so only clear one that has some.
     if (defined) track(SimConnect_ClearDataDefinition(h_, def), "ClearDataDefinition");
-    defined = true;
     int count = 0;
     for (int c = 0; c < kChannelCount; ++c) {
         const ChannelDef& ch = kChannels[c];
@@ -742,6 +744,7 @@ int SimBridge::buildDefinition(DWORD def, bool& defined, PlayMode mode, const Ch
         channels[count++] = c;
         track(SimConnect_AddToDataDefinition(h_, def, ch.simvar, ch.units, SIMCONNECT_DATATYPE_FLOAT64), ch.simvar);
     }
+    defined = count > 0;
     return count;
 }
 
@@ -1248,9 +1251,11 @@ void SimBridge::writeSnap(const Frame& frame) {
         snapFramesLeft_ = 0;
         return;
     }
+    const bool first = snapFramesLeft_ == kSnapFrames;
     for (int i = 0; i < snapChannelCount_; ++i) {
         const int c = snapChannels_[i];
         const double v = frame.v[c];
+        if (first) snapBefore_[i] = input_.raw.v[c];
         snapBuffer_[i] = std::isfinite(v) ? v : input_.raw.v[c];
     }
     const HRESULT hr = SimConnect_SetDataOnSimObject(h_, DEF_SNAP, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, 0, 0,
@@ -1266,21 +1271,28 @@ void SimBridge::writeSnap(const Frame& frame) {
 
 // Half a second after the last snap write: did the values stick, or did the aircraft move them
 // back? The A320neo V2 does (its gear has its own state), and the snap then only shows as a
-// flicker, so stop snapping on this aircraft.
+// flicker, so stop snapping on this aircraft. Values that stuck only count where the snap moved
+// the gear (snapVerdict).
 void SimBridge::checkSnap() {
-    for (int i = 0; i < snapChannelCount_; ++i) {
-        const int c = snapChannels_[i];
-        const double live = input_.raw.v[c];
-        if (std::isfinite(live) && std::fabs(live - snapBuffer_[i]) > 0.25) {
+    double after[kChannelCount];
+    for (int i = 0; i < snapChannelCount_; ++i) after[i] = input_.raw.v[snapChannels_[i]];
+    int which = 0;
+    switch (snapVerdict(snapBefore_, snapBuffer_, after, snapChannelCount_, &which)) {
+        case SnapVerdict::Rejected:
             snapRejected_ = true;
+            snapAccepted_ = false;
             log::info("playback: %s went back to %.2f after being set to %.2f; the aircraft keeps its own gear state, "
                       "so the gear won't be snapped on this aircraft again",
-                      kChannels[c].key, live, snapBuffer_[i]);
-            return;
-        }
+                      kChannels[snapChannels_[which]].key, after[which], snapBuffer_[which]);
+            break;
+        case SnapVerdict::Held:
+            if (!snapAccepted_) log::info("playback: the gear snap moved the gear and held; this aircraft takes it");
+            snapAccepted_ = true;
+            break;
+        case SnapVerdict::Unknown:
+            log::debug("playback: snapped values held, but the gear was there already");
+            break;
     }
-    snapAccepted_ = true;
-    log::debug("playback: snapped values held");
 }
 
 double SimBridge::gearExtensionOf(const Frame& f) {
@@ -1613,16 +1625,32 @@ bool SimBridge::flapsArrived(const Frame& target) {
     return false;
 }
 
+// After Stop, once the aircraft has settled where it was: the flap lever back to where it was. With
+// FLAPS_INCR/DECR that's a notch at a time (FlapNotches::kFrames apart); sending one and letting go
+// left the PMDG 737's at 6 on its way from 7 back to 3.
 void SimBridge::checkRestoreFlaps() {
-    if (!flapsSettled(restoreSnap_, true)) return;
+    if (restoreFlapsFrames_ == 0) {
+        if (!flapsSettled(restoreSnap_, true)) return;
+        restoreFlapsFrames_ = kRestoreFlapsMaxFrames;
+        driver_.apply(Control::Flaps, restoreSnap_, true);
+    } else {
+        driver_.apply(Control::Flaps, restoreSnap_, false);
+    }
+    const bool back = driver_.flapsSentTo(restoreSnap_);
+    if (!back && --restoreFlapsFrames_ > 0) return;
+    if (!back) {
+        log::warn("playback: the flap lever isn't back at %.0f after 10 s; letting go of it",
+                  restoreSnap_.v[kFlapsHandleIndex]);
+    }
     restoreFlapsPending_ = false;
-    driver_.apply(Control::Flaps, restoreSnap_, true);
+    restoreFlapsFrames_ = 0;
     driver_.end(Control::Flaps);
 }
 
 void SimBridge::cancelRestoreFlaps() {
     if (!restoreFlapsPending_) return;
     restoreFlapsPending_ = false;
+    restoreFlapsFrames_ = 0;
     driver_.end(Control::Flaps);
 }
 
@@ -2298,10 +2326,20 @@ void SimBridge::onAircraftChanged() {
     directMotion_ = true;
     snapRejected_ = false;
     snapAccepted_ = false;
+    dropRestore("a flight loaded or the aircraft changed");
+}
+
+// The aircraft was reset (flight loaded, main menu) or changed: what Stop was still putting back
+// (the flaps once settled, a throttle out of reverse, the gear's ways) is left. The flaps were put
+// back after FLIGHT_END, at the main menu.
+void SimBridge::dropRestore(const char* why) {
+    if (restoreFlapsPending_ || restoreThrottleFrames_ > 0 || restoreGearFrames_ > 0) {
+        log::info("playback: %s; not putting the controls back", why);
+    }
     cancelRestoreFlaps();
     if (restoreThrottleFrames_ > 0) {
         restoreThrottleFrames_ = 0;
-        driver_.forgetReverse();  // that was the other aircraft
+        driver_.forgetReverse();  // the aircraft's out of it
         driver_.end(Control::Throttle);
     }
     if (restoreGearFrames_ > 0) {
@@ -2347,6 +2385,7 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     }
     if (deferFlaps) {
         restoreFlapsPending_ = true;
+        restoreFlapsFrames_ = 0;
         flapsHoldStartMs_ = utcNowMs();
         flapsMatchSinceMs_ = 0;
     }

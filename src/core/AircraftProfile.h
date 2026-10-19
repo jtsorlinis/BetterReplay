@@ -107,8 +107,37 @@ std::string keyEventName(uint32_t id);
 // fire as the pilot moved it; which works which way, it finds by trying.
 std::vector<ControlMethod> ownGearWays(const std::string& aircraftKey);
 
+// The flap lever driven with FLAPS_INCR/DECR (kKeyFlapsNotches), like a hardware flap switch: a
+// notch at a time toward the target handle index, going by where the notches sent left the lever.
+// The handle can show that much later: the PMDG 777's follows its flaps, a detent every ten seconds
+// or so, and going by it sent extra notches that ran them to 25. So the handle counts again only
+// once it has held still for kSettleMs since it last moved and the last notch (a notch didn't
+// take). Kept across replays: Stop steps the lever back from where the replay's notches left it.
+class FlapNotches {
+public:
+    // A method beginning: the lever from the last notches, only if they were just now (a replay's
+    // restore); since then the pilot may have moved it.
+    void begin(int64_t nowMs);
+    void forget() { lever_ = NAN; }  // the aircraft was reset
+    // One frame, with the aircraft's handle index: +1 send FLAPS_INCR, -1 FLAPS_DECR, 0 none now.
+    // Notches kFrames apart at least, unless `force`.
+    int step(double target, double handle, int64_t nowMs, bool force);
+    // Whether the notches sent have taken the lever to `target` (nothing to go by counts as there).
+    bool at(double target) const;
+    double lever() const { return lever_; }
+    static constexpr int kFrames = 8;
+    static constexpr int64_t kSettleMs = 30000;
+
+private:
+    double lever_ = NAN;   // NaN: go by the handle
+    double handle_ = NAN;  // as last seen
+    int64_t movedMs_ = 0;  // when the handle last moved or a notch was sent
+    int64_t notchMs_ = 0;  // when the last notch was sent
+    int since_ = 1 << 20;  // frames since it
+};
+
 // Steps a control toward the clip's value with an EventMethod toggle or steps, as a pilot clicking
-// would (ControlDriver::stepFlaps does the same with FLAPS_INCR/DECR): one event when the
+// would (FlapNotches does the same with FLAPS_INCR/DECR): one event when the
 // aircraft's value is half a step or more off the clip's, the next once the aircraft shows it (or
 // after `waitFrames`), kMinFrames apart at least. `force` skips only the latter: a toggle sent
 // again before the aircraft shows the last one would undo it.

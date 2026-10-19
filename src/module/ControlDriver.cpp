@@ -208,11 +208,7 @@ bool ControlDriver::beginSlot(Control c, Slot& s, const ControlMethod& m, std::s
                 }
                 break;
             }
-            // The flap lever from the last notches, only if they were just now (a replay's restore):
-            // since then the pilot may have moved it.
-            if (c == Control::Flaps && m.var == kKeyFlapsNotches && !(utcNowMs() - flapNotchMs_ < kNotchSettleMs)) {
-                flapLever_ = NAN;
-            }
+            if (c == Control::Flaps && m.var == kKeyFlapsNotches) notches_.begin(utcNowMs());
             if (c == Control::Flaps && m.var != kKeyFlapsNotches && (!ctx_.flapPositions || *ctx_.flapPositions < 2)) {
                 why = "FLAPS_SET needs the number of flap positions";
                 return false;
@@ -319,7 +315,17 @@ double ControlDriver::throttleOff(const Frame& clip) const {
 
 void ControlDriver::forgetReverse() {
     slots_[static_cast<int>(Control::Throttle)].toggle.forget();
-    flapLever_ = NAN;
+    notches_.forget();
+}
+
+bool ControlDriver::flapsSentTo(const Frame& f) const {
+    const int ci = static_cast<int>(Control::Flaps);
+    const auto notched = [](const Slot& s) {
+        return s.method.kind == MethodKind::KeyEvent && s.method.var == kKeyFlapsNotches;
+    };
+    bool notches = slots_[ci].active && notched(slots_[ci]);
+    for (const Slot& s : extra_[ci]) notches |= notched(s);
+    return !notches || notches_.at(std::round(f.v[kFlapsHandleIndex]));
 }
 
 namespace {
@@ -750,32 +756,16 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
     }
 }
 
-// Like a hardware flap switch: a notch at a time toward the clip's handle index, going by where
-// the notches sent left the lever. The handle can show that much later: the PMDG 777's follows its
-// flaps, a detent every ten seconds or so, and going by it sent extra notches that ran them to 25.
-// So it counts again only once it has held still for kNotchSettleMs since it last moved and the
-// last notch (a notch didn't take).
+// Like a hardware flap switch: a notch at a time toward the clip's handle index (FlapNotches).
 void ControlDriver::stepFlaps(Slot& s, double target, bool force) {
     const double live = ctx_.live ? ctx_.live->v[kFlapsHandleIndex] : NAN;
-    if (!std::isfinite(live)) return;
-    ++s.since[0];
-    const int64_t nowMs = utcNowMs();
-    const double handle = std::round(live);
-    if (!(handle == flapHandle_)) {
-        flapHandle_ = handle;
-        flapMovedMs_ = nowMs;
-    }
-    if (!std::isfinite(flapLever_) || nowMs - flapMovedMs_ >= kNotchSettleMs) flapLever_ = handle;
-    if (std::fabs(flapLever_ - target) < 0.5) return;
-    if (!force && s.since[0] < kNotchFrames) return;
-    const bool extend = target > flapLever_;
+    const int dir = notches_.step(target, live, utcNowMs(), force);
+    if (dir == 0) return;
+    const bool extend = dir > 0;
     keyEvent(extend ? KEY_FLAPS_INCR : KEY_FLAPS_DECR, 0);
-    flapLever_ += extend ? 1.0 : -1.0;
-    flapMovedMs_ = flapNotchMs_ = nowMs;
-    s.since[0] = 0;
     ++s.sends;
     log::info("controls: flaps a notch %s (FLAPS_%s; the handle at %.0f, the lever to %.0f, the clip %.0f)",
-              extend ? "down" : "up", extend ? "INCR" : "DECR", live, flapLever_, target);
+              extend ? "down" : "up", extend ? "INCR" : "DECR", live, notches_.lever(), target);
 }
 
 void ControlDriver::restoreLVars(Control c) {

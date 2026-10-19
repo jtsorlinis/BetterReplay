@@ -2510,6 +2510,83 @@ TEST(Setup_EventStepperWaitsForTheAircraft) {
     CHECK_EQ(quiet, EventStepper::kWaitFrames - 1);  // it didn't show that one: again, a second on
 }
 
+namespace {
+
+int64_t frameMs(int i) { return static_cast<int64_t>(std::llround(i * kDt * 1000.0)); }
+
+// A flap lever moved by each notch at once, its handle index showing where it was lagMs before.
+struct NotchedLever {
+    int64_t lagMs = 0;
+    std::vector<std::pair<int64_t, double>> moves;  // from when, where
+    double handle(int64_t ms) const {
+        double h = moves.front().second;
+        for (const auto& m : moves) {
+            if (m.first + lagMs <= ms) h = m.second;
+        }
+        return h;
+    }
+};
+
+}  // namespace
+
+TEST(Playback_FlapNotchesTakeTheLeverAllTheWayBack) {
+    // Stop after a landing replay on the PMDG 737: the replay's notches took the lever to 7, and it
+    // was at 3 before. Its handle shows a notch about 3 s later. Stepped a frame at a time until the
+    // notches have taken it back, as Stop does: four FLAPS_DECR, kFrames apart, then no more.
+    NotchedLever ac{3000, {{0, 7.0}}};
+    FlapNotches n;
+    n.begin(0);
+    CHECK_EQ(n.step(7.0, 7.0, 0, false), 0);  // the replay's last frame, the lever where the clip has it
+    std::vector<int> sentAt;
+    int i = 1;
+    for (; i < 600 && !n.at(3.0); ++i) {
+        const int64_t ms = frameMs(i);
+        const int dir = n.step(3.0, ac.handle(ms), ms, i == 1);
+        if (dir == 0) continue;
+        CHECK_EQ(dir, -1);
+        ac.moves.push_back({ms, ac.moves.back().second + dir});
+        sentAt.push_back(i);
+        if (sentAt.size() == 1u) CHECK(!n.at(3.0));  // one notch isn't back: where Stop used to let go
+    }
+    REQUIRE(sentAt.size() == 4u);
+    CHECK_EQ(sentAt[0], 1);
+    for (size_t k = 1; k < sentAt.size(); ++k) CHECK_EQ(sentAt[k] - sentAt[k - 1], FlapNotches::kFrames);
+    CHECK_EQ(n.lever(), 3.0);
+    // The handle catching up later sends nothing more, nor does it holding still at 3.
+    int extra = 0;
+    for (int k = i; k < i + 60 * 60; ++k) extra += n.step(3.0, ac.handle(frameMs(k)), frameMs(k), false) != 0;
+    CHECK_EQ(extra, 0);
+    CHECK_EQ(ac.moves.back().second, 3.0);
+    CHECK_EQ(ac.handle(frameMs(i + 60 * 60)), 3.0);
+}
+
+TEST(Playback_FlapNotchesKeepTheLeverOrGoByTheHandle) {
+    // A notch the aircraft didn't take (its handle never shows it): sent again once the handle has
+    // held still for kSettleMs, not before.
+    FlapNotches lost;
+    lost.begin(0);
+    std::vector<int64_t> sentMs;
+    for (int i = 0; i < 60 * 40; ++i) {
+        if (lost.step(1.0, 0.0, frameMs(i), false) != 0) sentMs.push_back(frameMs(i));
+    }
+    REQUIRE(sentMs.size() == 2u);
+    CHECK_EQ(sentMs[0], 0);
+    CHECK_NEAR(static_cast<double>(sentMs[1] - sentMs[0]), static_cast<double>(FlapNotches::kSettleMs), 20.0);
+    // A method beginning (Stop's, or the next replay's) keeps the lever where notches just left it,
+    // and goes by the handle once they're kSettleMs old. Nothing to go by counts as there.
+    FlapNotches b;
+    b.begin(0);
+    CHECK_EQ(b.step(3.0, 0.0, 0, true), 1);
+    b.begin(1000);
+    CHECK_EQ(b.lever(), 1.0);
+    CHECK(!b.at(3.0));
+    b.begin(FlapNotches::kSettleMs);
+    CHECK(std::isnan(b.lever()));
+    CHECK(b.at(3.0));
+    CHECK_EQ(b.step(3.0, 2.0, FlapNotches::kSettleMs, false), 1);  // from the handle
+    CHECK_EQ(b.lever(), 3.0);
+}
+
 TEST(Setup_InTheAirOnlyTheGear) {
     SetupHarness h;
     h.aircraft.onGround = false;
