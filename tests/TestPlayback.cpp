@@ -152,6 +152,67 @@ TEST(Playback_FixedGearKeepsRecordedHandle) {
     CHECK(!deriveGearCommand(none));
 }
 
+namespace {
+
+// The 777 landing that started with its flaps still on their way from 25 to 30: 0.72 at the
+// start, out at 15 s, the handle index following them (5 until 3.2 s, then 6); retracted from
+// 40 s to 50 s after landing.
+Clip flapsOnTheirWayClip() {
+    Clip c = makeClip(60.0);
+    for (Frame& f : c.frames) {
+        const double out = f.t < 15.0   ? 0.7166 + (1.0 - 0.7166) * f.t / 15.0
+                           : f.t < 40.0 ? 1.0
+                           : f.t < 50.0 ? 1.0 - (f.t - 40.0) / 10.0
+                                        : 0.0;
+        f.v[kFlapsLeft] = out;
+        f.v[kFlapsRight] = out;
+        f.v[kFlapsHandleIndex] = f.t < 3.2 ? 5.0 : f.t < 40.0 ? 6.0 : f.t < 50.0 ? 3.0 : 0.0;
+    }
+    return c;
+}
+
+}  // namespace
+
+TEST(Playback_FlapsDestinationIsWhereTheirMovementEnds) {
+    const Clip c = flapsOnTheirWayClip();
+    Frame d = flapsDestination(c, 0.0);
+    CHECK_NEAR(d.v[kFlapsHandleIndex], 6.0, 0);
+    CHECK_NEAR(d.v[kFlapsLeft], 1.0, 1e-9);
+    CHECK_NEAR(d.t, 16.0, 0.1);  // once they've been still for kFlapsRestSec, not at the later retraction
+    d = flapsDestination(c, 2.0);
+    CHECK_NEAR(d.v[kFlapsHandleIndex], 6.0, 0);
+    // Still there: the frame at that time, not where they go next.
+    d = flapsDestination(c, 20.0);
+    CHECK_NEAR(d.t, 20.0, 1e-9);
+    CHECK_NEAR(d.v[kFlapsHandleIndex], 6.0, 0);
+    d = flapsDestination(c, 38.5);
+    CHECK_NEAR(d.v[kFlapsHandleIndex], 6.0, 0);  // the retraction starts more than kFlapsRestSec later
+    d = flapsDestination(c, 45.0);
+    CHECK_NEAR(d.v[kFlapsHandleIndex], 0.0, 0);
+    CHECK_NEAR(d.v[kFlapsLeft], 0.0, 1e-9);
+}
+
+TEST(Playback_FlapsDestinationStopsWhereTheyTurnBack) {
+    Clip c = makeClip(20.0);
+    for (Frame& f : c.frames) {
+        const double out = f.t < 5.0 ? 0.5 + 0.04 * f.t : 0.7 - 0.04 * (f.t - 5.0);
+        f.v[kFlapsLeft] = out < 0.0 ? 0.0 : out;
+        f.v[kFlapsRight] = f.v[kFlapsLeft];
+        f.v[kFlapsHandleIndex] = f.t < 5.0 ? 4.0 : 2.0;
+    }
+    const Frame d = flapsDestination(c, 1.0);
+    CHECK_NEAR(d.t, 5.0, 0.1);
+    CHECK_NEAR(d.v[kFlapsLeft], 0.7, 0.01);
+}
+
+TEST(Playback_FlapsDestinationWithoutFlaps) {
+    Clip c = makeClip(5.0);
+    c.present.reset(static_cast<size_t>(kFlapsLeft));
+    c.present.reset(static_cast<size_t>(kFlapsRight));
+    CHECK_NEAR(flapsDestination(c, 2.0).t, 2.0, 1e-9);
+    CHECK_NEAR(flapsDestination(Clip(), 2.0).t, 0.0, 0);
+}
+
 TEST(Playback_ChannelsWithoutValuesAreNotPlayed) {
     // e.g. an input event the recording aircraft didn't have: in the file, but all NaN.
     Clip c = makeClip(2.0);

@@ -1,5 +1,6 @@
 #include "PlaybackController.h"
 
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -23,7 +24,49 @@ double gearExtension(const Frame& f, const ChannelMask& present) {
     return n > 0 ? sum / n : NAN;
 }
 
+// Mean of the flap surfaces the clip recorded (0 up, 1 fully out), or NaN.
+double flapsExtension(const Frame& f, const ChannelMask& present) {
+    double sum = 0.0;
+    int n = 0;
+    for (int c : {static_cast<int>(kFlapsLeft), static_cast<int>(kFlapsRight)}) {
+        if (present.test(static_cast<size_t>(c)) && std::isfinite(f.v[c])) {
+            sum += f.v[c];
+            ++n;
+        }
+    }
+    return n > 0 ? sum / n : NAN;
+}
+
 }  // namespace
+
+Frame flapsDestination(const Clip& clip, double t) {
+    Frame at;
+    const std::vector<Frame>& frames = clip.frames;
+    if (frames.empty()) return at;
+    sampleFrames(frames.data(), frames.size(), t, at, nullptr);
+    double last = flapsExtension(at, clip.present);
+    if (std::isnan(last)) return at;
+    auto it = std::lower_bound(frames.begin(), frames.end(), t, [](const Frame& f, double v) { return f.t < v; });
+    double movedT = t;
+    int dir = 0;
+    const Frame* end = nullptr;
+    for (; it != frames.end(); ++it) {
+        const double x = flapsExtension(*it, clip.present);
+        if (std::isnan(x)) continue;
+        if (std::fabs(x - last) > kFlapsRestTol) {
+            const int d = x > last ? 1 : -1;
+            if (dir != 0 && d != dir) break;  // turned back: this far, no further
+            dir = d;
+            last = x;
+            movedT = it->t;
+            end = &*it;
+        } else if (it->t - movedT >= kFlapsRestSec) {
+            if (dir != 0) end = &*it;  // at rest there (the 777's handle index caught up)
+            break;
+        }
+    }
+    return dir != 0 ? *end : at;
+}
 
 bool deriveGearCommand(Clip& clip) {
     if (clip.frames.empty()) return false;

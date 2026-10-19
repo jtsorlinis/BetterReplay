@@ -28,6 +28,14 @@ private:
 // input event the recording aircraft didn't have, so playback leaves them alone.
 void dropEmptyChannels(Clip& clip);
 
+// Where the clip's flaps are going at clip time `t`: the frame where the movement they're in
+// there ends (held still for kFlapsRestSec, turned back, or the clip's end), or the frame at `t`
+// if they aren't moving. The PMDG 777's handle index follows its flaps, so a clip that starts
+// with them still on their way to 30 has the handle at 25, though the pilot's lever is at 30.
+Frame flapsDestination(const Clip& clip, double t);
+constexpr double kFlapsRestSec = 1.0;
+constexpr double kFlapsRestTol = 0.002;  // of the surfaces' travel (0 up, 1 fully out)
+
 class PlaybackController {
 public:
     static constexpr double kMinSpeed = 0.25;

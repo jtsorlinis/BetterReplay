@@ -463,7 +463,8 @@ private:
     double flapsMovedAt_ = NAN;
     static double flapsOf(const Frame& f);
     bool flapsDriven() const;
-    int flapsMove(const Frame& target) const;
+    int flapsMove(const Frame& target, bool say) const;  // (say: log flaps the clip has on their way)
+    int flapsMoveTo(const Frame& target) const;
     bool flapsArrived(const Frame& target);
     void checkRestoreFlaps();
     void cancelRestoreFlaps();

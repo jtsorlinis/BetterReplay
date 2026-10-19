@@ -1341,7 +1341,7 @@ void SimBridge::beginReady(const Frame& target) {
         resolveDirect();
         for (int c = kVelBodyX; c <= kVelBodyZ; ++c) readySpeed_ &= directId_[c] != FS_VAR_INVALID_ID;
     }
-    const int flaps = flapsMove(target);
+    const int flaps = flapsMove(target, false);
     if (gearNeeded) jumpPrep_.gear = PrepStep::Active;
     if (flaps != 0 && readySpeed_) {
         jumpPrep_.flaps = PrepStep::Active;
@@ -1531,10 +1531,26 @@ bool SimBridge::flapsDriven() const {
     return ieActive_[kInputFlaps] || (profileDrives_[i] && profile_[Control::Flaps].state == ControlState::Ok);
 }
 
-// Whether driven flaps have to move to get where `target` has them: 1 out, -1 in, 0 not. By the
-// handle's index where both have one (a lever in the clip's detent stays, whatever its setting).
-int SimBridge::flapsMove(const Frame& target) const {
+// Whether driven flaps have to move to get where `target` has them: 1 out, -1 in, 0 not. Flaps
+// already where the clip's are on their way to count as there (flapsDestination): the 777's
+// handle index follows its flaps, so a landing that starts with them going to 30 has the handle
+// at 25, though the pilot's lever is at 30, like the aircraft's.
+int SimBridge::flapsMove(const Frame& target, bool say) const {
     if (!flapsDriven()) return 0;
+    const int move = flapsMoveTo(target);
+    if (move == 0 || !playClip_) return move;
+    const Frame dest = flapsDestination(*playClip_, target.t);
+    if (flapsMoveTo(dest) != 0) return move;
+    if (say) {
+        log::info("playback: the clip's flaps are on their way to where the aircraft has them (%.2f, handle %.0f, "
+                  "there %.1f s in); not waiting for them",
+                  flapsOf(dest), dest.v[kFlapsHandleIndex], dest.t - target.t);
+    }
+    return 0;
+}
+
+// By the handle's index where both have one (a lever in the clip's detent stays, whatever its setting).
+int SimBridge::flapsMoveTo(const Frame& target) const {
     const double want = target.v[kFlapsHandleIndex];
     const double have = input_.raw.v[kFlapsHandleIndex];
     if (std::isfinite(want) && std::isfinite(have)) {
@@ -1747,7 +1763,7 @@ void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
         // Flaps that still have to move (they couldn't before the jump), and the engines, hold the
         // replay at its start until they're there (settleJump).
         jumpPrepStarted_ = false;  // the next jump starts afresh
-        const int flaps = flapsMove(frame);
+        const int flaps = flapsMove(frame, true);
         const int engines = enginesMove(frame);
         settlingFlaps_ = flaps != 0;
         settling_ = flaps != 0 || engines != 0;
