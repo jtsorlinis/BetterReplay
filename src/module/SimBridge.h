@@ -36,6 +36,8 @@ public:
     bool restoring() const override { return restoreWaiting_; }
     void finishRestore() override;
     bool prepareJump(const Frame& target) override;
+    bool settleJump(const Frame& target) override;
+    JumpPrep jumpPrep() const override { return jumpPrep_; }
     void applyProfile(const AircraftProfile* profile) override;
 
     // IControlSim (the control setup)
@@ -193,6 +195,7 @@ private:
     void resolveInputEvents();
     void pollInputEvents();
     void sendInputEvents(const Frame& frame, bool force);
+    void sendInputEvent(int channel, const Frame& frame, bool force);
     void checkInputEvents();
     // Set channels the aircraft keeps overriding (flaps, spoilers, surfaces) are dropped for the
     // rest of the playback, so the two don't fight (visible flicker).
@@ -375,11 +378,35 @@ private:
     // (and after a flight load, when the aircraft's levers start from scratch).
     double throttleAxis_[4] = {NAN, NAN, NAN, NAN};
     bool throttleAxisLogged_ = false;
-    // Before a jump onto the ground with the gear down, on an aircraft whose gear can't be snapped:
-    // lower it where the aircraft is first (see prepareJump).
+    // Before a jump the aircraft is got ready where it is, frozen (see prepareJump): its gear
+    // lowered (onto the ground with the gear down, on an aircraft whose gear can't be snapped),
+    // its flaps and engines where the clip starts, all at once. Meanwhile it's given the clip's
+    // speed (its body velocities), so it sets its flaps for that speed, unless it's on the ground
+    // and the clip starts faster than kReadyGroundMaxKt (its flaps are then set after the jump).
     static constexpr int64_t kPrepareGearMaxMs = 50000;  // a profile's ways of lowering it, each 6 to 10 s (WayPicker)
-    int64_t prepareStartMs_ = 0;
-    bool prepareGearSent_ = false;
+    static constexpr double kReadyGroundMaxKt = 30.0;
+    // The engines: a turbine more than kEnginesNeedN1 off the clip's N1 is spooled there, until
+    // each is within kEnginesThereN1 of it or has held steady (within kEnginesMovedN1) for
+    // kEnginesSteadyMs (idle at altitude isn't idle on the ground); kEnginesMaxMs at most. Not
+    // into reverse, and not where the throttle is replayed as simvars.
+    static constexpr double kEnginesNeedN1 = 5.0;
+    static constexpr double kEnginesThereN1 = 3.0;
+    static constexpr double kEnginesMovedN1 = 0.5;
+    static constexpr int64_t kEnginesSteadyMs = 3000;
+    static constexpr int64_t kEnginesMaxMs = 40000;
+    int64_t readyStartMs_ = 0;
+    bool readySpeed_ = false;     // writing the clip's speed meanwhile
+    bool readyFlapsFirst_ = false;
+    bool readyThrottleFirst_ = false;
+    double enginesAt_[4] = {NAN, NAN, NAN, NAN};
+    int64_t enginesMovedMs_ = 0;
+    void beginReady(const Frame& target);
+    void readyGear(const Frame& target, int64_t now);
+    void readyFlaps(const Frame& target);
+    void readyEngines(const Frame& target, int64_t now);
+    int enginesMove(const Frame& target) const;
+    void writeClipSpeed(const Frame& target);
+    void moveFlapLever(const Frame& target, bool force);
     bool snapAccepted_ = false;    // a gear snap held on this aircraft: no need to lower it first
     bool restoreDeferred_ = false;  // Stop: lowering the gear before putting the aircraft back
     static double gearExtensionOf(const Frame& f);
@@ -398,7 +425,31 @@ private:
     int64_t flapsHoldStartMs_ = 0;
     int64_t flapsMatchSinceMs_ = 0;
     void holdFlaps();
-    bool flapsSettled(const Frame& target);
+    bool flapsSettled(const Frame& target, bool ground);
+    // Around a jump, for the panel's checklist (jumpPrep): what this one gets ready, from its
+    // first prepareJump until the next jump's.
+    JumpPrep jumpPrep_;
+    bool jumpPrepStarted_ = false;
+    // Flaps that the profile or an input event drives (flapsDriven) are set before the jump (or,
+    // where they couldn't be, after it, the replay holding at its start: settleJump): once the
+    // lever has waited for the aircraft to settle at the clip's speed (above), until the surfaces
+    // are within kFlapsThereTol of the clip's, or have held still for kFlapsStillMs with the
+    // handle at the clip's index (its setting can differ: CONF 1 for 1+F), or haven't moved for
+    // kFlapsStuckMs; kFlapsArriveMaxMs at most. The PMDG 777's flaps take about ten seconds a detent.
+    static constexpr double kFlapsThereTol = 0.02;
+    static constexpr double kFlapsMovedTol = 0.005;
+    static constexpr int64_t kFlapsStillMs = 3000;
+    static constexpr int64_t kFlapsStuckMs = 15000;
+    static constexpr int64_t kFlapsArriveMaxMs = 90000;
+    bool settling_ = false;       // holding at the start of the replay for the flaps
+    bool flapsArriving_ = false;  // the lever has moved; waiting for the flaps (before the jump or after)
+    int64_t flapsArriveStartMs_ = 0;
+    int64_t flapsMovedMs_ = 0;
+    double flapsMovedAt_ = NAN;
+    static double flapsOf(const Frame& f);
+    bool flapsDriven() const;
+    int flapsMove(const Frame& target) const;
+    bool flapsArrived(const Frame& target);
     void checkRestoreFlaps();
     void cancelRestoreFlaps();
     // Stop on a "toggle reverse" aircraft still in reverse: the throttle is driven to where it was

@@ -18,7 +18,7 @@
 </head>
 <body class="border-box">
   <ingamepanel-betterreplay>
-    <ingame-ui id="BetterReplayPanel" panel-id="PANEL_BETTERREPLAY" title="BETTER REPLAY" class="ingameUiFrame"
+    <ingame-ui id="BetterReplayPanel" panel-id="PANEL_BETTERREPLAY" title="Better Replay" class="ingameUiFrame"
                content-fit="true" min-width="30" min-height="40">
       <!-- One screen at a time (.view-main / .view-clips / .view-player on the root); the control
            setup takes over the whole panel while it's offered or running (.setup-mode). -->
@@ -113,13 +113,12 @@
           <span class="br-player-kicker" id="br-player-kicker">Replaying</span>
           <div class="br-now" id="br-now"></div>
           <div class="br-now-sub" id="br-now-sub"></div>
-          <!-- before the replay starts (.preparing): what it's waiting for, in place of the controls -->
+          <!-- before the replay starts (.preparing): what it's getting ready, ticked off as it goes,
+               in place of the controls -->
           <div class="br-prep">
-            <div class="br-prep-spinner">
-              <svg viewBox="0 0 24 24"><path d="M11 4h2v12.2l4.6-4.6 1.4 1.4-7 7-7-7 1.4-1.4 4.6 4.6z" fill="currentColor"/></svg>
-            </div>
-            <div class="br-prep-title">Lowering the gear</div>
-            <div class="br-prep-sub">The replay starts as soon as it's down</div>
+            <div class="br-prep-title">Getting the aircraft ready</div>
+            <div class="br-prep-sub">Frozen until it's ready, then the replay starts</div>
+            <div class="br-prep-list" id="br-prep-list"></div>
             <button type="button" class="br-btn br-prep-cancel" id="br-prep-cancel">Cancel</button>
           </div>
           <div class="br-player-body">

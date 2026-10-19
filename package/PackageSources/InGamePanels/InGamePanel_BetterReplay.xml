@@ -5,12 +5,15 @@
   Property not set or invalid" in FlightSimulator2024.exe); the attribute set follows a 2024
   dev-forum example. id must match panel-id in BetterReplayPanel.html; icon names
   html_ui\icons\toolbar\ICON_TOOLBAR_BETTERREPLAY.svg. Sizes are percentages of screen height.
+  Name is the window's title (the sim's ingame-ui template sets it over the HTML's title
+  attribute, and its header shows it in capitals) and the toolbar button's tooltip. The sim saves
+  the window's position and size by id (INGAME_PANEL_LAYOUT_PANEL_BETTERREPLAY_*).
 -->
 <SimBase.Document Type="InGamePanels" version="1,0">
   <Filename>InGamePanel_BetterReplay.spb</Filename>
   <InGamePanels.InGamePanelDefinition
       id="PANEL_BETTERREPLAY"
-      Name="BetterReplay"
+      Name="Better Replay"
       url="html_ui/InGamePanels/BetterReplayPanel/BetterReplayPanel.html"
       icon="ICON_TOOLBAR_BETTERREPLAY"
       resizeDirections="both"

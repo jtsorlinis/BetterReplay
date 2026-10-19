@@ -1334,7 +1334,8 @@ button {
   color: var(--br-red);
 }
 
-/* Before the replay starts (lowering the gear first): a big message in place of the controls. */
+/* Before the replay starts (lowering the gear, then the flaps at the start): what it's getting
+   ready, in place of the controls. */
 .br-prep {
   display: none;
 }
@@ -1357,34 +1358,32 @@ button {
   text-align: center;
 }
 
-.br-prep-spinner {
-  position: relative;
-  width: 96px;
-  height: 96px;
+.br-prep-title {
+  font-size: 30px;
+  font-weight: bold;
 }
 
-/* The ring turns; the arrow in it stays upright. */
-.br-prep-spinner:before {
-  content: "";
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  border: 6px solid rgba(245, 177, 61, 0.2);
+.br-prep-sub {
+  margin-top: 8px;
+  color: var(--br-muted);
+  font-size: 17px;
+}
+
+/* The steps, one under the other, centred as a block. */
+.br-prep-list {
+  margin-top: 28px;
+  text-align: left;
+}
+
+/* The step under way: its ring turns. */
+.br-check.active {
+  color: var(--br-text);
+}
+
+.br-check.active .br-check-box {
+  border-color: rgba(245, 177, 61, 0.2);
   border-top-color: var(--br-amber);
-  border-radius: 50%;
   animation: br-spin 1.1s linear infinite;
-}
-
-.br-prep-spinner svg {
-  position: absolute;
-  top: 24px;
-  left: 24px;
-  width: 48px;
-  height: 48px;
-  color: var(--br-amber);
-  animation: br-bob 1.4s ease-in-out infinite;
 }
 
 @keyframes br-spin {
@@ -1396,30 +1395,8 @@ button {
   }
 }
 
-@keyframes br-bob {
-  0%,
-  100% {
-    transform: translateY(-4px);
-  }
-  50% {
-    transform: translateY(4px);
-  }
-}
-
-.br-prep-title {
-  margin-top: 26px;
-  font-size: 30px;
-  font-weight: bold;
-}
-
-.br-prep-sub {
-  margin-top: 8px;
-  color: var(--br-muted);
-  font-size: 17px;
-}
-
 .br-btn.br-prep-cancel {
-  margin-top: 30px;
+  margin-top: 16px;
   padding: 10px 26px;
   font-size: 16px;
 }

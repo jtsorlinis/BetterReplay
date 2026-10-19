@@ -267,6 +267,21 @@ struct FakeSim : ISimOutput {
         }
         return true;
     }
+    // settleJump: not ready for this many more calls; prep is what jumpPrep reports.
+    int settleFrames = 0;
+    int settleCalls = 0;
+    double settleTarget = NAN;
+    JumpPrep prep;
+    bool settleJump(const Frame& target) override {
+        ++settleCalls;
+        settleTarget = target.t;
+        if (settleFrames > 0) {
+            --settleFrames;
+            return false;
+        }
+        return true;
+    }
+    JumpPrep jumpPrep() const override { return prep; }
 
     // Events sent for one channel, in order.
     std::vector<double> eventsFor(int channel) const {
@@ -581,6 +596,65 @@ TEST(EnginePlayback_HoldsBeforeAJumpUntilTheSimIsReady) {
     h.frames(1, -33.0);
     CHECK_EQ(h.sim.prepareCalls, calls + 1);
     CHECK_NEAR(h.sim.prepareTarget, 5.0, 1e-9);
+}
+
+TEST(EnginePlayback_HoldsAtTheStartAfterAJumpUntilTheSimIsReady) {
+    PlaybackHarness h;
+    std::string err;
+    h.sim.prepareFrames = 10;  // the gear and engines getting ready where the aircraft is
+    h.sim.settleFrames = 30;   // then half a second at the start, the flaps getting there
+    h.sim.prep.gear = PrepStep::Done;
+    h.sim.prep.engines = PrepStep::Active;
+    h.sim.prep.enginesDown = true;
+    REQUIRE(h.engine.play(h.clipFile, err));
+    h.frames(10, -33.0);
+    std::string status;
+    h.engine.statusJson(status);
+    CHECK(status.find("\"preparing\":true,\"prep\":{\"gear\":\"done\",\"flaps\":\"\",\"flapsIn\":false,\"engines\":"
+                      "\"active\",\"enginesDown\":true}") != std::string::npos);
+    CHECK(h.sim.written.empty());
+    h.sim.prep.engines = PrepStep::Done;
+    h.sim.prep.flaps = PrepStep::Active;
+    h.sim.prep.flapsIn = true;
+
+    h.frames(1, -33.0);  // the jump: settleJump is asked from its frame on
+    CHECK_EQ(h.sim.jumps, 1);
+    CHECK_EQ(h.sim.settleCalls, 1);
+    h.frames(29, -33.0);
+    CHECK_EQ(h.sim.settleCalls, 30);
+    CHECK_EQ(h.sim.jumps, 1);
+    // Held at the start (the jump's frame steps as ever): written every frame, the playhead
+    // still, the events sent once (the jump's).
+    REQUIRE(h.sim.written.size() == 30);
+    const double held = h.sim.written[0].t;
+    CHECK(held > 0.0 && held < 0.02);
+    for (const Frame& f : h.sim.written) CHECK_NEAR(f.t, held, 1e-9);
+    CHECK_NEAR(h.engine.playback().time(), held, 0);
+    CHECK_NEAR(h.sim.settleTarget, held, 1e-9);
+    CHECK_EQ(h.sim.events.size(), kClipEventChannels);
+    h.engine.statusJson(status);
+    CHECK(status.find("\"preparing\":true,\"prep\":{\"gear\":\"done\",\"flaps\":\"active\",\"flapsIn\":true,") !=
+          std::string::npos);
+
+    h.frames(1, -33.0);  // ready: the replay starts from there
+    CHECK_EQ(h.sim.settleCalls, 31);
+    h.engine.statusJson(status);
+    CHECK(status.find("\"preparing\":false,\"prep\":{\"gear\":\"\",\"flaps\":\"\",\"flapsIn\":false,\"engines\":\"\","
+                      "\"enginesDown\":false}") != std::string::npos);
+    h.frames(60, -33.0);
+    CHECK_NEAR(h.engine.playback().time(), held + 1.0, 1e-3);
+    CHECK_EQ(h.sim.settleCalls, 31);  // only after a jump
+
+    // A seek during the hold jumps again, and holds there instead.
+    h.sim.settleFrames = 5;
+    REQUIRE(h.engine.seek(5.0, err));
+    h.frames(3, -33.0);
+    CHECK_NEAR(h.engine.playback().time(), h.sim.settleTarget, 0);
+    CHECK_NEAR(h.sim.settleTarget, 5.0 + 1.0 / 60.0, 1e-3);
+    REQUIRE(h.engine.seek(7.0, err));
+    h.frames(10, -33.0);  // two more frames held, ready on the third, then seven frames on
+    CHECK_NEAR(h.sim.settleTarget, 7.0 + 1.0 / 60.0, 1e-3);
+    CHECK_NEAR(h.engine.playback().time(), 7.0 + 8.0 / 60.0, 1e-3);
 }
 
 TEST(EnginePlayback_ReversersFollowTheClip) {

@@ -26,8 +26,18 @@ interface PlayState {
     dur: number;
     speed: number;
     playing: boolean;
-    preparing?: boolean;  // holding before a jump, e.g. lowering the gear before going to the runway
+    preparing?: boolean;  // holding around a jump: the gear, flaps and engines got ready first
+    prep?: PrepState;
     eventT: number;
+}
+// What a replay is getting ready around a jump (Engine::statusJson's play.prep): each step ""
+// (not part of it), "active" or "done".
+interface PrepState {
+    gear: string;
+    flaps: string;
+    flapsIn: boolean;      // retracting them
+    engines: string;
+    enginesDown: boolean;  // spooling them down
 }
 interface SetupControl {
     control: string;
@@ -356,14 +366,26 @@ function resultsHtml(controls: SetupControl[]): string {
     return html;
 }
 
-// What the setup is waiting for, ticked off as it happens.
-function checklistHtml(items: Array<[boolean, string]>): string {
+// What the setup or a replay is waiting for, ticked off as it happens: each item's state ("ok"
+// done, "active" under way, "" not yet) and text.
+function checklistHtml(items: Array<[string, string]>): string {
     let html = "";
     for (let i = 0; i < items.length; ++i) {
-        html += '<div class="br-check' + (items[i][0] ? " ok" : "") + '"><span class="br-check-box"></span><span>' +
+        html += '<div class="br-check' + (items[i][0] ? " " + items[i][0] : "") + '"><span class="br-check-box"></span><span>' +
             escapeHtml(items[i][1]) + "</span></div>";
     }
     return html;
+}
+
+// Before a replay starts, frozen where the aircraft is: the steps under way together, each
+// ticked off when it's done.
+function prepItems(prep: PrepState): Array<[string, string]> {
+    const items: Array<[string, string]> = [];
+    const state = (s: string) => (s === "done" ? "ok" : s);
+    if (prep.gear) items.push([state(prep.gear), "Lowering the gear"]);
+    if (prep.flaps) items.push([state(prep.flaps), prep.flapsIn ? "Retracting the flaps" : "Extending the flaps"]);
+    if (prep.engines) items.push([state(prep.engines), prep.enginesDown ? "Spooling down the engines" : "Spooling up the engines"]);
+    return items;
 }
 
 // While replaying: one row per method tried in this step, the current one last. The methods still
@@ -924,9 +946,9 @@ class BetterReplayPanel extends UIElement {
             prompt = "Set up replay controls for this aircraft";
             detail = "Line up on a runway with the engines running, ready for takeoff. The setup can start once these are ticked:";
             list = checklistHtml([
-                [r.parkingBrake, "Parking brake set"],
-                [r.onRunway, "On a runway"],
-                [r.engines, "Engines running"],
+                [r.parkingBrake ? "ok" : "", "Parking brake set"],
+                [r.onRunway ? "ok" : "", "On a runway"],
+                [r.engines ? "ok" : "", "Engines running"],
             ]);
             buttons = setup.requested ? ["dismiss"] : ["later", "never"];
         } else if (setup && setup.offer === "gear") {
@@ -1073,10 +1095,13 @@ class BetterReplayPanel extends UIElement {
         if (!p.active) return;
 
         const clip = this.findClip(p.file);
-        // Until the replay starts (the gear going down first), a big message instead of the controls.
+        // Until the replay starts (the gear, flaps and engines got ready first), what it's getting
+        // ready instead of the controls.
         const preparing = !!p.preparing;
         byId("br-player").classList.toggle("preparing", preparing);
-        updateText(byId("br-player-kicker"), preparing ? "Getting ready" : "Replaying");
+        updateText(byId("br-player-kicker"), preparing ? "Starting the replay" : "Replaying");
+        const noPrep = { gear: "", flaps: "", flapsIn: false, engines: "", enginesDown: false };
+        if (preparing) setHtml("br-prep-list", checklistHtml(prepItems(p.prep || noPrep)));
         updateText(byId("br-now"), clip ? clipTitle(clip) : p.file);
         const note = this.note && this.note.view === "player" ? this.note.text : "";
         const sub = byId("br-now-sub");

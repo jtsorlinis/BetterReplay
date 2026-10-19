@@ -18,6 +18,21 @@
 
 namespace br {
 
+// A step of getting ready around a jump: not part of this one, under way, or done.
+enum class PrepStep : uint8_t { None, Active, Done };
+
+// What the sim side gets ready around a jump (ISimOutput::prepareJump, then settleJump), for the
+// panel's checklist. Before it, frozen where the aircraft is at the clip's speed: the gear
+// lowered, the flaps set and the engines spooled to where the clip starts, together. After it,
+// at the start of the replay: the flaps, if they couldn't be set before.
+struct JumpPrep {
+    PrepStep gear = PrepStep::None;
+    PrepStep flaps = PrepStep::None;
+    PrepStep engines = PrepStep::None;
+    bool flapsIn = false;      // retracting them
+    bool enginesDown = false;  // spooling them down
+};
+
 // What playback needs from the sim (the module implements it with SimConnect).
 class ISimOutput {
 public:
@@ -39,6 +54,15 @@ public:
         (void)target;
         return true;
     }
+    // Called after the jump, every frame from the one that went to `target`, until it returns
+    // true; meanwhile the playhead still holds and that frame is written every frame, so the
+    // aircraft waits at the start of the replay, e.g. while its flaps get where the clip has them.
+    virtual bool settleJump(const Frame& target) {
+        (void)target;
+        return true;
+    }
+    // What it's getting ready around the current jump (while prepareJump or settleJump hold).
+    virtual JumpPrep jumpPrep() const { return JumpPrep(); }
     // Optionally restore the pre-playback snapshot (Set and Snap channels), then unfreeze.
     virtual void endPlayback(const Frame& snapshot, bool restore) = 0;
     // True while the sim side is still settling the restored aircraft (e.g. waiting for the gear
@@ -252,6 +276,7 @@ private:
     double lastEventValue_[kChannelCount] = {};
     bool jumpPending_ = false;  // play/seek happened: resync event channels and snap the next frame
     bool preparing_ = false;    // holding before a jump until ISimOutput::prepareJump is ready
+    bool settling_ = false;     // holding after it, where it went, until ISimOutput::settleJump is
     Frame playFrame_;
     // After a restore the sim may report the old position for a frame or two; don't record those.
     static constexpr int kSettleFrames = 30;

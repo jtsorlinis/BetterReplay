@@ -45,11 +45,15 @@ const commBusMock = `
     aircraft: 'Airbus A320neo', restoreLeft: 0,
     play: { active: false, file: '', t: 0, dur: 0, speed: 1, playing: false, eventT: 0 } };
   const listeners = {};
-  // prepareSec: Play first holds that long, "lowering the gear"; restoreSec: Stop keeps the aircraft
-  // frozen that long, "waiting for the gear" (10 s at most, like EngineConfig::restoreMaxSec);
-  // fail: { op: 'error' } fails the next command of that op with that error.
-  window.harness = { state: state, clips: clips, log: [], setup: window.harnessSetup, prepareSec: 0, restoreSec: 10,
-    fail: {} };
+  // gearSec, flapsSec, enginesSec: Play first holds, frozen, until each has taken that long
+  // ("lowering the gear", "extending the flaps", "spooling up the engines", together; 0: not part
+  // of it); restoreSec: Stop keeps the aircraft frozen that long, "waiting for the gear" (10 s at
+  // most, like EngineConfig::restoreMaxSec); fail: { op: 'error' } fails the next command of that
+  // op with that error.
+  window.harness = { state: state, clips: clips, log: [], setup: window.harnessSetup, gearSec: 0, flapsSec: 0,
+    enginesSec: 0, restoreSec: 10, fail: {} };
+  const noPrep = { gear: '', flaps: '', flapsIn: false, engines: '', enginesDown: false };
+  const prepSteps = ['gear', 'flaps', 'engines'];
 
   setInterval(() => {
     window.harnessSetup.tick(0.1);
@@ -60,8 +64,12 @@ const commBusMock = `
       state.armIn = Math.max(0, state.armIn - 0.1);
       if (state.armIn === 0) { state.armed = true; state.phase = 'airborne'; }
     } else if (state.play.preparing) {
-      state.play.prepareLeft -= 0.1;
-      if (state.play.prepareLeft <= 0) state.play.preparing = false;
+      // Like SimBridge::prepareJump: the steps together, each done when its time is up.
+      const p = state.play;
+      const prep = Object.assign({}, p.prep);
+      prepSteps.forEach((s) => { if (prep[s] === 'active' && (p.left[s] -= 0.1) <= 0) prep[s] = 'done'; });
+      p.prep = prep;
+      if (!prepSteps.some((s) => prep[s] === 'active')) { p.preparing = false; p.prep = noPrep; }
     } else if (state.play.playing) {
       state.play.t = Math.min(state.play.dur, state.play.t + 0.1 * state.play.speed);
       if (state.play.t >= state.play.dur) state.play.playing = false;
@@ -109,14 +117,17 @@ const commBusMock = `
           return reply(cmd.id, cmd.op, false, 'recorded in the ' + clips[i].aircraft + ': switch to that aircraft to replay it');
         }
         state.restoreLeft = 0;
+        const left = { gear: window.harness.gearSec, flaps: window.harness.flapsSec, engines: window.harness.enginesSec };
+        const prep = Object.assign({}, noPrep);
+        prepSteps.forEach((s) => { if (left[s] > 0) prep[s] = 'active'; });
         Object.assign(state.play, { active: true, file: cmd.file, t: 0, dur: clips[i].durationSec, playing: true,
-          eventT: clips[i].event === 'landing' ? 120 : 0, preparing: window.harness.prepareSec > 0,
-          prepareLeft: window.harness.prepareSec }); return reply(cmd.id, cmd.op, true); }
+          eventT: clips[i].event === 'landing' ? 120 : 0, preparing: prepSteps.some((s) => left[s] > 0), prep: prep,
+          left: left }); return reply(cmd.id, cmd.op, true); }
       case 'pause': state.play.playing = false; return reply(cmd.id, cmd.op, state.play.active, state.play.active ? '' : 'nothing is playing');
       case 'resume': if (state.play.t >= state.play.dur) state.play.t = 0; state.play.playing = true; return reply(cmd.id, cmd.op, true);
       case 'seek': state.play.t = Math.max(0, Math.min(state.play.dur, cmd.t)); return reply(cmd.id, cmd.op, true);
       case 'speed': state.play.speed = Math.max(0.25, Math.min(4, cmd.x)); return reply(cmd.id, cmd.op, true);
-      case 'stop': state.play.active = false; state.play.playing = false; state.play.preparing = false;
+      case 'stop': state.play.active = false; state.play.playing = false; state.play.preparing = false; state.play.prep = noPrep;
         state.restoreLeft = Math.min(10, window.harness.restoreSec); return reply(cmd.id, cmd.op, true);
       default: return reply(cmd.id, cmd.op, false, 'unknown command: ' + cmd.op);
     }
