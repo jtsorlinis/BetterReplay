@@ -121,10 +121,11 @@ void Engine::init() {
     reconcileWithDisk();
     fillAircraftPaths();
     // Also applies a lowered limit to an existing library.
-    const std::vector<std::string> removed = index_.enforceRetention(cfg_.maxAutoClips);
+    const std::vector<std::string> removed = index_.enforceRetention(cfg_.maxAutoClipsPerAircraft);
     for (const std::string& f : removed) {
         storage_.removeFile(f);
-        logf(0, "retention: deleted %s (only the newest %zu auto clips are kept)", f.c_str(), cfg_.maxAutoClips);
+        logf(0, "retention: deleted %s (only the newest %zu auto clips of each aircraft are kept)", f.c_str(),
+             cfg_.maxAutoClipsPerAircraft);
     }
     if (!removed.empty()) saveIndex();
     ++clipsRev_;
@@ -573,7 +574,7 @@ bool Engine::saveRange(EventType type, double startT, double endT, const Detecte
     }
 
     index_.add(makeEntry(name, meta, duration));
-    for (const std::string& old : index_.enforceRetention(cfg_.maxAutoClips)) {
+    for (const std::string& old : index_.enforceRetention(cfg_.maxAutoClipsPerAircraft)) {
         if (storage_.removeFile(old)) {
             logf(0, "retention: deleted %s", old.c_str());
         } else {

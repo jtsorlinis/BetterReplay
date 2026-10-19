@@ -80,6 +80,34 @@ TEST(ClipIndex_RetentionKeepsNewestAutoAndAllManualClips) {
     CHECK(idx.enforceRetention(20).empty());
 }
 
+TEST(ClipIndex_RetentionIsPerAircraft) {
+    // Each aircraft keeps its own newest auto clips, down to the variant. Clips without a path go
+    // by their title, in any case.
+    ClipIndex idx;
+    auto add = [&](const std::string& file, int64_t utc, const std::string& path, const std::string& title) {
+        ClipEntry e = entry(file, EventType::Landing, utc);
+        e.aircraftPath = path;
+        e.aircraft = title;
+        idx.add(e);
+    };
+    const std::string a900 = "simobjects/airplanes/a350/presets/inibuilds/a350-900/config";
+    const std::string a1000 = "simobjects/airplanes/a350-1000/presets/inibuilds/a350-1000/config";
+    add("a900_old.rpl", 1, a900, "A350-900");
+    add("a900_new.rpl", 2, a900, "A350-900 (Default Cabin)");  // the same aircraft.cfg, another title
+    add("a1000.rpl", 3, a1000, "A350-1000");
+    add("c172_old.rpl", 4, "", "Cessna Skyhawk");
+    add("c172_new.rpl", 5, "title:CESSNA SKYHAWK", "CESSNA SKYHAWK");
+    idx.add(entry("manual.rpl", EventType::Manual, 0));
+    const std::vector<std::string> removed = idx.enforceRetention(1);
+    REQUIRE(removed.size() == 2);
+    CHECK(idx.find("a900_old.rpl") == nullptr);
+    CHECK(idx.find("c172_old.rpl") == nullptr);
+    CHECK(idx.find("a900_new.rpl") != nullptr);
+    CHECK(idx.find("a1000.rpl") != nullptr);
+    CHECK(idx.find("c172_new.rpl") != nullptr);
+    CHECK(idx.find("manual.rpl") != nullptr);
+}
+
 TEST(ClipIndex_OldKeepFlagIsIgnored) {
     // index.json from before Keep was removed: the flag no longer protects a clip.
     const std::string json =

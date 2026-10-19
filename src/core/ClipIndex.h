@@ -52,8 +52,9 @@ public:
     // YYYY-MM-DD_HHMM_<event>.rpl (UTC), with _2, _3... appended on collision.
     std::string uniqueFileName(int64_t utcMs, EventType event) const;
 
-    // Removes the oldest auto clips beyond `maxAuto` and returns their file names.
-    std::vector<std::string> enforceRetention(size_t maxAuto);
+    // Removes each aircraft's oldest auto clips beyond `maxAutoPerAircraft` and returns their file
+    // names. An aircraft is what a clip replays on: its aircraft.cfg folder, or its title without one.
+    std::vector<std::string> enforceRetention(size_t maxAutoPerAircraft);
 
     void toJson(std::string& out) const;
     bool fromJson(const char* text, size_t length, std::string* error);

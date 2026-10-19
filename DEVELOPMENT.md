@@ -141,7 +141,7 @@ Recording pauses while the sim is paused, in slew, in the menus, during the sim'
 - **Aircraft match:** a clip replays only on the `aircraft.cfg` it was recorded with, down to the variant (an A350-900 clip doesn't play on the -900ULR or -1000). Clips from before the path was recorded go by the aircraft's title.
 - **This aircraft / All aircraft:** the list shows the clips that replay on this aircraft, or with **All aircraft** every one, other aircraft's dimmed (their play button says which one to switch to). `clipsJson` marks each clip `playable` by the same check as Play (`Engine::recordedOnThisAircraft`), and the list is sent again when the aircraft's title or path changes, a variant included. Until the aircraft is identified (`aircraftKnown: false`), the panel lists every clip, without the choice.
 - **Stop** puts the aircraft back exactly where it was, with its velocities, resumes recording and returns to the main screen. On the ground it stays frozen until its gear is back down, 10 s at most; the main screen counts that down (*Unfreezing in N s*).
-- **Retention:** only the newest 20 auto clips (takeoffs and landings) are retained; older ones are deleted when a new one is saved, and at startup. "Save last 10 min" clips (about 5.5 MB each) are never deleted automatically.
+- **Retention:** only the newest 10 auto clips (takeoffs and landings) of each aircraft are retained; older ones are deleted when a new one is saved, and at startup. An aircraft here is the same as for the aircraft match: its `aircraft.cfg` down to the variant, or its title for clips without a path, so an A350-900 and -1000 keep 10 each. "Save last 10 min" clips (about 5.5 MB each) are never deleted automatically.
 
 ## Control setup
 

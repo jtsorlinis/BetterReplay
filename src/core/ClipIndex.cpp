@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
 
 #include "Json.h"
 #include "TimeUtil.h"
@@ -19,6 +20,17 @@ bool newerFirst(const ClipEntry& a, const ClipEntry& b) {
     const int64_t eb = endMs(b);
     if (ea != eb) return ea > eb;
     return a.file > b.file;
+}
+
+// The aircraft a clip counts against for retention: the one it replays on, as
+// Engine::recordedOnThisAircraft sees it. Its aircraft.cfg folder, down to the variant, or for a
+// clip without one (from before paths were recorded, or a "title:" key), its title, in any case.
+std::string retentionAircraft(const ClipEntry& e) {
+    std::string key = e.aircraftPath.empty() ? "title:" + e.aircraft : e.aircraftPath;
+    for (char& c : key) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+    }
+    return key;
 }
 
 }  // namespace
@@ -76,17 +88,15 @@ std::string ClipIndex::uniqueFileName(int64_t utcMs, EventType event) const {
     return name;
 }
 
-std::vector<std::string> ClipIndex::enforceRetention(size_t maxAuto) {
+std::vector<std::string> ClipIndex::enforceRetention(size_t maxAutoPerAircraft) {
     std::vector<std::string> removed;
-    size_t autoCount = 0;
-    // clips_ is newest first, so everything past the first maxAuto eligible clips goes.
+    std::unordered_map<std::string, size_t> autoCount;  // by retentionAircraft()
+    // clips_ is newest first, so each aircraft's clips past its first maxAutoPerAircraft go.
     for (auto it = clips_.begin(); it != clips_.end();) {
-        if (it->autoClip) {
-            if (++autoCount > maxAuto) {
-                removed.push_back(it->file);
-                it = clips_.erase(it);
-                continue;
-            }
+        if (it->autoClip && ++autoCount[retentionAircraft(*it)] > maxAutoPerAircraft) {
+            removed.push_back(it->file);
+            it = clips_.erase(it);
+            continue;
         }
         ++it;
     }

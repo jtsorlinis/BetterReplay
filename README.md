@@ -31,7 +31,7 @@ Nothing is detected for the first 10 seconds of a flight, so spawning on a runwa
 
 `%APPDATA%\Microsoft Flight Simulator 2024\WASM\MSFS2024\betterreplay-recorder\work\` (Steam)
 
-The newest 20 takeoff and landing clips are kept, and older ones are deleted automatically. "Save last 10 minutes" clips (about 5.5 MB each) are never deleted automatically.
+The newest 10 takeoff and landing clips of each aircraft are kept, and older ones are deleted automatically. "Save last 10 minutes" clips (about 5.5 MB each) are never deleted automatically.
 
 ## Troubleshooting
 

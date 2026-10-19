@@ -551,13 +551,14 @@ TEST(Engine_ManualSaveOfLastMinutes) {
     CHECK_NEAR(e.durationSec, 20.0, 0.1);
 }
 
-TEST(Engine_RetentionKeepsNewestAutoClips) {
+TEST(Engine_RetentionKeepsNewestAutoClipsOfEachAircraft) {
     EngineConfig cfg;
-    cfg.maxAutoClips = 2;
+    cfg.maxAutoClipsPerAircraft = 2;
     Harness h(cfg);
     std::vector<std::string> saved;
-    for (int flight = 0; flight < 4; ++flight) {
+    for (int flight = 0; flight < 5; ++flight) {
         h.utcOffsetMs = flight * 3600000LL;
+        if (flight == 4) h.engine.setAircraftTitle("Other Aircraft");
         h.engine.onFlightLoaded("test flight");
         TraceGen g(false, 1500.0, 120.0);
         landingTrace(g);
@@ -565,27 +566,30 @@ TEST(Engine_RetentionKeepsNewestAutoClips) {
         h.feedAll(g.samples);
         saved.push_back(h.engine.index().clips()[0].file);
     }
-    // Only the newest two survive, in the index and on disk.
-    CHECK_EQ(h.engine.index().size(), 2u);
+    // Only the first aircraft's newest two survive, in the index and on disk; the other
+    // aircraft's clip doesn't push them out.
+    CHECK_EQ(h.engine.index().size(), 3u);
     CHECK(h.engine.index().find(saved[0]) == nullptr);
     CHECK(h.engine.index().find(saved[1]) == nullptr);
     CHECK(h.storage.files.count(saved[0]) == 0);
     CHECK(h.storage.files.count(saved[1]) == 0);
     CHECK(h.engine.index().find(saved[2]) != nullptr);
     CHECK(h.engine.index().find(saved[3]) != nullptr);
-    CHECK_EQ(h.storage.clipCount(), 2u);
+    CHECK(h.engine.index().find(saved[4]) != nullptr);
+    CHECK_EQ(h.storage.clipCount(), 3u);
 
     // A lower limit applies to the existing library at startup.
     EngineConfig lower;
-    lower.maxAutoClips = 1;
+    lower.maxAutoClipsPerAircraft = 1;
     Engine restarted(h.storage, lower);
     restarted.init();
-    CHECK_EQ(restarted.index().size(), 1u);
+    CHECK_EQ(restarted.index().size(), 2u);
     CHECK(restarted.index().find(saved[3]) != nullptr);
-    CHECK_EQ(h.storage.clipCount(), 1u);
+    CHECK(restarted.index().find(saved[4]) != nullptr);
+    CHECK_EQ(h.storage.clipCount(), 2u);
 }
 
-TEST(Engine_DefaultRetentionIsTwentyAutoClips) { CHECK_EQ(EngineConfig().maxAutoClips, 20u); }
+TEST(Engine_DefaultRetentionIsTenAutoClipsPerAircraft) { CHECK_EQ(EngineConfig().maxAutoClipsPerAircraft, 10u); }
 
 TEST(Engine_IndexPersistsAndRebuildsFromDisk) {
     MemoryStorage storage;
