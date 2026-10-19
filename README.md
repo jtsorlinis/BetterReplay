@@ -2,9 +2,20 @@
 
 An auto replay recorder for Microsoft Flight Simulator 2024. It records your flight in the background, saves every takeoff and landing as a clip, and lets you replay them on your own aircraft from a toolbar panel.
 
+<p align="center">
+  <img src="docs/screenshots/main.png" width="32%" alt="The panel recording, with the last 10 minutes buffered">
+  <img src="docs/screenshots/clips.png" width="32%" alt="Saved takeoff and landing clips, with touchdown figures">
+  <img src="docs/screenshots/player.png" width="32%" alt="Replaying a landing">
+</p>
+
 I made it because the replay tools I'd used needed an external helper running alongside the sim. BetterReplay is a single folder you drop into Community, and everything runs inside the sim. It keeps a rolling record of the last 10 minutes of your flight and saves your takeoffs and landings without you doing anything.
 
 The other big reason was getting the animations right. Other replay tools didn't handle flaps, gear, spoilers and reversers well. Many aircraft work these controls their own way, so BetterReplay learns each aircraft. In a short guided control setup you move each control, BetterReplay replays your movement and asks whether it worked, and it remembers what did. That way you can "teach" it aircraft I haven't made a profile for.
+
+<p align="center">
+  <img src="docs/screenshots/setup-offer.png" width="32%" alt="The control setup offered for a new aircraft">
+  <img src="docs/screenshots/setup-ask.png" width="32%" alt="The control setup asking whether the replayed flaps worked">
+</p>
 
 ## Features
 
