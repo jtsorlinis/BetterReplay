@@ -32,6 +32,7 @@ How to build BetterReplay, how it works, and what's still unverified. For instal
 | `-Package` | Run `fspackagetool` to (re)build the panel `.spb`. Needed once, and again whenever `package\PackageSources\InGamePanels\InGamePanel_BetterReplay.xml` changes. |
 | `-Install` | Copy `dist\Community\betterreplay-recorder` into the Community folder (found via `UserCfg.opt`) |
 | `-CommunityPath <dir>` | Install somewhere else |
+| `-Zip` | Also zip the package for a GitHub release (see [Releasing](#releasing)) |
 
 The output is `dist\Community\betterreplay-recorder`. To install by hand, copy that folder into your Community folder. On Steam it's `%APPDATA%\Microsoft Flight Simulator 2024\Packages\Community` unless you moved it.
 
@@ -40,6 +41,16 @@ If the `.spb` hasn't been built, the recorder still runs and saves clips, but th
 `-Package` needs Steam to agree that MSFS 2024 isn't running. If a previous sim instance ended abnormally (crash, or killed in Task Manager), Steam can keep its "running" flag, and then it refuses with *"game is already running"*. `build.ps1` checks for this first. To clear it, click **Stop** on MSFS 2024 in your Steam library, or exit Steam completely and restart it.
 
 You can also build the package in DevMode: **File → Open project…** → `build\package\BetterReplay.xml` (created by `build.ps1`) → **Build**.
+
+## Releasing
+
+Releases are built locally and published on GitHub in the browser.
+
+1. **Set the version** (`major.minor.patch`) in two places: `Version` in `package\PackageDefinitions\betterreplay-recorder.xml` and `kVersion` in `src\module\Module.cpp`. Commit and push.
+2. **Build the zip:** `.\build.ps1 -Zip`. It writes `dist\betterreplay-recorder-<version>.zip`, holding the `betterreplay-recorder` folder ready to extract into Community. It stops before building if the two versions differ or the compiled panel is missing or out of date (then run `.\build.ps1 -Package -Zip` with the sim closed). It warns if there are uncommitted or unpushed changes, or if the version's tag is already on another commit.
+3. **Publish:** open the link it prints. That's GitHub's new-release form, with the tag (`v<version>`), the commit you built and the title filled in. Add release notes, drag in the zip and choose **Publish release**. Publishing creates the tag. While BetterReplay is in early testing, tick **Set as a pre-release**.
+
+Before publishing, install from the zip itself to check it: extract it into your Community folder in place of your dev build, and start the sim.
 
 ## Tests and tools
 

@@ -9,10 +9,14 @@
   package-builder mode). The result is cached in package\spb\ and reused by later builds until
   package\PackageSources\InGamePanels\InGamePanel_BetterReplay.xml changes.
 
+  The version comes from package\PackageDefinitions\betterreplay-recorder.xml; the module's
+  kVersion in src\module\Module.cpp must match it for -Zip.
+
 .EXAMPLE
   .\build.ps1 -Package          # first build: also compiles the panel .spb
   .\build.ps1                   # tests + module + panel + package folder
   .\build.ps1 -Install          # ...and copy it into the MSFS 2024 Community folder
+  .\build.ps1 -Zip              # ...and zip it for a GitHub release
 #>
 [CmdletBinding()]
 param(
@@ -21,7 +25,8 @@ param(
     [switch]$SkipTests,
     [switch]$Package,
     [switch]$Install,
-    [string]$CommunityPath = ''
+    [string]$CommunityPath = '',
+    [switch]$Zip
 )
 
 $ErrorActionPreference = 'Stop'
@@ -30,7 +35,8 @@ $BuildDir = Join-Path $Root 'build'
 $DistDir = Join-Path $Root 'dist\Community'
 $ModuleName = 'BetterReplay.wasm'
 $PackageName = 'betterreplay-recorder'
-$PackageVersion = '0.1.0'
+$PackageDefinition = Join-Path $Root "package\PackageDefinitions\$PackageName.xml"
+$PackageVersion = ([xml](Get-Content $PackageDefinition -Raw)).AssetPackage.Version
 $PanelDirName = 'BetterReplayPanel'
 $SpbName = 'InGamePanel_BetterReplay.spb'
 $SpbSource = Join-Path $Root 'package\PackageSources\InGamePanels\InGamePanel_BetterReplay.xml'
@@ -313,10 +319,84 @@ function Install-Package([string]$PackageDir) {
     Copy-Item -Recurse $PackageDir $target
 }
 
+# ----------------------------------------------------------------------------------- release
+
+# Checked before building, so a release zip can't miss its panel or carry two versions.
+function Assert-ReleaseReady {
+    if ($Configuration -ne 'Release' -or $SkipTests) { throw '-Zip needs a Release build with the tests run.' }
+    if ($PackageVersion -notmatch '^\d+\.\d+\.\d+$') {
+        throw "Version '$PackageVersion' in $PackageName.xml isn't major.minor.patch."
+    }
+    $moduleSource = Get-Content (Join-Path $Root 'src\module\Module.cpp') -Raw
+    $moduleVersion = [regex]::Match($moduleSource, 'kVersion\s*=\s*"([^"]*)"').Groups[1].Value
+    if ($moduleVersion -ne $PackageVersion) {
+        throw ("Version mismatch: $PackageName.xml says $PackageVersion, kVersion in src\module\Module.cpp says " +
+            "'$moduleVersion'. Set both to the release version.")
+    }
+    if (-not $Package -and -not (Get-CachedSpb)) {
+        throw "No up-to-date compiled panel ($SpbName) for the release. Run .\build.ps1 -Package -Zip (sim closed)."
+    }
+}
+
+# Git's output, or $null if the command fails (no upstream, no such tag...).
+function Invoke-Git([string[]]$Arguments) {
+    $ErrorActionPreference = 'Continue'
+    $out = & git -C $Root @Arguments 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return $out
+}
+
+# The zip holds the package folder itself, with forward-slash entries, so it extracts straight
+# into Community.
+function New-ReleaseZip([string]$PackageDir) {
+    $zip = Join-Path (Split-Path $DistDir) "$PackageName-$PackageVersion.zip"
+    Write-Step "Release zip dist\$(Split-Path -Leaf $zip)"
+    if (Test-Path $zip) { Remove-Item -Force $zip }
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $prefix = (Resolve-Path $PackageDir).Path.TrimEnd('\') + '\'
+    $archive = [IO.Compression.ZipFile]::Open($zip, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($file in Get-ChildItem -Recurse -File $PackageDir) {
+            $entry = "$PackageName/" + $file.FullName.Substring($prefix.Length).Replace('\', '/')
+            [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file.FullName, $entry,
+                [IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    } finally {
+        $archive.Dispose()
+    }
+    Write-Host "  $zip ($([math]::Round((Get-Item $zip).Length / 1KB)) KB)"
+}
+
+# The release is published in the browser: this prints a link to GitHub's new-release form with
+# the tag, the commit and the title filled in. Publishing creates the tag.
+function Write-ReleaseLink {
+    $tag = "v$PackageVersion"
+    $commit = Invoke-Git @('rev-parse', 'HEAD')
+    if (-not $commit) { Write-Warning 'Not a git checkout: tag the release by hand.'; return }
+    if (Invoke-Git @('status', '--porcelain')) {
+        Write-Warning "Uncommitted changes: the zip doesn't match commit $($commit.Substring(0, 7)). Commit, push and rebuild."
+    }
+    $ahead = Invoke-Git @('rev-list', '--count', '@{u}..HEAD')
+    if ($ahead -and [int]$ahead -gt 0) {
+        Write-Warning "$ahead commit(s) not pushed: push before publishing, the release tags commit $($commit.Substring(0, 7))."
+    }
+    $tagged = Invoke-Git @('rev-list', '-n', '1', $tag)
+    if ($tagged -and $tagged -ne $commit) {
+        Write-Warning "Tag $tag is already on commit $($tagged.Substring(0, 7)): bump the version for a new release."
+    }
+    $remote = Invoke-Git @('remote', 'get-url', 'origin')
+    $match = [regex]::Match("$remote", 'github\.com[:/](.+?)(\.git)?$')
+    if (-not $match.Success) { Write-Warning "origin isn't on GitHub: create release $tag by hand."; return }
+    $title = [uri]::EscapeDataString("BetterReplay $PackageVersion")
+    Write-Host "  Publish: open the link, add release notes, attach the zip, then Publish release (tags $tag on $($commit.Substring(0, 7))):"
+    Write-Host "  https://github.com/$($match.Groups[1].Value)/releases/new?tag=$tag&target=$commit&title=$title"
+}
+
 # -------------------------------------------------------------------------------------- main
 
 # Fail fast, before the slower build steps.
 if ($Package) { Assert-PackageToolCanRun }
+if ($Zip) { Assert-ReleaseReady }
 if ($Install -and (Get-Process -Name 'FlightSimulator2024' -ErrorAction SilentlyContinue)) {
     throw ('Quit Microsoft Flight Simulator 2024 before installing: the module only loads at startup and its ' +
         'files are in use while the sim runs. (You can build without -Install while it is running.)')
@@ -329,4 +409,8 @@ $stage = New-PackageStage $wasm $panelJs
 if ($Package) { Invoke-PackageTool $stage }
 $packageDir = New-CommunityPackage $stage
 if ($Install) { Install-Package $packageDir }
+if ($Zip) {
+    New-ReleaseZip $packageDir
+    Write-ReleaseLink
+}
 Write-Step 'Done'

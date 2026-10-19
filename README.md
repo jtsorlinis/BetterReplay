@@ -14,8 +14,8 @@ An auto replay recorder for Microsoft Flight Simulator 2024. It records your fli
 
 ## Install
 
-1. Get the `betterreplay-recorder` package folder. To build it yourself, see [Build and install](DEVELOPMENT.md#build-and-install).
-2. Copy it into your Community folder. On Steam that's `%APPDATA%\Microsoft Flight Simulator 2024\Packages\Community` unless you moved it.
+1. Download `betterreplay-recorder-<version>.zip` from the latest [release](https://github.com/jtsorlinis/BetterReplay/releases). To build it yourself, see [Build and install](DEVELOPMENT.md#build-and-install).
+2. Extract it into your Community folder, so you have `Community\betterreplay-recorder`. On Steam that's `%APPDATA%\Microsoft Flight Simulator 2024\Packages\Community` unless you moved it. To update, delete the old `betterreplay-recorder` folder first.
 3. Start the sim. If the BetterReplay icon isn't on the toolbar, enable it in the toolbar's settings.
 
 ## Using it
