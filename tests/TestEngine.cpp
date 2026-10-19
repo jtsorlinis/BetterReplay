@@ -319,7 +319,7 @@ TEST(Engine_TakeoffFromTheRunwayEntryUntilClean) {
     Clip to;
     REQUIRE(h.load(takeoffs[0]->file, to));
     CHECK_NEAR(to.meta.eventOffsetSec, liftoff - (entry - 30.0), 0.1);
-    CHECK_NEAR(takeoffs[0]->durationSec, clean + 5.0 - (entry - 30.0), 0.1);
+    CHECK_NEAR(takeoffs[0]->durationSec, clean + 10.0 - (entry - 30.0), 0.1);
 }
 
 TEST(Engine_LandingInProgressIsSavedWhenTheFlightEnds) {

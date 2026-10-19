@@ -25,7 +25,7 @@ struct DetectorConfig {
     // Entered the runway before the recording (spawned on it), or on a strip the sim doesn't flag
     // as one: from this long before the spool-up.
     double takeoffPreSpoolSec = 5.0;
-    double takeoffAfterCleanSec = 5.0;
+    double takeoffAfterCleanSec = 10.0;
     // Flaps up at liftoff (or never reported): the clip ends this long after liftoff. A takeoff
     // not confirmed by then is dropped.
     double takeoffAfterLiftoffSec = 120.0;

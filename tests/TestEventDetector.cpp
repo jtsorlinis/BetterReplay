@@ -205,7 +205,7 @@ TEST(Detector_TakeoffStartsThirtySecondsBeforeEnteringTheRunwayAndEndsClean) {
     CHECK(e.type == EventType::Takeoff);
     CHECK_NEAR(e.startT, entry - 30.0, 1e-6);
     CHECK_NEAR(e.eventT, liftoff, kTol);
-    CHECK_NEAR(e.endT, clean + 5.0, kTol);
+    CHECK_NEAR(e.endT, clean + 10.0, kTol);
 }
 
 TEST(Detector_TakeoffAfterALongWaitOnTheRunwayStartsSixtySecondsBeforeTheSpoolUp) {

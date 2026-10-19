@@ -83,7 +83,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 - [ ] Check the clip: `node tools\rpl-dump.mjs "<work folder>\<file>.rpl"`.
   - It starts 30 s before the aircraft rolls onto the runway.
   - `ongnd` goes 1 → 0 at the liftoff offset.
-  - It ends 5 s after the flaps are fully up (`flap_idx` 0, `flap_l` near 0).
+  - It ends 10 s after the flaps are fully up (`flap_idx` 0, `flap_l` near 0).
 - [ ] Line up and wait a couple of minutes before taking off: the clip starts about 30 s before the engines spool up, not at the line-up.
 - [ ] Take off with the flaps up: the clip ends 2 minutes after liftoff (`takeoff: flaps were up at liftoff`).
 
