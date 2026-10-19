@@ -34,7 +34,7 @@ The other big reason was getting the animations right. Other replay tools didn't
 Recording starts once you're in a flight. Clips appear in the panel a few seconds after each takeoff or landing ends:
 
 - **Takeoff:** from 30 seconds before you roll onto the runway until the flaps are up (or 2 minutes after liftoff if you took off without flaps).
-- **Landing:** from 5 minutes before touchdown until you stop or leave the runway. Bounces stay part of the same landing; a touch-and-go or go-around ends it.
+- **Landing:** from 3 minutes before touchdown until you stop or leave the runway. Bounces stay part of the same landing; a touch-and-go or go-around ends it.
 
 Nothing is detected for the first 10 seconds of a flight, so spawning on a runway or in the air never makes a clip. Recording pauses while the sim is paused, in slew, in the menus, during the sim's own replay, and while a clip plays.
 

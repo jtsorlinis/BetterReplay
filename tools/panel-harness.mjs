@@ -51,7 +51,7 @@ const commBusMock = `
   for (let i = 0; i < 27; ++i) {
     const ev = i % 3 === 2 ? 'manual' : (i % 2 ? 'landing' : 'takeoff');
     clips.push({ file: 'clip' + i + '_' + ev + '.rpl', event: ev, utc: '', utcMs: now - i * 3600e3,
-      aircraft: aircraft[i % 4], airport: ev === 'manual' ? '' : airports[i % 6], durationSec: ev === 'landing' ? 321 + i : 75 + i,
+      aircraft: aircraft[i % 4], airport: ev === 'manual' ? '' : airports[i % 6], durationSec: ev === 'landing' ? 201 + i : 75 + i,
       touchdownVsFpm: ev === 'landing' ? -90 - i * 13 : null, peakG: ev === 'landing' ? 1.1 + i * 0.03 : null,
       bounces: ev === 'landing' ? i % 3 : 0, auto: ev !== 'manual' });
   }
@@ -146,7 +146,7 @@ const commBusMock = `
         const prep = Object.assign({}, noPrep);
         prepSteps.forEach((s) => { if (left[s] > 0) prep[s] = 'active'; });
         Object.assign(state.play, { active: true, file: cmd.file, t: 0, dur: clips[i].durationSec, playing: true,
-          eventT: clips[i].event === 'landing' ? 300 : 0, gearDownT: clips[i].event === 'landing' ? 150 : 0, preparing: prepSteps.some((s) => left[s] > 0), prep: prep,
+          eventT: clips[i].event === 'landing' ? 180 : 0, gearDownT: clips[i].event === 'landing' ? 60 : 0, preparing: prepSteps.some((s) => left[s] > 0), prep: prep,
           left: left }); return reply(cmd.id, cmd.op, true); }
       case 'pause': state.play.playing = false; return reply(cmd.id, cmd.op, state.play.active, state.play.active ? '' : 'nothing is playing');
       case 'resume': if (state.play.t >= state.play.dur) state.play.t = 0; state.play.playing = true; return reply(cmd.id, cmd.op, true);

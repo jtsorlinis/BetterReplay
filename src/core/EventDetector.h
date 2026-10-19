@@ -45,11 +45,11 @@ struct DetectorConfig {
     // is a bounce).
     double landingMinAirborneSec = 5.0;  // a touchdown after a shorter hop isn't a landing
     double landingMinGroundSec = 3.0;    // then "landing-rollout" (status only)
-    double landingPreRollSec = 300.0;
+    double landingPreRollSec = 180.0;
     double landingStopGroundSpeedKt = 1.0;
     double landingOffRunwaySec = 10.0;
     double landingGoAroundSec = 15.0;
-    double landingMaxAfterTouchdownSec = 170.0;  // with the pre-roll, a clip of 7:50 at most
+    double landingMaxAfterTouchdownSec = 170.0;  // with the pre-roll, a clip of 5:50 at most
     double touchdownVsReadDelaySec = 0.25;       // when to read PLANE TOUCHDOWN NORMAL VELOCITY
     double peakGWindowBeforeTouchdownSec = 1.0;
 

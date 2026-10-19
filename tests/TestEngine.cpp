@@ -168,7 +168,7 @@ TEST(Engine_FullFlightSavesTakeoffAndLanding) {
     CHECK_EQ(landings[0]->aircraft, std::string("Test Aircraft"));
     CHECK(landings[0]->autoClip);
     CHECK_NEAR(landings[0]->touchdownVsFpm, -150.0, 2.0);
-    CHECK_NEAR(landings[0]->durationSec, 300.0 + 29.75, 0.1);  // 115 -> 0 kt is below 1 kt after 29.75 s
+    CHECK_NEAR(landings[0]->durationSec, 180.0 + 29.75, 0.1);  // 115 -> 0 kt is below 1 kt after 29.75 s
 
     // Set BR_SAMPLE_OUT=<path> to keep this clip on disk (handy for tools/rpl-dump.mjs).
     if (const char* out = std::getenv("BR_SAMPLE_OUT")) {
@@ -182,7 +182,7 @@ TEST(Engine_FullFlightSavesTakeoffAndLanding) {
     Clip clip;
     REQUIRE(h.load(landings[0]->file, clip));
     CHECK(clip.meta.event == EventType::Landing);
-    CHECK_NEAR(clip.meta.eventOffsetSec, 300.0, 0.1);
+    CHECK_NEAR(clip.meta.eventOffsetSec, 180.0, 0.1);
     CHECK_NEAR(clip.frames.size() / clip.duration(), 30.0, 0.5);  // decimated to 30 Hz
     for (size_t i = 1; i < clip.frames.size(); ++i) {
         if (!(clip.frames[i].t > clip.frames[i - 1].t)) {
@@ -199,7 +199,7 @@ TEST(Engine_FullFlightSavesTakeoffAndLanding) {
     }
     // Clip start time is the touchdown wall time minus the pre-roll.
     const int64_t tdUtc = kUtcBase + static_cast<int64_t>(g.samples[td].t * 1000.0);
-    CHECK_NEAR(static_cast<double>(clip.meta.utcStartMs), static_cast<double>(tdUtc - 300000), 100.0);
+    CHECK_NEAR(static_cast<double>(clip.meta.utcStartMs), static_cast<double>(tdUtc - 180000), 100.0);
 
     CHECK_EQ(clip.meta.aircraftPath, std::string(kPmdg800));
 
@@ -290,7 +290,7 @@ TEST(Engine_LandingEndsTenSecondsOffTheRunway) {
     h.feedAll(g.samples);
     const auto landings = h.clipsOf(EventType::Landing);
     REQUIRE(landings.size() == 1);
-    CHECK_NEAR(landings[0]->durationSec, 300.0 + (exit + 10.0 - g.samples[td].t), 0.1);
+    CHECK_NEAR(landings[0]->durationSec, 180.0 + (exit + 10.0 - g.samples[td].t), 0.1);
 }
 
 TEST(Engine_TakeoffFromTheRunwayEntryUntilClean) {
@@ -333,7 +333,7 @@ TEST(Engine_LandingInProgressIsSavedWhenTheFlightEnds) {
     h.engine.setAtMainMenu(true);
     const auto landings = h.clipsOf(EventType::Landing);
     REQUIRE(landings.size() == 1);
-    CHECK_NEAR(landings[0]->durationSec, 300.0 + (g.now() - g.samples[td].t), 0.1);
+    CHECK_NEAR(landings[0]->durationSec, 180.0 + (g.now() - g.samples[td].t), 0.1);
     h.engine.onFlightLoaded("next flight");  // nothing left to save
     CHECK_EQ(h.clipsOf(EventType::Landing).size(), 1u);
 }
@@ -510,7 +510,7 @@ TEST(Engine_SlewOnTheRolloutSavesTheLandingUpToIt) {
     h.feed(g.samples, g.samples.size() - 1, g.samples.size());  // out of slew
     const auto landings = h.clipsOf(EventType::Landing);
     REQUIRE(landings.size() == 1);
-    CHECK_NEAR(landings[0]->durationSec, 300.0 + (g.samples[slewFrom - 1].t - g.samples[td].t), 0.1);
+    CHECK_NEAR(landings[0]->durationSec, 180.0 + (g.samples[slewFrom - 1].t - g.samples[td].t), 0.1);
 }
 
 TEST(Engine_SlewOnFinalDisarmsDetection) {

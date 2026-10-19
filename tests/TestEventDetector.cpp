@@ -261,7 +261,7 @@ TEST(Detector_NormalLandingEndsAtTheStop) {
     const double tdT = g.samples[td].t;
     CHECK(e.type == EventType::Landing);
     CHECK_NEAR(e.eventT, tdT, 1e-9);
-    CHECK_NEAR(e.startT, tdT - 300.0, 1e-9);
+    CHECK_NEAR(e.startT, tdT - 180.0, 1e-9);
     CHECK_NEAR(e.endT, g.samples[firstBelow(g, td, 1.0)].t, 1e-9);
     CHECK_NEAR(e.touchdownVsFpm, -150.0, 1.0);  // VS just before contact (no touchdown simvar)
     CHECK_NEAR(e.peakG, 1.35, 1e-6);
