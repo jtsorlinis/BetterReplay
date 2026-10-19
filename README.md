@@ -45,3 +45,7 @@ The newest 20 takeoff and landing clips are kept, and older ones are deleted aut
 ## Development
 
 Building from source, how it works, configuration and known gaps are in [DEVELOPMENT.md](DEVELOPMENT.md). [MANUAL_TEST.md](MANUAL_TEST.md) is the in-sim test checklist.
+
+## License
+
+[MIT](LICENSE). You can use, change and share BetterReplay, as long as you keep the copyright and license notice.
