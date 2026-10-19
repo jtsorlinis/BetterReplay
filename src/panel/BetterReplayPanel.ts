@@ -33,6 +33,7 @@ interface PlayState {
     preparing?: boolean;  // holding around a jump: the gear, flaps and engines got ready first
     prep?: PrepState;
     eventT: number;
+    gearDownT?: number;  // when the gear started coming down (0: it didn't)
 }
 // What a replay is getting ready around a jump (Engine::statusJson's play.prep): each step ""
 // (not part of it), "active" or "done".
@@ -1158,6 +1159,10 @@ class BetterReplayPanel extends UIElement {
         const marker = byId("br-seek-marker");
         marker.classList.toggle("hidden", !(p.eventT > 0 && p.dur > 0));
         if (p.dur > 0) marker.style.left = ((p.eventT / p.dur) * 100).toFixed(2) + "%";
+        const gearT = p.gearDownT || 0;
+        const gear = byId("br-seek-gear");
+        gear.classList.toggle("hidden", !(gearT > 0 && p.dur > 0));
+        if (p.dur > 0) gear.style.left = ((gearT / p.dur) * 100).toFixed(2) + "%";
 
         updateText(byId("br-time"), formatClock(p.t));
         updateText(byId("br-dur"), formatClock(p.dur));

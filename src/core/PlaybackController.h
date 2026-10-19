@@ -12,6 +12,10 @@ namespace br {
 // extending. Leaves the clip alone if it has no gear positions or the gear never moved (fixed gear).
 // Returns true if the channel was rewritten.
 bool deriveGearCommand(Clip& clip);
+// When the gear started coming down (the gear handle channel turning to down, so after
+// deriveGearCommand), in seconds from the clip's start: on a landing the last time before the
+// touchdown, otherwise the first. NaN if it never did.
+double gearDownTime(const Clip& clip);
 // The same, frame by frame, from the legs' mean extension as it comes (the live aircraft): 1 down,
 // 0 up, NaN until the first reading.
 class GearCommandFollower {
@@ -61,6 +65,7 @@ public:
     double speed() const { return speed_; }
     double time() const { return t_; }
     double duration() const { return duration_; }
+    double gearDownT() const { return gearDownT_; }  // gearDownTime of the loaded clip
 
     // Moves the playhead by dt * speed while playing; pauses automatically at the end.
     void advance(double dt);
@@ -76,6 +81,7 @@ private:
     bool playing_ = false;
     double t_ = 0.0;
     double duration_ = 0.0;
+    double gearDownT_ = NAN;
     double speed_ = 1.0;
     size_t hint_ = 0;
 };

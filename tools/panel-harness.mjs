@@ -57,7 +57,7 @@ const commBusMock = `
   }
   const state = { rev: 1, rec: true, why: '', armed: false, armIn: 6, phase: 'disarmed', buffer: 0,
     aircraft: 'Airbus A320neo', aircraftKnown: true, restoreLeft: 0,
-    play: { active: false, file: '', t: 0, dur: 0, speed: 1, playing: false, eventT: 0 } };
+    play: { active: false, file: '', t: 0, dur: 0, speed: 1, playing: false, eventT: 0, gearDownT: 0 } };
   const listeners = {};
   // gearSec, flapsSec, enginesSec: Play first holds, frozen, until each has taken that long
   // ("lowering the gear", "extending the flaps", "spooling up the engines", together; 0: not part
@@ -146,7 +146,7 @@ const commBusMock = `
         const prep = Object.assign({}, noPrep);
         prepSteps.forEach((s) => { if (left[s] > 0) prep[s] = 'active'; });
         Object.assign(state.play, { active: true, file: cmd.file, t: 0, dur: clips[i].durationSec, playing: true,
-          eventT: clips[i].event === 'landing' ? 300 : 0, preparing: prepSteps.some((s) => left[s] > 0), prep: prep,
+          eventT: clips[i].event === 'landing' ? 300 : 0, gearDownT: clips[i].event === 'landing' ? 150 : 0, preparing: prepSteps.some((s) => left[s] > 0), prep: prep,
           left: left }); return reply(cmd.id, cmd.op, true); }
       case 'pause': state.play.playing = false; return reply(cmd.id, cmd.op, state.play.active, state.play.active ? '' : 'nothing is playing');
       case 'resume': if (state.play.t >= state.play.dur) state.play.t = 0; state.play.playing = true; return reply(cmd.id, cmd.op, true);

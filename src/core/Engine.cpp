@@ -1006,6 +1006,8 @@ void Engine::statusJson(std::string& out) const {
     w.kv("enginesDown", prep.enginesDown);
     w.endObject();
     w.kv("eventT", playback_.loaded() ? static_cast<double>(playback_.clip().meta.eventOffsetSec) : 0.0);
+    // When the gear started coming down, for the seek bar's second mark (0: it didn't).
+    w.kv("gearDownT", playback_.loaded() && std::isfinite(playback_.gearDownT()) ? playback_.gearDownT() : 0.0);
     w.endObject();
     w.key("setup").beginObject();
     w.kv("offer", setupOffer());

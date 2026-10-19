@@ -89,6 +89,21 @@ bool deriveGearCommand(Clip& clip) {
     return true;
 }
 
+double gearDownTime(const Clip& clip) {
+    if (clip.frames.size() < 2 || !clip.present.test(static_cast<size_t>(kGearHandle))) return NAN;
+    const bool landing = clip.meta.event == EventType::Landing;
+    const double t0 = clip.frames.front().t;
+    double down = NAN;
+    for (size_t i = 1; i < clip.frames.size(); ++i) {
+        if (!(clip.frames[i - 1].v[kGearHandle] < 0.5 && clip.frames[i].v[kGearHandle] >= 0.5)) continue;
+        const double t = clip.frames[i].t - t0;
+        if (landing && t > clip.meta.eventOffsetSec) break;
+        down = t;
+        if (!landing) break;
+    }
+    return down;
+}
+
 // The command flips when the gear moves the other way by more than the threshold from its
 // furthest point since the last flip, so a gear in mid-travel doesn't flip-flop.
 double GearCommandFollower::update(double g) {
@@ -131,6 +146,7 @@ void PlaybackController::load(Clip&& clip, const std::string& file) {
     clip_ = std::move(clip);
     dropEmptyChannels(clip_);
     deriveGearCommand(clip_);
+    gearDownT_ = gearDownTime(clip_);
     peak_ = Frame();
     for (const Frame& f : clip_.frames) {
         for (int c = 0; c < kChannelCount; ++c) {
@@ -153,6 +169,7 @@ void PlaybackController::unload() {
     playing_ = false;
     t_ = 0.0;
     duration_ = 0.0;
+    gearDownT_ = NAN;
     hint_ = 0;
 }
 

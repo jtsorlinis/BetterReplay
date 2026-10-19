@@ -1434,6 +1434,11 @@ button {
   background: var(--br-amber);
 }
 
+/* when the gear started coming down */
+.br-seek-marker.br-seek-gear {
+  background: var(--br-green);
+}
+
 /* The playhead: centred on the end of the fill, bigger and glowing while hovered or dragged. */
 .br-seek-thumb {
   position: absolute;

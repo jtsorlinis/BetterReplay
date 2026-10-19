@@ -154,6 +154,47 @@ TEST(Playback_FixedGearKeepsRecordedHandle) {
 
 namespace {
 
+// Gear legs taking 8 s each way: up, down at 40 s, up again at 60 s, down at 80 s.
+double downUpDown(double t) {
+    auto travel = [](double t, double from) { return std::fmin(1.0, std::fmax(0.0, (t - from) / 8.0)); };
+    if (t < 60.0) return travel(t, 40.0);
+    if (t < 80.0) return 1.0 - travel(t, 60.0);
+    return travel(t, 80.0);
+}
+
+Clip gearClip(EventType event, float eventT) {
+    Clip c = makeClip(200.0);
+    for (Frame& f : c.frames) {
+        f.v[kGearCenter] = f.v[kGearLeft] = f.v[kGearRight] = downUpDown(f.t);
+        f.v[kGearHandle] = 0.0;  // handle simvar never updated
+    }
+    c.meta.event = event;
+    c.meta.eventOffsetSec = eventT;
+    deriveGearCommand(c);
+    return c;
+}
+
+}  // namespace
+
+TEST(Playback_GearDownTimeForTheSeekBar) {
+    const double moved = 0.03 * 8.0;  // the command turns once the legs have moved 3%
+    // A landing: the last time before the touchdown, not one after it.
+    CHECK_NEAR(gearDownTime(gearClip(EventType::Landing, 150.0f)), 80.0 + moved, 2.0 / 30.0);
+    CHECK_NEAR(gearDownTime(gearClip(EventType::Landing, 70.0f)), 40.0 + moved, 2.0 / 30.0);
+    // Anything else: the first.
+    CHECK_NEAR(gearDownTime(gearClip(EventType::Manual, 0.0f)), 40.0 + moved, 2.0 / 30.0);
+    // Never came down.
+    CHECK(std::isnan(gearDownTime(makeClip(20.0))));
+
+    PlaybackController p;
+    p.load(gearClip(EventType::Landing, 150.0f), "a.rpl");
+    CHECK_NEAR(p.gearDownT(), 80.0 + moved, 2.0 / 30.0);
+    p.unload();
+    CHECK(std::isnan(p.gearDownT()));
+}
+
+namespace {
+
 // The 777 landing that started with its flaps still on their way from 25 to 30: 0.72 at the
 // start, out at 15 s, the handle index following them (5 until 3.2 s, then 6); retracted from
 // 40 s to 50 s after landing.
