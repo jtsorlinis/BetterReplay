@@ -72,6 +72,7 @@ interface SetupStatus {
     method?: number;      // the method being tried (1-based), of `methods` in this step
     methods?: number;
     bringBack?: boolean;  // bringing the control back from where the pilot left it: a pass of its own
+    left?: number;        // seconds the method being tried has left (-1: not counting down)
     attempts?: string[];  // how each method before it ended: "failed", "rejected", "unavailable"
     note?: string;
     plan?: SetupStep[];
@@ -412,12 +413,21 @@ function attemptsHtml(setup: SetupStatus): string {
         html += '<div class="br-attempt failed"><span class="br-attempt-mark"></span>' + failed(i + 1) + "</div>";
     }
     const n = setup.method || done.length + 1;
+    // The countdown goes in its own span (attemptLeftText), so the row isn't redrawn every second.
     html += '<div class="br-attempt current br-enter"><span class="br-attempt-mark"></span>' +
-        (phase === "ask" ? "Method " + n + " passed the check" : trying(n)) + "</div>";
+        (phase === "ask" ? "Method " + n + " passed the check"
+            : trying(n) + '<span id="br-attempt-left" class="br-attempt-left"></span>') + "</div>";
     for (let i = n; i < (setup.methods || 0); ++i) {
         html += '<div class="br-attempt reserved"><span class="br-attempt-mark"></span>' + trying(i + 1) + "</div>";
     }
     return html;
+}
+
+// How long the method being tried has left: until it's given up on if nothing moves, or until its
+// replay is done.
+function attemptLeftText(setup: SetupStatus): string {
+    const left = setup.left;
+    return left !== undefined && left >= 0 ? Math.ceil(left) + " s" : "";
 }
 
 // The phase label, and while the pilot is doing something one dot per instruction in this step,
@@ -1002,6 +1012,8 @@ class BetterReplayPanel extends UIElement {
             this.renderHold(setup && setup.active && setup.holdTask ? setup.hold || 0 : -1);
             setText("br-setup-detail", detail);
             setHtml("br-setup-attempts", setup && setup.active ? attemptsHtml(setup) : "");
+            const left = document.getElementById("br-attempt-left");
+            if (left && setup) updateText(left, attemptLeftText(setup));
             setHtml("br-setup-list", list);
             setText("br-setup-note", note);
             this.renderSetupButtons(buttons, !!(setup && setup.active));

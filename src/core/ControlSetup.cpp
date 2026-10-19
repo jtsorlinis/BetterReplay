@@ -175,7 +175,8 @@ const char* const* wordsFor(Control c) {
 
 // What the pilot does for each control, one instruction at a time (the panel ticks each off).
 const char* const kSpoilerTasks[] = {"Deploy the spoilers", "Retract the spoilers"};
-const char* const kFlapTasks[] = {"Lower the flaps one notch", "Wait for the flaps to extend", "Retract the flaps"};
+const char* const kFlapTasks[] = {"Lower the flaps one notch", "Wait for the flaps to extend",
+                                  "Retract the flaps one notch"};
 // The throttle's first two are holds: they show whether the lever simvar is the lever and, where
 // it isn't, which variable is (Phase::Positions repeats them when that wasn't found).
 const char* const kThrottleTasks[] = {"Move the throttle to about halfway and hold it", "Now to full and hold it",
@@ -278,9 +279,10 @@ const char* bringBackWhat(Control c) {
 Direction awayDirection(Control c) { return c == Control::Gear ? Direction::Retract : Direction::Extend; }
 Direction backDirection(Control c) { return c == Control::Gear ? Direction::Extend : Direction::Retract; }
 
-// A method that hasn't started moving the control within this long hasn't worked: the way back on
-// its own, and a replay of the whole movement this long after the pilot's had moved it (the gear:
-// as long as playback waits for it, EventStepper's, since its legs start seconds after the lever).
+// A method that hasn't started moving the control within this long, more than the aircraft took to
+// show the pilot's movement (SetupFlow::startWaitSec), hasn't worked: the way back on its own, and
+// a replay of the whole movement (the gear: as long as playback waits for it, EventStepper's,
+// since its legs start seconds after the lever).
 double moveStartSec(Control c) { return c == Control::Gear ? EventStepper::kGearWaitFrames / 60.0 : 3.0; }
 
 std::string title(Control c) {
@@ -1207,10 +1209,15 @@ void SetupFlow::analyze() {
             break;
         }
     }
+    // The clip starts kLeadInSec before the movement's first sign (the control's simvar, or a
+    // variable or key event the methods use).
+    pilotLag_ = std::isfinite(clipMovedAt_) ? std::max(0.0, clipMovedAt_ - kLeadInSec) : 0.0;
     logf(0, "control setup: you moved the %s over %.1f s (handle moved %.3g, outcome %.3g; checking replays on the %s); "
          "trying %zu method(s)",
          controlSpec(c).label, mini_.duration(), handlePeak_, outcomePeak_, judgeOutcome_ ? "outcome" : "handle",
          methods_.size());
+    logf(0, "control setup: the %s moved %.1f s after the first sign of your movement; a method gets %.1f s to start moving it",
+         judgeOutcome_ ? "outcome" : "handle", pilotLag_, startWaitSec());
     if (methods_.empty() || mini_.frames.size() < 2) {
         note_ = "Couldn't replay the " + std::string(controlSpec(c).label) + ".";
         finishStep(ControlState::Failed, ControlMethod(), false);
@@ -1855,7 +1862,7 @@ void SetupFlow::backFrame(double dt, const Frame& live) {
     const bool there = atRest(live);
     if (there && settled) {
         endBack(true, "");
-    } else if (!backMoved_ && phaseT_ >= moveStartSec(c)) {
+    } else if (!backMoved_ && phaseT_ >= startWaitSec()) {
         endBack(false, "it didn't move");
     } else if (backMoved_ && settled) {
         endBack(false, "it stopped short");
@@ -1906,6 +1913,21 @@ double SetupFlow::restTol() const {
 double SetupFlow::replayStartTol() const {
     const Tuning tu = tuning(control());
     return judgeOutcome_ ? tu.outcomeStart : tu.handleStart;
+}
+
+// As long as the aircraft took to show the pilot's movement on the signal the check reads, and
+// moveStartSec more: the PMDG 777's flaps start about 3 s after the command, then take another
+// to move as far as counts.
+double SetupFlow::startWaitSec() const { return moveStartSec(control()) + pilotLag_; }
+
+double SetupFlow::attemptLeft() const {
+    if (phase_ == Phase::Back) return backMoved_ ? -1.0 : std::max(0.0, startWaitSec() - phaseT_);
+    if (phase_ != Phase::Replay || !started_) return -1.0;
+    double end = mini_.duration();
+    if (seenRest_ && replayPeak_ < replayStartTol() && std::isfinite(clipMovedAt_)) {
+        end = std::min(end, clipMovedAt_ + startWaitSec());  // replayFrame's stall
+    }
+    return std::max(0.0, end - replayT_);
 }
 
 bool SetupFlow::atRest(const Frame& live) const {
@@ -1976,12 +1998,14 @@ void SetupFlow::replayFrame(double dt, const Frame& live) {
         return;
     }
     // Not moving yet, a while after the pilot's movement had moved it (as on the way back): the
-    // method doesn't, so the rest of the movement isn't replayed. The hold puts the control back
-    // where the movement ends and the check fails it as usual.
+    // method doesn't, so the rest of the movement isn't replayed. Its command may only come when
+    // the clip's control did (the 777's flap handle follows its flaps), then the aircraft takes as
+    // long as it did for the pilot. The hold puts the control back where the movement ends and the
+    // check fails it as usual.
     const bool stalled = seenRest_ && replayPeak_ < replayStartTol() && std::isfinite(clipMovedAt_) &&
-                         replayT_ >= clipMovedAt_ + moveStartSec(c);
+                         replayT_ >= clipMovedAt_ + startWaitSec();
     if (stalled && replayT_ < dur) {
-        logf(0, "control setup: no movement of the %s %.0f s after yours; not replaying the rest", label, moveStartSec(c));
+        logf(0, "control setup: no movement of the %s %.1f s after yours; not replaying the rest", label, startWaitSec());
     }
     if (replayT_ >= dur || stalled) {
         phase_ = Phase::Hold;
@@ -3051,6 +3075,7 @@ void SetupFlow::statusJson(JsonWriter& w) const {
     w.kv("bringBack", bringBack);
     w.kv("method", static_cast<int>(bringBack ? backAt_ + 1 : method_ + 1));
     w.kv("methods", static_cast<int>(bringBack ? backTries_.size() : methods_.size()));
+    w.kv("left", attemptLeft());
     // The sweep's planned moves aren't all known until the forward pass is done: estimate.
     const size_t rest = sweepExtended_ ? 0 : (facts_.hasReverse ? kSweepReverseSteps + 5 : 1);
     w.kv("progress", phase_ == Phase::Sweep && !sweep_.empty()

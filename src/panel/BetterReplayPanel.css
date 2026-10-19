@@ -829,6 +829,13 @@ button {
   font-weight: bold;
 }
 
+/* how long the method being tried has left */
+.br-attempt-left {
+  margin-left: 10px;
+  color: var(--br-muted);
+  font-weight: normal;
+}
+
 /* a method still to come: takes its row's space, so the text above doesn't move */
 .br-attempt.reserved {
   visibility: hidden;

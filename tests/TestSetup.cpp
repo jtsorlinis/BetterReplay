@@ -50,6 +50,8 @@ double approach(double v, double target, double rate, double dt) {
 struct FakeAircraft : IControlSim {
     // state
     double spoilerHandle = 0.0, spoilerSurface = 0.0;
+    // The surfaces start this long after the handle has stopped moving (as the PMDG 777's flaps do).
+    double spoilerLagSec = 0.0, spoilerHandleWas = 0.0, spoilerHandleMovedAt = -100.0;
     double thr[2] = {0.0, 0.0};
     double n1[2] = {20.0, 20.0};
     double gearLever = 1.0, gearPos = 1.0, gearLeverChangedAt = -100.0, gearHandleSimvar = 1.0;
@@ -186,7 +188,9 @@ struct FakeAircraft : IControlSim {
     void step(double dt) {
         t += dt;
         if (holdReverse && t - decreaseAt > 0.2) holdReverse = false;  // let go
-        spoilerSurface = approach(spoilerSurface, spoilerHandle, 2.0, dt);
+        if (spoilerHandle != spoilerHandleWas) spoilerHandleMovedAt = t;
+        spoilerHandleWas = spoilerHandle;
+        if (t - spoilerHandleMovedAt >= spoilerLagSec) spoilerSurface = approach(spoilerSurface, spoilerHandle, 2.0, dt);
         if (airbus) {
             for (int e = 0; e < 2; ++e) {
                 const double l = tla(e);
@@ -715,7 +719,7 @@ TEST(Setup_AReplayThatDoesntMoveTheControlStopsEarly) {
     CHECK(h.run(120.0, deploySpoilers(h.aircraft, 2.0, 12.0), "ask"));
     REQUIRE(h.aircraft.tried.size() == 3);
     CHECK(h.aircraft.tried[2] == h.aircraft.spoilersWork);
-    CHECK(logged("no movement of the spoilers 3 s after yours; not replaying the rest"));
+    CHECK(logged("no movement of the spoilers 3.0 s after yours; not replaying the rest"));
     CHECK(logged("moved the spoilers 0% as far as you did"));
     REQUIRE(h.replayStarts.size() == 3);
     CHECK(h.replayStarts[1] - h.replayStarts[0] < 8.0);
@@ -723,6 +727,42 @@ TEST(Setup_AReplayThatDoesntMoveTheControlStopsEarly) {
     // The one that works replays all of it.
     CHECK(h.t - h.replayStarts[2] > 13.0);
     CHECK_NEAR(h.aircraft.spoilerHandle, 0.0, 1e-6);
+}
+
+// Surfaces that start seconds after the command (the PMDG 777's flaps, about 3 s): a method gets
+// that long more than the 3 s, as the pilot's movement showed. Without it the key event that
+// brought them back failed the way back, and the next method got the credit.
+TEST(Setup_ASlowControlGetsAsLongToStartAsItTookForThePilot) {
+    SetupHarness h;
+    h.facts.gearRetractable = false;
+    h.aircraft.spoilerLagSec = 3.5;
+    h.aircraft.spoilersWork = ControlMethod{MethodKind::KeyEvent, "", 1.0};
+    REQUIRE(h.start());
+    CHECK(h.run(180.0, deploySpoilers(h.aircraft, 2.0, 12.0), "back"));
+    // The panel's countdown: 7 s for the way back to start, then (nothing moved) a replay given up
+    // on 7 s after the clip's spoilers moved, 4.5 s in.
+    CHECK_NEAR(h.status().getNumber("left", -1.0), 7.0, 0.05);
+    h.run(2.0);
+    CHECK_NEAR(h.status().getNumber("left", -1.0), 5.0, 0.05);
+    CHECK(h.run(60.0, nullptr, "replay"));
+    h.run(0.5);
+    CHECK_NEAR(h.status().getNumber("left", -1.0), 11.0, 0.2);
+    CHECK(h.run(180.0, nullptr, "ask"));
+    CHECK_EQ(h.status().getNumber("left", 0.0), -1.0);
+    CHECK(logged("the outcome moved 4.0 s after the first sign of your movement; a method gets 7.0 s to start moving it"));
+    // The way back: the preset scalings didn't, the key event did, and nothing after it was tried.
+    REQUIRE(h.backTried.size() == 3);
+    CHECK(h.backTried[2] == h.aircraft.spoilersWork);
+    CHECK(logged("key event SPOILERS_SET brought the spoilers back from where you left it"));
+    // The replays: the preset scalings stop early, the key event moves them as the pilot did.
+    REQUIRE(h.aircraft.tried.size() == 3);
+    CHECK(h.aircraft.tried[2] == h.aircraft.spoilersWork);
+    CHECK(logged("no movement of the spoilers 7.0 s after yours; not replaying the rest"));
+    REQUIRE(h.answer("yes"));
+    const ControlProfile& sp = h.flow.profile()[Control::Spoilers];
+    CHECK(sp.state == ControlState::Ok);
+    CHECK(sp.method == h.aircraft.spoilersWork);
+    CHECK(!sp.perDirection());  // one method both ways
 }
 
 // The PMDG 737 ignores SPOILERS_SET but takes AXIS_SPOILER_SET, what a hardware speedbrake axis

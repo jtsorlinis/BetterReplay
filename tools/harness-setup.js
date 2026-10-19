@@ -6,7 +6,7 @@ window.harnessSetup = (function () {
   // The pilot's instructions, one at a time.
   const TASKS = {
     spoilers: ["Deploy the spoilers", "Retract the spoilers"],
-    flaps: ["Lower the flaps one notch", "Wait for the flaps to extend", "Retract the flaps"],
+    flaps: ["Lower the flaps one notch", "Wait for the flaps to extend", "Retract the flaps one notch"],
     throttle: ["Move the throttle to about halfway and hold it", "Now to full and hold it", "Back to idle",
       "Wait for the engines to spool down"],
     gear: ["Raise the gear", "Lower the gear"],
@@ -330,6 +330,7 @@ window.harnessSetup = (function () {
       tasks: done ? 0 : s.phase === "lower" ? 1 : s.phase === "positions" ? POSITION_TASKS.length : TASKS[c].length,
       taskDone: pilot && s.taskDone, holdTask: holding, hold: holding ? s.hold : 0,
       method: s.method + 1, methods: c ? METHODS[c].length : 0, attempts: s.attempts.slice(),
+      left: s.phase === "replay" ? Math.max(0, REPLAY_SEC - s.t) : -1,
       plan: s.plan.map((x, i) => ({ control: x, state: i < s.step ? s.results[x] : i === s.step ? "current" : "next" })),
       buttons: buttons,
     });

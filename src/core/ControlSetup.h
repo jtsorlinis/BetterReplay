@@ -374,6 +374,10 @@ private:
     void track(const Frame& live);
     double restTol() const;  // how near where the pilot started the control counts as there
     double replayStartTol() const;  // how far from there counts as it started moving
+    double startWaitSec() const;    // how long a method gets to start moving it, from its command
+    // The method being tried: seconds until it's given up on if nothing moves, or until the rest
+    // of its replay has played; -1 when neither (on its way back to rest, settling, asking).
+    double attemptLeft() const;
     bool atRest(const Frame& live) const;
     // The gear's replay, for the log: each command (0 up, 1 down) and where the gear went until the next.
     void noteGearCommand(double command, const Frame& live);
@@ -459,6 +463,7 @@ private:
     bool judgeOutcome_ = true;  // check replays on the outcome (surfaces, N1), else on the handle
     double userPeak_ = 0.0;     // the pilot's movement on that signal
     double clipMovedAt_ = NAN;  // when it started moving, from the start of mini_
+    double pilotLag_ = 0.0;     // how long after the movement's first sign that was (the 777's flaps: 4 s)
 
     // replay
     Clip mini_;  // the pilot's movement, t from 0
