@@ -41,6 +41,7 @@ $PanelDirName = 'BetterReplayPanel'
 $SpbName = 'InGamePanel_BetterReplay.spb'
 $SpbSource = Join-Path $Root 'package\PackageSources\InGamePanels\InGamePanel_BetterReplay.xml'
 $SpbCacheDir = Join-Path $Root 'package\spb'
+$ProfilesDir = Join-Path $Root 'profiles'
 
 function Write-Step([string]$Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
@@ -290,6 +291,12 @@ function New-CommunityPackage([string]$Stage) {
         Copy-Item $spb $panels
     } else {
         Write-Warning "No compiled panel ($SpbName): the recorder will run but the toolbar panel won't appear. Run .\build.ps1 -Package once (sim closed)."
+    }
+    # The included control profiles (profiles\*.json, exported with tools\export-profiles.mjs), in one
+    # file as the module reads them.
+    if (Get-ChildItem (Join-Path $ProfilesDir '*.json') -ErrorAction SilentlyContinue) {
+        Invoke-Native 'node' @((Join-Path $Root 'tools\pack-profiles.mjs'), $ProfilesDir,
+            (Join-Path $dir 'profiles\aircraft.json'))
     }
     $total = Write-Layout $dir
     Write-Manifest $dir $total

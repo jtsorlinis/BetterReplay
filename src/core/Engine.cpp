@@ -18,6 +18,7 @@ constexpr const char* kIndexFile = "index.json";
 constexpr const char* kIndexTmp = "index.json.tmp";
 constexpr const char* kProfilesFile = "aircraft.json";
 constexpr const char* kProfilesTmp = "aircraft.json.tmp";
+constexpr const char* kIncludedProfilesFile = "profiles/aircraft.json";  // in the package
 constexpr const char* kReasonPaused = "paused";
 constexpr const char* kReasonSetup = "control setup";
 
@@ -129,6 +130,7 @@ void Engine::init() {
     ++clipsRev_;
     logf(0, "library: %zu clip(s)", index_.size());
     loadProfiles();
+    loadIncludedProfiles();
 }
 
 void Engine::loadProfiles() {
@@ -146,6 +148,36 @@ void Engine::loadProfiles() {
         }
         logf(1, "%s is unreadable (%s)", name, err.c_str());
     }
+}
+
+// The package's own profiles (exported with tools/export-profiles.mjs), for aircraft that have none
+// in aircraft.json.
+void Engine::loadIncludedProfiles() {
+    std::vector<uint8_t> buf;
+    if (!storage_.readPackageFile(kIncludedProfilesFile, buf)) {
+        logf(0, "no control profiles included in the package");
+        return;
+    }
+    std::string err;
+    if (!included_.fromJson(reinterpret_cast<const char*>(buf.data()), buf.size(), &err)) {
+        logf(1, "the package's %s is unreadable (%s)", kIncludedProfilesFile, err.c_str());
+        return;
+    }
+    included_.groupVariants();
+    size_t own = 0;
+    for (const AircraftProfile& p : included_.profiles()) own += profiles_.find(p.key) ? 1 : 0;
+    logf(0, "loaded the package's %s (%zu aircraft control profile(s); %zu of those aircraft have their own in "
+         "aircraft.json, which is used instead)",
+         kIncludedProfilesFile, included_.size(), own);
+}
+
+// To change the aircraft's profile in aircraft.json. Where it only had the package's, it starts as a
+// copy of that, so the setup's "never" keeps those controls.
+AircraftProfile& Engine::ownProfile() {
+    const AircraftProfile* included = profiles_.find(aircraftKey_) ? nullptr : included_.find(aircraftKey_);
+    AircraftProfile& p = profiles_.upsert(aircraftKey_);
+    if (included) p = *included;
+    return p;
 }
 
 void Engine::saveProfiles() {
@@ -332,13 +364,20 @@ void Engine::setAircraftKey(const std::string& path) {
             summary += std::string(i ? ", " : "") + controlSpec(c).key + " " + stateKey((*p)[c].state);
             if ((*p)[c].state == ControlState::Ok) summary += " (" + describeControl(c, (*p)[c]) + ")";
         }
-        logf(0, "aircraft key %s: control profile %s%s", key.c_str(), p->declined ? "declined; " : "", summary.c_str());
+        logf(0, "aircraft key %s: %scontrol profile %s%s", key.c_str(), profileIncluded() ? "included " : "",
+             p->declined ? "declined; " : "", summary.c_str());
     }
     if (out_) out_->applyProfile(p);
 }
 
 const AircraftProfile* Engine::currentProfile() const {
-    return aircraftKey_.empty() ? nullptr : profiles_.find(aircraftKey_);
+    if (aircraftKey_.empty()) return nullptr;
+    if (const AircraftProfile* own = profiles_.find(aircraftKey_)) return own;
+    return included_.find(aircraftKey_);
+}
+
+bool Engine::profileIncluded() const {
+    return !aircraftKey_.empty() && !profiles_.find(aircraftKey_) && included_.find(aircraftKey_);
 }
 
 void Engine::setChannelVar(int channel, const std::string& var) {
@@ -843,7 +882,7 @@ bool Engine::setupNever(std::string& error) {
     }
     setup_.cancel("declined");
     setupRequested_ = false;
-    AircraftProfile& p = profiles_.upsert(aircraftKey_);
+    AircraftProfile& p = ownProfile();
     p.declined = true;
     p.title = aircraft_;
     p.updatedUtcMs = lastUtcMs_;
@@ -861,22 +900,29 @@ bool Engine::setupReset(std::string& error) {
     setup_.cancel("profile reset");
     if (profiles_.remove(aircraftKey_)) {
         saveProfiles();
-        logf(0, "control profile for %s removed", aircraftKey_.c_str());
+        logf(0, "control profile for %s removed%s", aircraftKey_.c_str(),
+             profileIncluded() ? "; the package's included one applies again" : "");
     }
     setupSnoozed_ = false;
-    if (out_) out_->applyProfile(nullptr);
+    if (out_) out_->applyProfile(currentProfile());
     return true;
 }
 
 bool Engine::promoteWay(Control c, Direction d, const ControlMethod& m) {
-    if (aircraftKey_.empty() || !profiles_.find(aircraftKey_)) return false;
-    AircraftProfile& p = profiles_.upsert(aircraftKey_);
+    if (!currentProfile()) return false;
+    // An included profile changes for this session only, so the aircraft keeps it (and a later
+    // package's) rather than getting one of its own in aircraft.json.
+    const bool included = profileIncluded();
+    AircraftProfile& p = included ? included_.upsert(aircraftKey_) : profiles_.upsert(aircraftKey_);
     if (!br::promoteWay(p[c], d, m)) return false;
-    p.updatedUtcMs = lastUtcMs_;
-    logf(0, "control profile: the %s %s with %s first from now on (it worked in a replay where the way before it didn't); "
-         "now %s",
-         controlSpec(c).label, directionKey(c, d), describeMethod(c, m).c_str(), describeControl(c, p[c]).c_str());
-    saveProfiles();
+    logf(0, "control profile: the %s %s with %s first from now on%s (it worked in a replay where the way before it "
+         "didn't); now %s",
+         controlSpec(c).label, directionKey(c, d), describeMethod(c, m).c_str(),
+         included ? " in this session" : "", describeControl(c, p[c]).c_str());
+    if (!included) {
+        p.updatedUtcMs = lastUtcMs_;
+        saveProfiles();
+    }
     if (out_) out_->applyProfile(currentProfile());
     return true;
 }
@@ -971,6 +1017,7 @@ void Engine::statusJson(std::string& out) const {
     w.endObject();
     const AircraftProfile* p = currentProfile();
     w.kv("have", !p ? "none" : p->declined ? "declined" : p->anyPending() ? "partial" : "complete");
+    w.kv("included", profileIncluded());  // the package's profile, not one set up here
     w.key("controls").beginArray();
     for (int i = 0; p && i < kControlCount; ++i) {
         const Control c = controlAt(i);

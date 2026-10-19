@@ -1,4 +1,5 @@
-// IStorage on the package's persistent work folder, using plain stdio (WASI).
+// IStorage on the package's persistent work folder, using plain stdio (WASI), and reads from the
+// package folder itself (the included control profiles).
 // On disk (Steam): %APPDATA%\Microsoft Flight Simulator 2024\WASM\MSFS2024\<package>\work
 #pragma once
 
@@ -22,6 +23,8 @@ public:
     bool removeFile(const std::string& name) override;
     bool replaceFile(const std::string& from, const std::string& to) override;
     bool listFiles(std::vector<std::string>& names) override;
+    // From the package folder (read-only), with whichever spelling of its root opens the file.
+    bool readPackageFile(const std::string& name, std::vector<uint8_t>& out) override;
 
 private:
     std::string path(const std::string& name) const { return dir_ + name; }

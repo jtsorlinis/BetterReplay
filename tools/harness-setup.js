@@ -232,6 +232,7 @@ window.harnessSetup = (function () {
     s.results = s.results || {};
     s.plan = sim.onGround ? STEPS.slice() : ["gear"];
     s.active = true;
+    s.included = false;  // what the setup finds is the aircraft's own profile
     s.declined = false;
     s.snoozed = false;
     s.requested = false;
@@ -295,7 +296,8 @@ window.harnessSetup = (function () {
   function status() {
     const have = s.declined ? "declined" : !s.results ? "none" :
       STEPS.every((c) => s.results[c] && s.results[c] !== "pending") ? "complete" : "partial";
-    const out = { offer: offer(), requested: !!s.requested, ready: ready(), have: have, controls: [], active: s.active };
+    const out = { offer: offer(), requested: !!s.requested, ready: ready(), have: have, included: !!s.included,
+      controls: [], active: s.active };
     if (s.results) {
       STEPS.forEach((c) => out.controls.push({ control: c, state: s.results[c] || "pending", method: s.methods[c] || "" }));
     }
@@ -350,8 +352,8 @@ window.harnessSetup = (function () {
         if (!s.active) { s.requested = true; s.snoozed = false; }
         return [true, ""];
       case "setupLater": s.active = false; s.snoozed = true; s.requested = false; return [true, ""];
-      case "setupNever": s.active = false; s.declined = true; s.requested = false; return [true, ""];
-      case "setupReset": s.active = false; s.declined = false; s.snoozed = false; s.results = null; s.methods = {}; return [true, ""];
+      case "setupNever": s.active = false; s.declined = true; s.included = false; s.requested = false; return [true, ""];
+      case "setupReset": s.active = false; s.declined = false; s.included = false; s.snoozed = false; s.results = null; s.methods = {}; return [true, ""];
       default: return null;
     }
   }
@@ -389,6 +391,13 @@ window.harnessSetup = (function () {
       ["Time out", timeout],
       ["Aircraft rolls", () => { if (s.phase === "replay" && control() === "throttle") { s.stoppedEarly = true; evaluate(); } }],
       ["New flight", () => { s.active = false; s.snoozed = false; s.requested = false; s.hovering = false; }],  // (let go where it is)
+      ["Use an included profile", () => {
+        s.active = false;
+        s.declined = false;
+        s.included = true;
+        s.results = {};
+        STEPS.forEach((c) => { s.results[c] = "ok"; s.methods[c] = "key events"; });
+      }],
     ];
     actions.forEach((a) => {
       const b = document.createElement("button");

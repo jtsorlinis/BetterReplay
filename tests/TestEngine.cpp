@@ -20,6 +20,7 @@ constexpr int64_t kUtcBase = 1792247525000;  // 2026-10-17 14:32:05 UTC
 
 struct MemoryStorage : IStorage {
     std::map<std::string, std::vector<uint8_t>> files;
+    std::map<std::string, std::vector<uint8_t>> package;  // read-only
     bool failRename = false;
     bool failList = false;
 
@@ -46,6 +47,12 @@ struct MemoryStorage : IStorage {
         if (failList) return false;
         names.clear();
         for (const auto& kv : files) names.push_back(kv.first);
+        return true;
+    }
+    bool readPackageFile(const std::string& name, std::vector<uint8_t>& out) override {
+        const auto it = package.find(name);
+        if (it == package.end()) return false;
+        out = it->second;
         return true;
     }
     size_t clipCount() const {
@@ -358,6 +365,104 @@ TEST(Engine_VariantsShareOneControlProfile) {
     REQUIRE(saved.fromJson(reinterpret_cast<const char*>(bytes.data()), bytes.size(), &err));
     REQUIRE(saved.size() == 1);
     CHECK_EQ(saved.profiles()[0].key, std::string("simobjects/airplanes/pmdg 737"));
+}
+
+// A profile with the flaps on key events `var`, and two ways to put the gear down.
+static void writeProfiles(std::vector<uint8_t>& file, const char* key, const char* flapsVar) {
+    ProfileStore store;
+    AircraftProfile& p = store.upsert(key);
+    p.title = "737";
+    p[Control::Flaps].state = ControlState::Ok;
+    p[Control::Flaps].method.kind = MethodKind::KeyEvent;
+    p[Control::Flaps].method.var = flapsVar;
+    ControlProfile& gear = p[Control::Gear];
+    gear.state = ControlState::Ok;
+    gear.method.kind = MethodKind::KeyEvent;
+    gear.method.var = "#69927";
+    gear.ways[static_cast<int>(Direction::Extend)] = {gear.method, ControlMethod{MethodKind::KeyEvent, "#69928", 1.0}};
+    gear.ways[static_cast<int>(Direction::Retract)] = {gear.method};
+    std::string json;
+    store.toJson(json);
+    file.assign(json.begin(), json.end());
+}
+
+static bool statusIncluded(const Engine& e) {
+    std::string json;
+    e.statusJson(json);
+    CHECK(json.find("\"included\":") != std::string::npos);
+    return json.find("\"included\":true") != std::string::npos;
+}
+
+TEST(Engine_IncludedProfileWhereTheAircraftHasNone) {
+    MemoryStorage storage;
+    writeProfiles(storage.package["profiles/aircraft.json"], "simobjects/airplanes/pmdg 737", kKeyFlapsAxis);
+    Engine e(storage);
+    e.setLogger(&testLog, nullptr);
+    e.init();
+    CHECK_EQ(e.includedProfiles().size(), static_cast<size_t>(1));
+    e.setAircraftKey(kPmdg800);
+    const AircraftProfile* p = e.currentProfile();
+    REQUIRE(p != nullptr);
+    CHECK(e.profileIncluded());
+    CHECK(statusIncluded(e));
+    CHECK((*p)[Control::Flaps].method.var == std::string(kKeyFlapsAxis));
+    CHECK(storage.files.count("aircraft.json") == 0);  // nothing of the pilot's to keep
+
+    // A way that worked in a replay goes first for this session, without making it the pilot's.
+    const ControlMethod second{MethodKind::KeyEvent, "#69928", 1.0};
+    CHECK(e.promoteWay(Control::Gear, Direction::Extend, second));
+    CHECK(e.currentProfile()->controls[static_cast<int>(Control::Gear)].waysTo(Direction::Extend)[0] == second);
+    CHECK(e.profileIncluded());
+    CHECK(storage.files.count("aircraft.json") == 0);
+
+    // Another aircraft has none.
+    e.setAircraftKey("simobjects/airplanes/a350/presets/airbus/config");
+    CHECK(e.currentProfile() == nullptr);
+    CHECK(!e.profileIncluded());
+    CHECK(!statusIncluded(e));
+}
+
+TEST(Engine_OwnProfileComesBeforeTheIncludedOne) {
+    MemoryStorage storage;
+    writeProfiles(storage.files["aircraft.json"], kPmdg800, kKeyFlapsNotches);  // (moved to the family)
+    writeProfiles(storage.package["profiles/aircraft.json"], "simobjects/airplanes/pmdg 737", kKeyFlapsAxis);
+    Engine e(storage);
+    e.setLogger(&testLog, nullptr);
+    e.init();
+    e.setAircraftKey(kPmdg700);
+    REQUIRE(e.currentProfile() != nullptr);
+    CHECK(!e.profileIncluded());
+    CHECK(!statusIncluded(e));
+    CHECK((*e.currentProfile())[Control::Flaps].method.var == std::string(kKeyFlapsNotches));
+
+    // Reset: the included one again.
+    std::string err;
+    REQUIRE(e.setupReset(err));
+    REQUIRE(e.currentProfile() != nullptr);
+    CHECK(e.profileIncluded());
+    CHECK((*e.currentProfile())[Control::Flaps].method.var == std::string(kKeyFlapsAxis));
+}
+
+TEST(Engine_NeverOnAnIncludedProfileKeepsItsControls) {
+    MemoryStorage storage;
+    writeProfiles(storage.package["profiles/aircraft.json"], "simobjects/airplanes/pmdg 737", kKeyFlapsAxis);
+    Engine e(storage);
+    e.setLogger(&testLog, nullptr);
+    e.init();
+    e.setAircraftKey(kPmdg800);
+    std::string err;
+    REQUIRE(e.setupNever(err));
+    CHECK(!e.profileIncluded());
+    REQUIRE(e.currentProfile() != nullptr);
+    CHECK(e.currentProfile()->declined);
+    CHECK((*e.currentProfile())[Control::Flaps].method.var == std::string(kKeyFlapsAxis));
+    // Kept in aircraft.json.
+    ProfileStore saved;
+    const std::vector<uint8_t>& bytes = storage.files["aircraft.json"];
+    REQUIRE(saved.fromJson(reinterpret_cast<const char*>(bytes.data()), bytes.size(), &err));
+    REQUIRE(saved.size() == 1);
+    CHECK(saved.profiles()[0].declined);
+    CHECK(saved.profiles()[0][Control::Flaps].method.var == std::string(kKeyFlapsAxis));
 }
 
 TEST(Engine_PauseMidLandingIsSqueezedOut) {

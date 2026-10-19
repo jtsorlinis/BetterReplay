@@ -46,7 +46,7 @@ You can also build the package in DevMode: **File → Open project…** → `bui
 
 Releases are built locally and published on GitHub in the browser.
 
-1. **Set the version** (`major.minor.patch`) in two places: `Version` in `package\PackageDefinitions\betterreplay-recorder.xml` and `kVersion` in `src\module\Module.cpp`. Commit and push.
+1. **Set the version** (`major.minor.patch`) in two places: `Version` in `package\PackageDefinitions\betterreplay-recorder.xml` and `kVersion` in `src\module\Module.cpp`. To ship the control profiles you've set up, run `node tools\export-profiles.mjs` (see [Tests and tools](#tests-and-tools)). Commit and push.
 2. **Build the zip:** `.\build.ps1 -Zip`. It writes `dist\betterreplay-recorder-<version>.zip`, holding the `betterreplay-recorder` folder ready to extract into Community. It stops before building if the two versions differ or the compiled panel is missing or out of date (then run `.\build.ps1 -Package -Zip` with the sim closed). It warns if there are uncommitted or unpushed changes, or if the version's tag is already on another commit.
 3. **Publish:** open the link it prints. That's GitHub's new-release form, with the tag (`v<version>`), the commit you built and the title filled in. Add release notes, drag in the zip and choose **Publish release**. Publishing creates the tag. While BetterReplay is in early testing, tick **Set as a pre-release**.
 
@@ -59,6 +59,7 @@ Before publishing, install from the zip itself to check it: extract it into your
 - **Module check:** `tools/check-wasm.mjs` runs after every module build. It fails if a required MSFS 2024 export is missing or the module imports something unexpected.
 - **VS solution:** `BetterReplay.sln` has `CoreTests` (x64) and `BetterReplayModule` (MSFS|MSFS2024). The module project only loads once the MSFS2024 platform toolset is installed.
 - **In-sim checklist:** [MANUAL_TEST.md](MANUAL_TEST.md), with the log lines to expect at each step.
+- **Exporting control profiles:** `node tools\export-profiles.mjs` copies the profiles in your [work folder](#work-folder)'s `aircraft.json` into `profiles\`, one file per aircraft, named after the last part of its key (`profiles\pmdg-777.json`; `title-<title>.json` for an aircraft known only by its title). A file is matched to its aircraft by the `key` inside it, so you can rename it. The work folder's profile replaces the file's unless the file's is newer, and files for aircraft the work folder doesn't have are left alone (delete one to drop that aircraft). Profiles with nothing set up aren't copied, and "never for this aircraft" isn't kept. `--from <folder or file>` reads another work folder or `aircraft.json`. `build.ps1` combines the files into one, the package's `profiles\aircraft.json` (`tools\pack-profiles.mjs`), and stops if a file isn't a profile or two files are the same aircraft. See [Included profiles](#included-profiles) for how the module uses them.
 - **Inspecting a clip** outside the sim:
 
   ```powershell
@@ -112,7 +113,7 @@ The recorder is a standalone WASM module. It keeps a 10-minute ring buffer at 30
   - `delete{file}`, `saveLast`
   - `setupStart`, `setupAnswer{a}` (`yes`, `no`, `again`, `skip`, `retry`, `ready`, `done`, `begin`, `later`, `cancel`, `close`), `setupLater`, `setupNever`, `setupReset`
   - `setDebug{on}`
-- The status message's `setup` object has the offer, the aircraft's profile summary and, while the setup runs, its step, prompt and the answers that fit.
+- The status message's `setup` object has the offer, the aircraft's profile summary (with `included` when it's the package's), and, while the setup runs, its step, prompt and the answers that fit.
 - Replies come back on `BetterReplay.Status`, `BetterReplay.Clips` and `BetterReplay.Reply`.
 
 **Clip format.** The `.rpl` format is chunked and little-endian:
@@ -175,6 +176,16 @@ Aircraft differ in how their controls can be driven. Many 2024 aircraft keep the
 
 If you skip the gear step or quit before it, the panel offers just the gear once you're airborne again. Profiles are kept per aircraft in `aircraft.json` in the work folder, shared by its variants: the key is the aircraft's folder under `SimObjects` (from its `aircraft.cfg` path), so its presets share it, without the model's variant number (a dash and 3 or 4 digits after the model's own digits). So the PMDG 737-600, -700, -800 and -900 share one profile, and so do the A350-900, -900ULR and -1000. Clips don't: they replay only on the `aircraft.cfg` they were recorded with. Profiles kept per variant before are moved over at startup (where variants had one each, the newest is kept).
 
+### Included profiles
+
+The package can include profiles of its own in `profiles\aircraft.json`, in the same format as the work folder's. In the repo they're one file per aircraft in `profiles\`, exported from a work folder with `tools\export-profiles.mjs` and combined by `build.ps1` (see [Tests and tools](#tests-and-tools)). An aircraft with a profile in the work folder's `aircraft.json` always uses that one. Without one, it uses the included profile, and the aircraft card says *Included* instead of *Configured* (the status message's `setup.included`). The included profile is never copied into `aircraft.json`, so a later release's replaces it, except:
+
+- **Redo** runs the setup from the included profile and saves the result in `aircraft.json`, which is used from then on. `setupReset` removes it, and the included profile applies again.
+- **Never for this aircraft** keeps the included profile's controls in `aircraft.json`, declined.
+- A way that worked in a replay where the one before it didn't (`control profile: the … with … first from now on in this session`) goes first only until the sim closes.
+
+At startup the log says `loaded the package's profiles/aircraft.json (N aircraft control profile(s); M of those aircraft have their own in aircraft.json, which is used instead)`, or `no control profiles included in the package`, and for each aircraft `aircraft key …: included control profile …` when it uses one.
+
 ## Work folder
 
 `%APPDATA%\Microsoft Flight Simulator 2024\WASM\MSFS2024\betterreplay-recorder\work\` (Steam). That folder holds:
@@ -197,6 +208,7 @@ For problems the log can't show (how the aircraft moves or sounds frame by frame
 None of these could be verified without running the sim. Each is covered by a step in MANUAL_TEST.md.
 
 - **SDK samples not installed.** The InGamePanels XML and package definition follow a dev-forum example plus the sim executable's own property names, not an SDK sample. If the panel doesn't appear, compare them against the SDK's InGamePanel sample.
+- **Reading the package folder.** The included profiles are read from the package folder, trying `\profiles\aircraft.json`, `/profiles/aircraft.json` and `profiles/aircraft.json` in turn; which spelling the runtime takes is untested. Look for `package file: '…'` in the log. If it says `no control profiles included in the package` while the package has the file, none of them worked.
 - **No MSFS2024 VS toolset.** Builds use the SDK's clang directly, with the same exports and version library as a working 2024 module. The VS project has never been built.
 - **SimConnect dispatch in WASM.** `SimConnect_CallDispatch` is called once at init. If no messages arrive within 2 s, the module falls back to calling it every frame and logs that.
 - **Freeze event parameter is undocumented.** `FREEZE_*_SET` is sent with 1/0 and verified through `IS … FREEZE ON`. If it didn't take, the module sends `FREEZE_*_TOGGLE` and logs it.

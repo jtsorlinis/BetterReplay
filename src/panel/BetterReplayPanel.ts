@@ -54,6 +54,7 @@ interface SetupStatus {
     requested?: boolean;  // offered because Set up / Redo was pressed (whatever the profile)
     ready?: { parkingBrake: boolean; onRunway: boolean; engines: boolean };  // what "wait" is waiting for
     have: string;   // the aircraft's profile: "none", "partial", "complete", "declined"
+    included?: boolean;  // it's the one included with BetterReplay, not one set up here
     controls: SetupControl[];
     active: boolean;
     phase?: string;
@@ -1095,12 +1096,13 @@ class BetterReplayPanel extends UIElement {
         byId("br-controls-pill").classList.toggle("hidden", !setup);
         byId("br-setup-run").classList.toggle("hidden", !setup);
         if (!setup) return;
-        // Configured: every control the aircraft has replays. Partly: some do, some were skipped,
-        // didn't pass, or are still to do (the gear, if it was left for later).
+        // Configured: every control the aircraft has replays ("Included" when that's the profile
+        // included with BetterReplay). Partly: some do, some were skipped, didn't pass, or are still
+        // to do (the gear, if it was left for later).
         const profile = setup.have === "partial" || setup.have === "complete";
         let present = 0;
         let ok = 0;
-        const lines: string[] = [];
+        const lines: string[] = setup.included ? ["Included with BetterReplay"] : [];
         for (let i = 0; i < setup.controls.length; ++i) {
             const c = setup.controls[i];
             if (c.state === "absent") continue;
@@ -1112,7 +1114,8 @@ class BetterReplayPanel extends UIElement {
         const level = !profile ? "missing" : ok === present ? "ok" : ok > 0 ? "partial" : "missing";
         const pill = byId("br-controls-pill");
         updateClass(pill, "br-pill " + level);
-        updateText(pill, level === "ok" ? "Configured" : level === "partial" ? "Partially configured" : "Not configured");
+        updateText(pill, level === "ok" ? (setup.included ? "Included" : "Configured") :
+            level === "partial" ? "Partially configured" : "Not configured");
         const title = lines.join("\n");
         if (pill.title !== title) pill.title = title;
         const run = byId<HTMLButtonElement>("br-setup-run");

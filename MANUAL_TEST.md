@@ -273,6 +273,7 @@ Use an aircraft without a profile; the A320neo V2 is the interesting one. Start 
 - [ ] Fly a pattern and land: the landing is saved as usual (it's after the setup). Play the landing clip. **Expect** `playback: spoilers via … (control profile)`, and the same for each set-up control. Note whether each control follows the clip now.
   - Clips from before the setup may log `… profile method … doesn't fit this clip …; using the defaults` instead. That's expected.
 - [ ] Restart the flight: no setup screen, since the profile is known. **Redo** runs the setup again.
+- [ ] **Included profiles:** run `node tools\export-profiles.mjs`, build and install, then move `aircraft.json` out of the work folder and start the sim. **Expect** `package file: '…'` and `loaded the package's profiles/aircraft.json (N aircraft control profile(s); 0 of those aircraft have their own …)`, N being the number of files in the repo's `profiles\`. Load one of those aircraft: `aircraft key …: included control profile …`, the aircraft card says *Included* in green (hover: *Included with BetterReplay*), no setup is offered, and a replay logs `playback: … via … (control profile)`. **Redo** and finish the setup: the card says *Configured*, and `aircraft.json` is back in the work folder with that aircraft. Put your own `aircraft.json` back afterwards.
 
 ## 13. Library management
 

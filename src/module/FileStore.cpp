@@ -48,10 +48,9 @@ bool FileStore::writeFile(const std::string& name, const uint8_t* data, size_t s
     return true;
 }
 
-bool FileStore::readFile(const std::string& name, std::vector<uint8_t>& out) {
-    if (!ready()) return false;
-    FILE* f = std::fopen(path(name).c_str(), "rb");
-    if (!f) return false;
+namespace {
+
+bool readWhole(FILE* f, const std::string& name, std::vector<uint8_t>& out) {
     out.clear();
     bool ok = std::fseek(f, 0, SEEK_END) == 0;
     const long size = ok ? std::ftell(f) : -1;
@@ -63,6 +62,31 @@ bool FileStore::readFile(const std::string& name, std::vector<uint8_t>& out) {
     std::fclose(f);
     if (!ok) log::warn("reading %s failed", name.c_str());
     return ok;
+}
+
+}  // namespace
+
+bool FileStore::readFile(const std::string& name, std::vector<uint8_t>& out) {
+    if (!ready()) return false;
+    FILE* f = std::fopen(path(name).c_str(), "rb");
+    return f && readWhole(f, name, out);
+}
+
+bool FileStore::readPackageFile(const std::string& name, std::vector<uint8_t>& out) {
+    std::string backslashed = name;
+    for (char& c : backslashed) {
+        if (c == '/') c = '\\';
+    }
+    for (const std::string& p : {"\\" + backslashed, "/" + name, name}) {
+        FILE* f = std::fopen(p.c_str(), "rb");
+        if (!f) {
+            log::debug("package file candidate '%s' not readable (errno %d)", p.c_str(), errno);
+            continue;
+        }
+        log::info("package file: '%s'", p.c_str());
+        return readWhole(f, name, out);
+    }
+    return false;
 }
 
 bool FileStore::removeFile(const std::string& name) {

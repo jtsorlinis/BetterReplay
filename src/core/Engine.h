@@ -87,6 +87,13 @@ public:
     virtual bool removeFile(const std::string& name) = 0;
     virtual bool replaceFile(const std::string& from, const std::string& to) = 0;  // rename, overwriting
     virtual bool listFiles(std::vector<std::string>& names) = 0;                    // false if unsupported
+    // A file shipped in the package (read-only), by its path there with '/' separators: the
+    // control profiles it includes. False if there's none.
+    virtual bool readPackageFile(const std::string& name, std::vector<uint8_t>& out) {
+        (void)name;
+        (void)out;
+        return false;
+    }
 };
 
 struct EngineConfig {
@@ -119,7 +126,8 @@ public:
     void setControlSim(IControlSim* sim) { setup_.setSim(sim); }
 
     // Loads index.json (falling back to its .tmp copy, then to scanning *.rpl headers) and
-    // reconciles it with the files actually present, then aircraft.json (control profiles).
+    // reconciles it with the files actually present, then aircraft.json (control profiles) and the
+    // profiles included in the package (profiles/aircraft.json).
     void init();
 
     // ---- sim state (from SimConnect system/flow events)
@@ -136,7 +144,9 @@ public:
     // its aircraftFamily(), so the variants share one.
     void setAircraftKey(const std::string& path);
     const std::string& aircraftKey() const { return aircraftKey_; }  // the family
+    // The aircraft's own profile (aircraft.json), else the one included in the package.
     const AircraftProfile* currentProfile() const;
+    bool profileIncluded() const;  // currentProfile() is the package's
     // An airport the sim reports around the aircraft. Takeoff and landing clips record the one
     // they were at.
     void addAirport(const std::string& ident, const std::string& region, double latDeg, double lonDeg) {
@@ -191,9 +201,11 @@ public:
     const char* setupOffer() const;
     bool readyForSetup() const;
     const ProfileStore& profiles() const { return profiles_; }
+    const ProfileStore& includedProfiles() const { return included_; }
     // A replay found way `m` moving a control where the one before it in the profile's list that
     // way didn't (WayPicker): it goes first in the aircraft's profile, logged and saved, so later
-    // replays try it first. False if the profile has no such list or it's first already.
+    // replays try it first (in an included profile, for the rest of the session). False if the
+    // profile has no such list or it's first already.
     bool promoteWay(Control c, Direction d, const ControlMethod& m);
 
     // ---- status
@@ -235,7 +247,9 @@ private:
     void reconcileWithDisk();
     void fillAircraftPaths();  // once, for an index from before it stored them: from the clips
     void loadProfiles();
+    void loadIncludedProfiles();
     void saveProfiles();
+    AircraftProfile& ownProfile();  // the aircraft's in profiles_, a copy of the included one if it had none
     void storeSetupProfile();  // the setup's profile -> profiles_, aircraft.json and the sim
     bool writeJsonFile(const char* name, const char* tmp, const std::string& json);
     static void setupLog(void* ctx, int level, const char* msg);
@@ -267,7 +281,8 @@ private:
     int64_t lastUtcMs_ = 0;
 
     // control profiles and setup
-    ProfileStore profiles_;
+    ProfileStore profiles_;  // aircraft.json: the pilot's own, ahead of the included ones
+    ProfileStore included_;  // the package's profiles/aircraft.json, never written
     SetupFlow setup_;
     bool setupSnoozed_ = false;  // "later": no offer until the next flight
     bool setupRequested_ = false;  // Set up / Redo pressed: offered until started, "later" or the next flight
