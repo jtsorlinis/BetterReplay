@@ -52,6 +52,9 @@ struct FakeAircraft : IControlSim {
     double spoilerHandle = 0.0, spoilerSurface = 0.0;
     // The surfaces start this long after the handle has stopped moving (as the PMDG 777's flaps do).
     double spoilerLagSec = 0.0, spoilerHandleWas = 0.0, spoilerHandleMovedAt = -100.0;
+    // And this much later again when a replay drives them (as the PMDG 777's flaps: its handle,
+    // which a replay follows, moves when the flaps do).
+    double spoilerReplayLagSec = 0.0;
     double thr[2] = {0.0, 0.0};
     double n1[2] = {20.0, 20.0};
     double gearLever = 1.0, gearPos = 1.0, gearLeverChangedAt = -100.0, gearHandleSimvar = 1.0;
@@ -108,6 +111,9 @@ struct FakeAircraft : IControlSim {
     // doesn't raise it); after the pilot raised it only a left click on the lever does (the event
     // with PMDG's mouse flags, "#69927(536870912,131072)").
     bool pmdg777 = false;
+    // On the 777 in the sim: after the lever event's DOWN (which doesn't lower the gear), the
+    // first click did nothing and the second lowered it.
+    bool downUnsyncsClick = false, clickOutOfStep = false;
     bool raisedByPilot = false;  // who last raised the gear: the pilot (setGearLever) or a replay
     bool pmdgLeverVars = false;  // and its lever's switch_295_a (0..100), and a sound flag while the legs move
     double gearRate = 0.25;     // the gear simvars' travel a second
@@ -190,7 +196,8 @@ struct FakeAircraft : IControlSim {
         if (holdReverse && t - decreaseAt > 0.2) holdReverse = false;  // let go
         if (spoilerHandle != spoilerHandleWas) spoilerHandleMovedAt = t;
         spoilerHandleWas = spoilerHandle;
-        if (t - spoilerHandleMovedAt >= spoilerLagSec) spoilerSurface = approach(spoilerSurface, spoilerHandle, 2.0, dt);
+        const double lag = spoilerLagSec + (driving && drivenControl == Control::Spoilers ? spoilerReplayLagSec : 0.0);
+        if (t - spoilerHandleMovedAt >= lag) spoilerSurface = approach(spoilerSurface, spoilerHandle, 2.0, dt);
         if (airbus) {
             for (int e = 0; e < 2; ++e) {
                 const double l = tla(e);
@@ -357,12 +364,19 @@ struct FakeAircraft : IControlSim {
             const bool own = parseEventMethod(driven, ev) && ev.id == 69927;
             if (own && ev.mode == EventMethod::Mode::Position) {
                 if (command < 0.5) replayGearLever(0.0);  // UP; DOWN does nothing
+                if (command >= 0.5 && downUnsyncsClick) clickOutOfStep = true;
             } else if (own && ev.mode == EventMethod::Mode::Toggle) {
                 // Clicked like ControlDriver: toward the command, once the legs show the last click.
                 const int dir = stepper.step(command, gearFollow.update(gearPos), ev.scale, EventStepper::waitFrames(c), force);
                 if (dir != 0) ++clicks;
                 const bool leftClick = ev.click && ev.param == 0x20000000 && ev.release == 0x00020000;
-                if (dir > 0 && leftClick && raisedByPilot) replayGearLever(1.0);
+                if (dir > 0 && leftClick && raisedByPilot) {
+                    if (clickOutOfStep) {
+                        clickOutOfStep = false;  // that click only put the lever back in step
+                    } else {
+                        replayGearLever(1.0);
+                    }
+                }
             } else if (driven.kind == MethodKind::KeyEvent && driven.var.empty()) {
                 if (command >= 0.5 && !raisedByPilot) replayGearLever(1.0);
             }
@@ -724,9 +738,37 @@ TEST(Setup_AReplayThatDoesntMoveTheControlStopsEarly) {
     REQUIRE(h.replayStarts.size() == 3);
     CHECK(h.replayStarts[1] - h.replayStarts[0] < 8.0);
     CHECK(h.replayStarts[2] - h.replayStarts[1] < 8.0);
-    // The one that works replays all of it.
-    CHECK(h.t - h.replayStarts[2] > 13.0);
+    // The one that works replays all of it but the middle of the 12 s the spoilers sat out
+    // (trimStill): 4.5 s of it after they got there, a second before they went in.
+    CHECK(logged("replays leave out "));
+    CHECK(h.t - h.replayStarts[2] > 8.0);
+    CHECK(h.t - h.replayStarts[2] < 12.0);
     CHECK_NEAR(h.aircraft.spoilerHandle, 0.0, 1e-6);
+}
+
+// Of a long stretch where the control sat still between its moves, replays keep the ends: what a
+// replay needs to get there and settle (a method's start wait and kStableSec), and the pilot's
+// lag and a second before it moves again. Before the control first moved, and at the movement's
+// end, nothing is left out.
+TEST(Setup_ReplaysLeaveOutTheMiddleOfAStillStretch) {
+    SetupHarness h;
+    h.facts.gearRetractable = false;
+    h.aircraft.spoilersWork = ControlMethod{MethodKind::KeyEvent, "", 1.0};
+    REQUIRE(h.start());
+    CHECK(h.run(120.0, deploySpoilers(h.aircraft, 2.0, 20.0), "away"));
+    // Out at about 0.75 s (the surfaces follow the handle at 2 a second), in from 20.5 s.
+    std::string line;
+    for (const std::string& l : g_setupLog) {
+        if (l.find("replays leave out") != std::string::npos) line = l;
+    }
+    double cut = NAN, left = NAN, all = NAN;
+    REQUIRE(std::sscanf(line.c_str(), "control setup: replays leave out %lf s where the spoilers sat still: %lf s of your %lf s",
+                        &cut, &left, &all) == 3);
+    CHECK_NEAR(all - cut, left, 0.05);
+    // Of about 19.75 s still: 3 s to start and 1.5 to settle, and 1 s before it moved again.
+    CHECK_NEAR(cut, 19.75 - 4.5 - 1.0, 0.3);
+    CHECK(h.run(120.0, nullptr, "ask"));
+    CHECK(h.aircraft.tried.back() == h.aircraft.spoilersWork);
 }
 
 // Surfaces that start seconds after the command (the PMDG 777's flaps, about 3 s): a method gets
@@ -763,6 +805,27 @@ TEST(Setup_ASlowControlGetsAsLongToStartAsItTookForThePilot) {
     CHECK(sp.state == ControlState::Ok);
     CHECK(sp.method == h.aircraft.spoilersWork);
     CHECK(!sp.perDirection());  // one method both ways
+    CHECK_EQ(sp.leadSec, 0.0);  // as late as for the pilot: nothing to make up
+}
+
+// A replay that moves the control later than the pilot's movement did (the PMDG 777's flaps, about
+// 3 s): replays drive it that far ahead of the clip.
+TEST(Setup_AReplayThatMovesLaterGivesTheControlALead) {
+    SetupHarness h;
+    h.facts.gearRetractable = false;
+    h.aircraft.spoilerReplayLagSec = 2.0;
+    h.aircraft.spoilersWork = ControlMethod{MethodKind::KeyEvent, "", 1.0};
+    REQUIRE(h.start());
+    CHECK(h.run(180.0, deploySpoilers(h.aircraft, 2.0, 3.0), "ask"));
+    REQUIRE(h.aircraft.tried.size() == 3);
+    CHECK(h.aircraft.tried[2] == h.aircraft.spoilersWork);
+    // 2 s after the handle stopped, which took half a second.
+    CHECK(logged("key event SPOILERS_SET moved the spoilers 2.5 s later than you did"));
+    REQUIRE(h.answer("yes"));
+    const ControlProfile& sp = h.flow.profile()[Control::Spoilers];
+    CHECK(sp.state == ControlState::Ok);
+    CHECK_NEAR(sp.leadSec, 2.5, 0.05);
+    CHECK(logged("replays drive the spoilers 2.5 s ahead of the clip"));
 }
 
 // The PMDG 737 ignores SPOILERS_SET but takes AXIS_SPOILER_SET, what a hardware speedbrake axis
@@ -1929,6 +1992,51 @@ constexpr int kUp = static_cast<int>(Direction::Retract);
 // The way back from where the pilot left the gear finds the click; the whole movement, the event
 // raising it; and from where that left it, the key events lowering it. The profile keeps both
 // ways down, without anything the 777's own beyond the event's number.
+// In the sim, after the lever event's DOWN the 777's first click did nothing and the second lowered
+// the gear: the click gets as long as the second takes (EventStepper's wait), and more.
+TEST(Setup_AClickGetsItsSecondTryOnTheWayBack) {
+    SetupHarness h;
+    h.key = "simobjects/airplanes/pmdg 777";
+    h.aircraft.onGround = false;
+    h.aircraft.pmdgGear = true;
+    h.aircraft.pmdg777 = true;
+    h.aircraft.downUnsyncsClick = true;
+    h.aircraft.gearRate = 0.1;
+    h.aircraft.legAnimRate = 0.25;
+    REQUIRE(h.start());
+    auto pilot = [&](double s) { h.aircraft.setGearLever(s >= 2.0 && s < 16.0 ? 0.0 : 1.0); };
+    CHECK(h.run(400.0, pilot, "replay"));
+    REQUIRE(h.backTried.size() == 2);
+    CHECK(h.backTried[0] == kLever777);
+    CHECK(h.backTried[1] == kClick777);
+    CHECK(logged("the aircraft's own event #69927 (536870912, then 131072) as a toggle brought the gear back from where "
+                 "you left it"));
+    CHECK(!logged("none of the method(s) brought the gear back"));
+}
+
+// A method that can't bring the control back to where the pilot's movement started it isn't
+// replayed: nothing the check counts can come of it (as the pilot's movement starts there).
+TEST(Setup_AMethodThatCantBringItBackIsntReplayed) {
+    SetupHarness h;
+    h.facts.gearRetractable = false;
+    h.aircraft.spoilersWork = ControlMethod{MethodKind::KeyEvent, "", 1.0};
+    REQUIRE(h.start());
+    // Out once more, where nothing brings them back on the way back...
+    CHECK(h.run(60.0, deploySpoilers(h.aircraft, 2.0, 12.0), "back"));
+    h.aircraft.spoilersWork = ControlMethod();
+    CHECK(h.run(120.0, nullptr, "replay"));
+    CHECK(logged("none of the method(s) brought the spoilers back from where you left it"));
+    const double at = h.t;
+    h.aircraft.spoilersWork = ControlMethod{MethodKind::KeyEvent, "", 1.0};  // ...then the key event does
+    CHECK(h.run(120.0, nullptr, "ask"));
+    // The preset scalings didn't bring them back in, so weren't replayed: 3.1 s each, not 30 s and
+    // then all 15 s of the movement each.
+    CHECK(logged("didn't bring the spoilers back to where you started it (it didn't move); not replaying it"));
+    REQUIRE(h.aircraft.tried.size() == 3);
+    CHECK(h.aircraft.tried[2] == h.aircraft.spoilersWork);
+    CHECK(h.t - at < 30.0);
+}
+
 TEST(Setup_Pmdg777GearLearnsEachWayOnItsOwn) {
     SetupHarness h;
     h.key = "simobjects/airplanes/pmdg 777";
@@ -2524,6 +2632,7 @@ TEST(Profile_JsonRoundTrip) {
         v2[Control::Throttle].lever.reverse = {{0.0, 0.0}, {1.0, -23.07}};
         v2[Control::Throttle].reverseBy = ReverseBy::Hold;
         v2[Control::Flaps] = {ControlState::Ok, ControlMethod{MethodKind::KeyEvent, kKeyFlapsNotches, 1.0}, true};
+        v2[Control::Flaps].leadSec = 3.1;
     }
     AircraftProfile& a = store.upsert("simobjects/airplanes/a320neo");
     a.title = "Airbus A320neo \"V2\"";
@@ -2547,6 +2656,19 @@ TEST(Profile_JsonRoundTrip) {
     CHECK_NEAR(lv.forward[2].axis, 0.525, 1e-9);
     CHECK_NEAR(lv.forward[3].lever, 51.9, 1e-9);
     CHECK((*b2)[Control::Flaps].method == (ControlMethod{MethodKind::KeyEvent, kKeyFlapsNotches, 1.0}));
+    CHECK_NEAR((*b2)[Control::Flaps].leadSec, 3.1, 1e-9);
+    CHECK_EQ((*back.find("simobjects/airplanes/a320neo"))[Control::Flaps].leadSec, 0.0);
+    CHECK_EQ(json.find("\"leadSec\""), json.rfind("\"leadSec\""));  // only where there's one
+    {
+        // Too small to keep, or more than any: as kMinLeadSec and kMaxLeadSec say.
+        const char* leads = "{\"aircraft\":[{\"key\":\"z\",\"controls\":{\"flaps\":{\"state\":\"ok\",\"method\":\"key_event\","
+                            "\"leadSec\":0.2},\"gear\":{\"state\":\"ok\",\"method\":\"key_event\",\"leadSec\":40}}}]}";
+        ProfileStore s;
+        REQUIRE(s.fromJson(leads, std::strlen(leads), &err));
+        REQUIRE(s.find("z"));
+        CHECK_EQ((*s.find("z"))[Control::Flaps].leadSec, 0.0);
+        CHECK_EQ((*s.find("z"))[Control::Gear].leadSec, kMaxLeadSec);
+    }
     CHECK_NEAR(lv.reverse[1].lever, -23.07, 1e-9);
     CHECK((*b2)[Control::Throttle].reverseBy == ReverseBy::Hold);
     CHECK(json.find("\"reverseBy\":\"hold\"") != std::string::npos);

@@ -90,6 +90,9 @@ public:
     bool anyActive() const;
     // A key event of ours is being sent now (the key event handler sees it too).
     static bool sending() { return sending_; }
+    // A sim key event (KEY_*), triggered as a binding would: the PMDG 777 takes FLAPS_INCR this
+    // way, and AUTO_THROTTLE_DISCONNECT, where a SimConnect transmit didn't reach its autothrottle.
+    static void keyEvent(int id, int32_t value);
     // What was last sent for output i of control c (a key event's value), and how many sends so far.
     double lastSent(Control c, int i) const { return slots_[static_cast<int>(c)].sent[i]; }
     int sends(Control c) const { return slots_[static_cast<int>(c)].sends; }
@@ -172,7 +175,6 @@ private:
     // one at a time toward the clip's value (EventStepper), as a pilot clicking would.
     void applyEvent(Control c, Slot& s, const Frame& f, bool force);
     void sendEvent(Slot& s, int which, int32_t param);  // which: 0 the event (steps: up), 1 steps' way back
-    static void keyEvent(int id, int32_t value);
     // The client event ID mapped to the aircraft's own event `name` ("#69927"), mapping it the
     // first time; 0 if that failed.
     DWORD ownEventId(const std::string& name);

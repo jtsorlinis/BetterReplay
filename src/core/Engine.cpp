@@ -629,6 +629,7 @@ bool Engine::play(const std::string& file, std::string& error) {
         playbackActive_ = true;
     }
     out_->beginPlayback(playback_.clip(), playback_.peak());
+    out_->playbackSpeed(playback_.speed());
     playback_.play();
     jumpPending_ = true;
     logf(0, "playback %s %s (%.1f s, %zu frames, %zu/%d channels)%s", switching ? "switched to" : "of", file.c_str(),
@@ -695,6 +696,7 @@ bool Engine::setSpeed(double speed, std::string& error) {
         return false;
     }
     playback_.setSpeed(speed);
+    if (out_) out_->playbackSpeed(playback_.speed());
     return true;
 }
 

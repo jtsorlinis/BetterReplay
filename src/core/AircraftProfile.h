@@ -231,6 +231,11 @@ struct ControlProfile {
     // it goes to the front (promoteWay). Empty: `method` that way, as in profiles from before.
     // `method` is still the one the clips' channels are recorded for (the first way out).
     std::vector<ControlMethod> ways[kDirections];
+    // The gear, flaps and spoilers: replays drive the control from this far ahead in the clip, as
+    // much later as the setup's replay moved it than the pilot's movement had (0: no later). The
+    // PMDG 777's flap handle follows its flaps, so the clip has it moving when they did, seconds
+    // after the lever; a notch sent then moves them seconds later again.
+    double leadSec = 0.0;
 
     std::vector<ControlMethod> waysTo(Direction d) const;  // ways[d], or `method`
     bool perDirection() const { return !ways[0].empty() || !ways[1].empty(); }
@@ -238,6 +243,10 @@ struct ControlProfile {
 // Puts `m` first among the ways that way, where a replay found it moving the control when the one
 // before it didn't. False if it's first already or not in that list.
 bool promoteWay(ControlProfile& cp, Direction d, const ControlMethod& m);
+// ControlProfile::leadSec: less than kMinLeadSec isn't kept (a replay a frame or two behind), and
+// none goes beyond kMaxLeadSec.
+constexpr double kMinLeadSec = 0.5;
+constexpr double kMaxLeadSec = 10.0;
 
 // The key an aircraft's control profile is kept under, shared by its variants. `path` is the
 // aircraft.cfg folder as Engine::setAircraftKey gets it (lower case, '/' separators), e.g.

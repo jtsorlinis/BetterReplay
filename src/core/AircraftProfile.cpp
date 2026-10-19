@@ -949,6 +949,7 @@ void ProfileStore::toJson(std::string& out) const {
                 w.endArray();
             }
             if (c.reverseBy != ReverseBy::Unknown) w.kv("reverseBy", reverseByKey(c.reverseBy));
+            if (c.leadSec > 0.0) w.kv("leadSec", c.leadSec);
             if (!c.lever.var.empty()) {
                 // [axis, lever] pairs
                 w.key("lever").beginObject();
@@ -1007,6 +1008,8 @@ bool ProfileStore::fromJson(const char* text, size_t length, std::string* error)
             }
             if (controlAt(i) == Control::Gear) readWithKeys(p.key, cp);
             parseReverseByKey(c->getString("reverseBy", ""), cp.reverseBy);
+            const double lead = c->getNumber("leadSec", 0.0);
+            cp.leadSec = controlAt(i) != Control::Throttle && lead >= kMinLeadSec ? std::min(lead, kMaxLeadSec) : 0.0;
             if (const JsonValue* lv = c->get("lever")) {
                 cp.lever.var = lv->getString("var", "");
                 cp.lever.forward = readLeverTable(lv->get("forward"));

@@ -945,6 +945,7 @@ void SetupFlow::onFrame(double dt, const Frame& live, const SetupFacts& facts) {
     facts_ = facts;
     onGround_ = live.v[kOnGround] >= 0.5;
     phaseT_ += dt;
+    if (dt > 0.0 && dt < 0.5) frameDt_ += 0.05 * (dt - frameDt_);
     switch (phase_) {
         case Phase::Prepare: {
             const char* need = precondition(live);
@@ -1187,10 +1188,12 @@ void SetupFlow::analyze() {
     windowFrom_ = std::max(0.0, std::min(movedAt_, firstChange) - kLeadInSec);
     mini_ = Clip();
     mini_.present.set();
+    miniAt_.clear();
     for (const Frame& f : capture_) {
         if (f.t < windowFrom_ - 1e-9) continue;
         mini_.frames.push_back(f);
         mini_.frames.back().t = f.t - windowFrom_;
+        miniAt_.push_back(f.t);
     }
     std::vector<Frame>().swap(capture_);
     if (c == Control::Gear) deriveGearCommand(mini_);
@@ -1212,12 +1215,14 @@ void SetupFlow::analyze() {
     // The clip starts kLeadInSec before the movement's first sign (the control's simvar, or a
     // variable or key event the methods use).
     pilotLag_ = std::isfinite(clipMovedAt_) ? std::max(0.0, clipMovedAt_ - kLeadInSec) : 0.0;
+    replayLag_ = NAN;
     logf(0, "control setup: you moved the %s over %.1f s (handle moved %.3g, outcome %.3g; checking replays on the %s); "
          "trying %zu method(s)",
          controlSpec(c).label, mini_.duration(), handlePeak_, outcomePeak_, judgeOutcome_ ? "outcome" : "handle",
          methods_.size());
     logf(0, "control setup: the %s moved %.1f s after the first sign of your movement; a method gets %.1f s to start moving it",
          judgeOutcome_ ? "outcome" : "handle", pilotLag_, startWaitSec());
+    trimStill();
     if (methods_.empty() || mini_.frames.size() < 2) {
         note_ = "Couldn't replay the " + std::string(controlSpec(c).label) + ".";
         finishStep(ControlState::Failed, ControlMethod(), false);
@@ -1229,6 +1234,56 @@ void SetupFlow::analyze() {
         return;
     }
     beginAway();
+}
+
+// The pilot's movement can sit still a long while between its moves (the 777's gear up for 20 s
+// until "Lower the gear", in a 48 s movement), which every replay waited out again. Of such a
+// stretch, after the control first moved and before the movement's end, replays keep as long as
+// a method gets to start moving it, and kStableSec more, after it stopped (a replay may get there
+// that much later than the pilot did), and the pilot's lag, and a second more, before it moved
+// again (the command that moved it comes that much earlier). Not the throttle, whose holds are
+// part of its check.
+void SetupFlow::trimStill() {
+    const Control c = control();
+    if (c == Control::Throttle || !std::isfinite(clipMovedAt_)) return;
+    const Tuning tu = tuning(c);
+    const double keepBefore = startWaitSec() + kStableSec;
+    const double keepAfter = pilotLag_ + 1.0;
+    const std::vector<Frame>& in = mini_.frames;
+    std::vector<Frame> out;
+    std::vector<double> at, keys;
+    double cut = 0.0;
+    const auto keep = [&](size_t k, double shift) {
+        out.push_back(in[k]);
+        out.back().t -= shift;
+        at.push_back(miniAt_[k]);
+        if (k < keyColumn_.size()) keys.push_back(keyColumn_[k]);
+    };
+    for (size_t i = 0; i < in.size();) {
+        // The frames from i on within half the start thresholds of frame i's handle and outcome.
+        size_t j = i;
+        if (in[i].t > clipMovedAt_) {
+            const double h = handleSignal(in[i]), o = outcomeSignal(in[i]);
+            while (j + 1 < in.size() && absDiff(handleSignal(in[j + 1]), h) <= 0.5 * tu.handleStart &&
+                   absDiff(outcomeSignal(in[j + 1]), o) <= 0.5 * tu.outcomeStart) {
+                ++j;
+            }
+        }
+        const double from = in[i].t + keepBefore, to = in[j].t - keepAfter;
+        const bool trim = j + 1 < in.size() && to - from > 1.0;
+        for (size_t k = i; k <= j; ++k) {
+            if (trim && in[k].t >= from && in[k].t < to) continue;
+            keep(k, trim && in[k].t >= to ? cut + (to - from) : cut);
+        }
+        if (trim) cut += to - from;
+        i = j + 1;
+    }
+    if (!(cut > 0.0)) return;
+    logf(0, "control setup: replays leave out %.1f s where the %s sat still: %.1f s of your %.1f s", cut, controlSpec(c).label,
+         mini_.duration() - cut, mini_.duration());
+    mini_.frames.swap(out);
+    miniAt_.swap(at);
+    if (!keyColumn_.empty()) keyColumn_.swap(keys);
 }
 
 std::string SetupFlow::enginePattern(const std::string& name, bool lvar) const {
@@ -1691,8 +1746,11 @@ void SetupFlow::startMethod(size_t i) {
     hint_ = 0;
     firstApply_ = true;
     replayPeak_ = 0.0;
+    replayMovedAt_ = NAN;
     stoppedEarly_ = false;
     started_ = seenRest_ = false;
+    restFromDist_ = NAN;
+    restMoved_ = false;
     gearCommand_ = gearFrom_ = gearTo_ = NAN;
     gearCommandAt_ = 0.0;
     replayBack_ = -1;
@@ -1713,7 +1771,9 @@ void SetupFlow::prepareMethod(const ControlMethod& m) {
             const int ch = methodSourceChannel(c, m.kind, e);
             size_t idx = 0;
             const bool have = tracker_.lookup(engineVar(m.var, e + 1), lvar, idx);
-            for (Frame& f : mini_.frames) f.v[ch] = have ? tracker_.valueAt(idx, windowFrom_ + f.t) : NAN;
+            for (size_t k = 0; k < mini_.frames.size(); ++k) {
+                mini_.frames[k].v[ch] = have ? tracker_.valueAt(idx, miniAt_[k]) : NAN;
+            }
         }
     }
     // A key event that's a position replays the parameters it fired with, when it fired: its
@@ -1728,11 +1788,11 @@ void SetupFlow::prepareMethod(const ControlMethod& m) {
             }
             size_t j = 0;
             double v = NAN;
-            for (Frame& f : mini_.frames) {
-                for (; j < le.firings.size() && le.firings[j].t <= windowFrom_ + f.t + 1e-9; ++j) {
+            for (size_t k = 0; k < mini_.frames.size(); ++k) {
+                for (; j < le.firings.size() && le.firings[j].t <= miniAt_[k] + 1e-9; ++j) {
                     if (std::isfinite(le.firings[j].value)) v = (le.firings[j].value - ev.offset) / ev.scale;
                 }
-                if (std::isfinite(v)) f.v[ch] = v;
+                if (std::isfinite(v)) mini_.frames[k].v[ch] = v;
             }
         }
     }
@@ -1862,7 +1922,7 @@ void SetupFlow::backFrame(double dt, const Frame& live) {
     const bool there = atRest(live);
     if (there && settled) {
         endBack(true, "");
-    } else if (!backMoved_ && phaseT_ >= startWaitSec()) {
+    } else if (!backMoved_ && phaseT_ >= giveUpSec(methods_[backTries_[backAt_]])) {
         endBack(false, "it didn't move");
     } else if (backMoved_ && settled) {
         endBack(false, "it stopped short");
@@ -1920,12 +1980,22 @@ double SetupFlow::replayStartTol() const {
 // to move as far as counts.
 double SetupFlow::startWaitSec() const { return moveStartSec(control()) + pilotLag_; }
 
+double SetupFlow::giveUpSec(const ControlMethod& m) const {
+    EventMethod ev;
+    const bool steps = parseEventMethod(m, ev) && ev.mode != EventMethod::Mode::Position;
+    return startWaitSec() + (steps ? EventStepper::waitFrames(control()) * frameDt_ : 0.0);
+}
+
 double SetupFlow::attemptLeft() const {
-    if (phase_ == Phase::Back) return backMoved_ ? -1.0 : std::max(0.0, startWaitSec() - phaseT_);
-    if (phase_ != Phase::Replay || !started_) return -1.0;
+    if (phase_ == Phase::Back) {
+        return backMoved_ ? -1.0 : std::max(0.0, giveUpSec(methods_[backTries_[backAt_]]) - phaseT_);
+    }
+    if (phase_ != Phase::Replay || method_ >= methods_.size()) return -1.0;
+    const ControlMethod& m = methods_[method_];
+    if (!started_) return restMoved_ || control() == Control::Throttle ? -1.0 : std::max(0.0, giveUpSec(m) - phaseT_);
     double end = mini_.duration();
     if (seenRest_ && replayPeak_ < replayStartTol() && std::isfinite(clipMovedAt_)) {
-        end = std::min(end, clipMovedAt_ + startWaitSec());  // replayFrame's stall
+        end = std::min(end, clipMovedAt_ + giveUpSec(m));  // replayFrame's stall
     }
     return std::max(0.0, end - replayT_);
 }
@@ -1943,6 +2013,7 @@ void SetupFlow::track(const Frame& live) {
     const double v = judgeOutcome_ ? outcomeSignal(live) : handleSignal(live);
     const double d = absDiff(v, judgeOutcome_ ? outcomeRest_ : handleRest_);
     if (d > replayPeak_) replayPeak_ = d;
+    if (std::isnan(replayMovedAt_) && phase_ == Phase::Replay && d > replayStartTol()) replayMovedAt_ = replayT_;
 }
 
 void SetupFlow::noteGearCommand(double command, const Frame& live) {
@@ -1973,6 +2044,22 @@ void SetupFlow::replayFrame(double dt, const Frame& live) {
         sim_->applyControl(c, mini_.frames.front(), firstApply_);
         firstApply_ = false;
         const bool there = atRest(live);
+        // Not on its way there as soon as a method has to start moving it (giveUpSec): it can't
+        // be replayed from there, as the check only counts movement from there. Left up by the
+        // way back, the PMDG 777's gear waited 30 s for its lever event, then replayed all 48 s.
+        const double d = absDiff(judgeOutcome_ ? outcomeSignal(live) : handleSignal(live),
+                                 judgeOutcome_ ? outcomeRest_ : handleRest_);
+        if (std::isnan(restFromDist_)) restFromDist_ = d;
+        if (d <= restFromDist_ - restTol()) restMoved_ = true;
+        if (!there && !restMoved_ && c != Control::Throttle && phaseT_ >= giveUpSec(methods_[method_])) {
+            logf(0, "control setup: %s didn't bring the %s back to where you started it (it didn't move); not replaying it",
+                 describeMethod(c, methods_[method_]).c_str(), label);
+            endDrive();
+            if (c == Control::Gear) logGearCommand();
+            attempts_.push_back("failed");
+            nextMethod();
+            return;
+        }
         if (!there && phaseT_ < kRestWaitSec) return;
         started_ = true;
         if (!there) {
@@ -2002,10 +2089,11 @@ void SetupFlow::replayFrame(double dt, const Frame& live) {
     // the clip's control did (the 777's flap handle follows its flaps), then the aircraft takes as
     // long as it did for the pilot. The hold puts the control back where the movement ends and the
     // check fails it as usual.
+    const double wait = giveUpSec(methods_[method_]);
     const bool stalled = seenRest_ && replayPeak_ < replayStartTol() && std::isfinite(clipMovedAt_) &&
-                         replayT_ >= clipMovedAt_ + startWaitSec();
+                         replayT_ >= clipMovedAt_ + wait;
     if (stalled && replayT_ < dur) {
-        logf(0, "control setup: no movement of the %s %.1f s after yours; not replaying the rest", label, startWaitSec());
+        logf(0, "control setup: no movement of the %s %.1f s after yours; not replaying the rest", label, wait);
     }
     if (replayT_ >= dur || stalled) {
         phase_ = Phase::Hold;
@@ -2049,6 +2137,12 @@ void SetupFlow::evaluate(const Frame& live) {
     const bool returned = absDiff(end, rest) <= restTol();
     const int pct = userPeak_ > 0.0 ? static_cast<int>(std::lround(100.0 * replayPeak_ / userPeak_)) : 0;
     const std::string desc = describeMethod(c, methods_[method_]);
+    // How much later than in the pilot's movement it moved (ControlProfile::leadSec).
+    replayLag_ = reached ? replayMovedAt_ - clipMovedAt_ : NAN;
+    if (reached && std::isfinite(replayLag_)) {
+        logf(0, "control setup: %s moved the %s %.1f s %s than you did", desc.c_str(), controlSpec(c).label,
+             std::fabs(replayLag_), replayLag_ >= 0.0 ? "later" : "earlier");
+    }
     if (stoppedEarly_ || (reached && returned)) {
         logf(0, "control setup: %s moved the %s %d%% as far as you did%s; asking", desc.c_str(), controlSpec(c).label, pct,
              returned ? "" : " (it didn't come all the way back)");
@@ -2657,8 +2751,13 @@ void SetupFlow::finishStep(ControlState state, const ControlMethod& method, bool
         cp.lever = keyThrottle ? lever_ : LeverCalibration();
         cp.reverseBy = keyThrottle ? reverseBy_ : ReverseBy::Unknown;
         for (int d = 0; d < kDirections; ++d) cp.ways[d] = state == ControlState::Ok ? ways_[d] : std::vector<ControlMethod>();
+        // As much later as the confirmed replay moved it, for replays to make up (the throttle's
+        // N1 follows its lever as it did for the pilot).
+        const bool lead = state == ControlState::Ok && c != Control::Throttle && replayLag_ >= kMinLeadSec;
+        cp.leadSec = lead ? std::min(replayLag_, kMaxLeadSec) : 0.0;
         logf(0, "control setup: %s %s%s%s", controlSpec(c).key, stateKey(state), state == ControlState::Ok ? " via " : "",
              state == ControlState::Ok ? describeControl(c, cp).c_str() : "");
+        if (lead) logf(0, "control setup: replays drive the %s %.1f s ahead of the clip", controlSpec(c).label, cp.leadSec);
     }
     changed_ = true;
     clearStep();

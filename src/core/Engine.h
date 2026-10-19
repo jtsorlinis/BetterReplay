@@ -23,8 +23,9 @@ enum class PrepStep : uint8_t { None, Active, Done };
 
 // What the sim side gets ready around a jump (ISimOutput::prepareJump, then settleJump), for the
 // panel's checklist. Before it, frozen where the aircraft is at the clip's speed: the gear
-// lowered, the flaps set and the engines spooled to where the clip starts, together. After it,
-// at the start of the replay: the flaps, if they couldn't be set before.
+// lowered and the flaps set where the clip starts, together. After it, at the start of the
+// replay: the engines spooled to where the clip starts (frozen in the air at a takeoff clip's
+// 0 kt, an autothrottle may engage itself), and the flaps if they couldn't be set before.
 struct JumpPrep {
     PrepStep gear = PrepStep::None;
     PrepStep flaps = PrepStep::None;
@@ -43,6 +44,8 @@ public:
     // Write every PlayMode::Set channel in `present` (NaN values: keep the live value). `jumped` is
     // true on the first frame after play or seek: PlayMode::Snap channels are written then too.
     virtual void writePlaybackFrame(const Frame& frame, bool jumped) = 0;
+    // The playback speed (PlaybackController::speed), as playback begins and whenever it's set.
+    virtual void playbackSpeed(double speed) { (void)speed; }
     // A PlayMode::Event channel's state: sent when it changes, and for every such channel in the
     // clip after play, seek and stop, so the aircraft can't stay out of step with the clip.
     virtual void sendChannelEvent(int channel, double value) = 0;

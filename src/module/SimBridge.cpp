@@ -1065,7 +1065,7 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     snapFramesLeft_ = 0;
     snapCheckFrames_ = 0;
     flapsHold_ = false;
-    settling_ = false;
+    settling_ = settlingFlaps_ = false;
     flapsArriving_ = false;
     jumpPrepStarted_ = false;
     cancelRestoreFlaps();
@@ -1094,9 +1094,12 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     // defaults below (or nothing, if the setup found no way). Their channels are left alone here.
     ChannelMask owned;
     throttleByProfile_ = false;
+    playClip_ = &clip;
     for (int i = 0; i < kControlCount; ++i) {
         const Control c = controlAt(i);
         profileDrives_[i] = false;
+        leadSec_[i] = 0.0;
+        leadHint_[i] = 0;
         if (!haveProfile_ || !profile_.drives(c)) continue;
         const ControlProfile& cp = profile_[c];
         std::string why;
@@ -1137,7 +1140,13 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
         }
         // Reverse thrust from the clip's reversers, with or without a lever calibration.
         if (c == Control::Throttle && cp.state == ControlState::Ok) driver_.setReverseBy(cp.reverseBy);
+        if (cp.state == ControlState::Ok && c != Control::Throttle && cp.leadSec > 0.0) {
+            leadSec_[i] = cp.leadSec;
+            log::info("playback: the %s driven %.1f s ahead of the clip (the setup's replay moved them that much later)",
+                      controlSpec(c).label, cp.leadSec);
+        }
     }
+    atPresses_ = 0;  // (pressed after each jump)
     for (int c = 0; c < kChannelCount; ++c) {
         if (owned.test(static_cast<size_t>(c)) && kChannels[c].play == PlayMode::Set) playSkip_.set(static_cast<size_t>(c));
     }
@@ -1297,17 +1306,14 @@ void SimBridge::commandGearDown(const Frame& target) {
 // the aircraft's is up: lowering it after the jump puts the extending gear into the runway, and on
 // the A320neo V2 it then stops half way (frozen is fine: the PMDG 777's gear moves frozen; it only
 // needed the right way of lowering it). The flaps, at the clip's speed: some aircraft pick their
-// setting from the lever and their speed. The engines, so the replay doesn't start with them
-// spooling. Then the jump.
+// setting from the lever and their speed. Then the jump; the engines after it (settleJump).
 bool SimBridge::prepareJump(const Frame& target) {
     if (!h_ || !playing_) return true;
     const int64_t now = utcNowMs();
     if (!jumpPrepStarted_) beginReady(target);
-    const bool any = jumpPrep_.gear == PrepStep::Active || jumpPrep_.flaps == PrepStep::Active ||
-                     jumpPrep_.engines == PrepStep::Active;
+    const bool any = jumpPrep_.gear == PrepStep::Active || jumpPrep_.flaps == PrepStep::Active;
     if (!any) {
-        if (now > readyStartMs_ && (jumpPrep_.gear != PrepStep::None || jumpPrep_.flaps != PrepStep::None ||
-                                    jumpPrep_.engines != PrepStep::None)) {
+        if (now > readyStartMs_ && (jumpPrep_.gear != PrepStep::None || jumpPrep_.flaps != PrepStep::None)) {
             log::info("playback: ready after %.1f s (%.0f kt IAS); going to the clip", (now - readyStartMs_) / 1000.0,
                       liveIas_);
         }
@@ -1317,7 +1323,6 @@ bool SimBridge::prepareJump(const Frame& target) {
     if (readySpeed_) writeClipSpeed(target);
     readyGear(target, now);
     readyFlaps(target);
-    readyEngines(target, now);
     return false;
 }
 
@@ -1337,22 +1342,16 @@ void SimBridge::beginReady(const Frame& target) {
         for (int c = kVelBodyX; c <= kVelBodyZ; ++c) readySpeed_ &= directId_[c] != FS_VAR_INVALID_ID;
     }
     const int flaps = flapsMove(target);
-    const int engines = enginesMove(target);
     if (gearNeeded) jumpPrep_.gear = PrepStep::Active;
     if (flaps != 0 && readySpeed_) {
         jumpPrep_.flaps = PrepStep::Active;
         jumpPrep_.flapsIn = flaps < 0;
     }
-    if (engines != 0) {
-        jumpPrep_.engines = PrepStep::Active;
-        jumpPrep_.enginesDown = engines < 0;
-    }
-    if (!gearNeeded && jumpPrep_.flaps == PrepStep::None && engines == 0) return;
+    if (!gearNeeded && jumpPrep_.flaps == PrepStep::None) return;
     std::string what;
     auto add = [&what](const char* step) { what += (what.empty() ? "" : ", ") + std::string(step); };
     if (gearNeeded) add("gear down");
     if (jumpPrep_.flaps != PrepStep::None) add(flaps > 0 ? "flaps out" : "flaps in");
-    if (engines != 0) add(engines > 0 ? "engines up" : "engines down");
     log::info("playback: getting ready before the jump (%s), frozen where the aircraft is%s (%.0f kt IAS; the clip "
               "%.0f kt over the ground)%s",
               what.c_str(), readySpeed_ ? " at the clip's speed" : "", liveIas_, gs,
@@ -1366,9 +1365,6 @@ void SimBridge::beginReady(const Frame& target) {
         flapsArriving_ = false;
     }
     readyFlapsFirst_ = true;
-    readyThrottleFirst_ = true;
-    for (int e = 0; e < 4; ++e) enginesAt_[e] = NAN;
-    enginesMovedMs_ = readyStartMs_;
 }
 
 // The clip's body velocities, frozen where the aircraft is: its airspeed is then about the clip's.
@@ -1444,17 +1440,10 @@ int SimBridge::enginesMove(const Frame& target) const {
     return !far ? 0 : sum > 0.0 ? 1 : -1;
 }
 
-void SimBridge::readyEngines(const Frame& target, int64_t now) {
-    if (jumpPrep_.engines != PrepStep::Active) return;
-    const bool first = readyThrottleFirst_;
-    readyThrottleFirst_ = false;
-    if (throttleByProfile_) {
-        driver_.apply(Control::Throttle, target, first);
-    } else if (throttleViaInput_) {
-        for (int c = kInputThrottle1; c <= kInputThrottle4; ++c) sendInputEvent(c, target, first);
-    } else {
-        sendThrottleEvents(target, first);
-    }
+// After the jump, the replay holding at its start (its frames keep the throttle where the clip
+// starts, writePlaybackFrame): whether the engines are done with, there or not.
+bool SimBridge::enginesArrived(const Frame& target, int64_t now) {
+    if (jumpPrep_.engines != PrepStep::Active) return true;
     bool there = true;
     char n1[96] = "";
     size_t len = 0;
@@ -1471,17 +1460,18 @@ void SimBridge::readyEngines(const Frame& target, int64_t now) {
             len += static_cast<size_t>(std::snprintf(n1 + len, sizeof(n1) - len, "%s%.1f/%.1f", len ? ", " : "", have, want));
         }
     }
-    const double secs = (now - readyStartMs_) / 1000.0;
+    const double secs = (now - enginesStartMs_) / 1000.0;
     if (there) {
         log::info("playback: the engines are where the clip has them after %.1f s (N1 %s)", secs, n1);
     } else if (now - enginesMovedMs_ >= kEnginesSteadyMs) {
         log::info("playback: the engines have settled after %.1f s, short of the clip (N1 %s)", secs, n1);
-    } else if (now - readyStartMs_ >= kEnginesMaxMs) {
+    } else if (now - enginesStartMs_ >= kEnginesMaxMs) {
         log::warn("playback: the engines aren't where the clip has them after %.1f s (N1 %s); going on anyway", secs, n1);
     } else {
-        return;
+        return false;
     }
     jumpPrep_.engines = PrepStep::Done;
+    return true;
 }
 
 void SimBridge::holdFlaps() {
@@ -1557,15 +1547,18 @@ int SimBridge::flapsMove(const Frame& target) const {
     return wantAt > haveAt ? 1 : -1;
 }
 
-// After a jump with flaps to move, the replay holds at its start until they're there: first the
-// lever waits for the aircraft to settle (flapsSettled, from writePlaybackFrame), then the flaps
-// for flapsArrived.
+// After a jump with flaps or engines to move, the replay holds at its start until they're there:
+// the flap lever waits for the aircraft to settle (flapsSettled, from writePlaybackFrame), then the
+// flaps for flapsArrived; the engines, together, for enginesArrived.
 bool SimBridge::settleJump(const Frame& target) {
     if (!h_ || !playing_ || !settling_) return true;
-    if (flapsHold_ || !flapsArriving_) return false;
-    if (!flapsArrived(target)) return false;
+    if (settlingFlaps_ && !flapsHold_ && flapsArriving_ && flapsArrived(target)) {
+        settlingFlaps_ = false;
+        flapsArriving_ = false;
+    }
+    const bool engines = enginesArrived(target, utcNowMs());
+    if (settlingFlaps_ || !engines) return false;
     settling_ = false;
-    flapsArriving_ = false;
     return true;
 }
 
@@ -1716,31 +1709,73 @@ void SimBridge::checkRotationScale() {
               rotationScale_);
 }
 
+// The clip's frame leadSec_ ahead of `frame` (held at its end), for a control the setup found
+// moving that much later in its replay than in the pilot's movement; `frame` itself otherwise.
+const Frame& SimBridge::leadFrame(int control, const Frame& frame) {
+    const double lead = leadSec_[control];
+    if (!(lead > 0.0) || !playClip_ || playClip_->frames.empty()) return frame;
+    sampleFrames(playClip_->frames.data(), playClip_->frames.size(), frame.t + lead * playSpeed_, leadFrame_,
+                 &leadHint_[control]);
+    return leadFrame_;
+}
+
+// The sim's own autothrottle disconnect, as the pilot's binding sends it: engaged, the autothrottle
+// drove the levers against the replay's (frozen at the clip's 0 kt before the jump, the PMDG 777
+// held 106% N1). Triggered as a key event: sent through SimConnect it didn't reach the 777's, a
+// binding to it did. Twice, half a second apart: the second press clears the disconnect warning,
+// and with the autothrottle off neither does anything. Aircraft that don't take the sim's event
+// are left as they are.
+void SimBridge::pressAutothrottleDisconnect() {
+    if (atPresses_ <= 0) return;
+    const int64_t now = utcNowMs();
+    if (now < atNextMs_) return;
+    --atPresses_;
+    atNextMs_ = now + 500;
+    ControlDriver::keyEvent(KEY_AUTO_THROTTLE_DISCONNECT, 0);
+    if (atPresses_ == 0) {
+        log::info("playback: sent AUTO_THROTTLE_DISCONNECT (twice), so the autothrottle can't drive the thrust levers "
+                  "against the replay's; it stays off after the replay");
+    }
+}
+
 void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
     if (!h_ || !playing_) return;
     if (trace_) traceRow(frame, jumped);
     if (jumped && !snapRejected_) snapFramesLeft_ = kSnapFrames;
     if (snapFramesLeft_ > 0) writeSnap(frame);
     if (jumped) {
-        // Flaps that still have to move (they couldn't before the jump) hold the replay at its
-        // start until they're there (settleJump).
+        // Flaps that still have to move (they couldn't before the jump), and the engines, hold the
+        // replay at its start until they're there (settleJump).
         jumpPrepStarted_ = false;  // the next jump starts afresh
         const int flaps = flapsMove(frame);
-        settling_ = flaps != 0;
+        const int engines = enginesMove(frame);
+        settlingFlaps_ = flaps != 0;
+        settling_ = flaps != 0 || engines != 0;
         flapsArriving_ = false;
-        if (settling_) {
+        if (settlingFlaps_) {
             jumpPrep_.flaps = PrepStep::Active;
             jumpPrep_.flapsIn = flaps < 0;
             log::info("playback: holding at the start until the flaps are where the clip has them");
         }
+        if (engines != 0) {
+            jumpPrep_.engines = PrepStep::Active;
+            jumpPrep_.enginesDown = engines < 0;
+            enginesStartMs_ = enginesMovedMs_ = utcNowMs();
+            for (double& n : enginesAt_) n = NAN;
+            log::info("playback: holding at the start until the engines are where the clip has them");
+        }
         holdFlaps();
+        // The autothrottle off, so it can't drive the thrust levers against the replay's. After the
+        // jump: frozen in the air at the clip's 0 kt, the 777's engaged itself again.
+        atPresses_ = playPresent_.test(static_cast<size_t>(kThrottle1)) ? 2 : 0;
+        atNextMs_ = 0;
     }
     bool releaseFlaps = false;
     if (flapsHold_ && flapsSettled(frame, true)) {
         flapsHold_ = false;
         releaseFlaps = true;
         ieSent_[kInputFlaps] = NAN;  // sent on this frame
-        if (settling_) {
+        if (settlingFlaps_) {
             flapsArriving_ = true;
             flapsArriveStartMs_ = utcNowMs();
             flapsMovedMs_ = flapsArriveStartMs_;
@@ -1748,10 +1783,11 @@ void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
         }
     }
     sendInputEvents(frame, jumped);
+    pressAutothrottleDisconnect();
     for (int i = 0; i < kControlCount; ++i) {
         const Control c = controlAt(i);
         if (!profileDrives_[i] || (c == Control::Flaps && flapsHold_)) continue;
-        driver_.apply(c, frame, jumped || (c == Control::Flaps && releaseFlaps));
+        driver_.apply(c, leadFrame(i, frame), jumped || (c == Control::Flaps && releaseFlaps));
     }
     if (throttleViaEvents_ && clipHasThrottle_) sendThrottleEvents(frame, jumped);
     trackEventChannels(frame, jumped);
@@ -2212,13 +2248,15 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     logOverrides();
     logEngines();
     playing_ = false;
+    playClip_ = nullptr;
+    atPresses_ = 0;
     playChannelCount_ = 0;
     directChannelCount_ = 0;
     driver_.clearAutothrust();  // the snapshot below isn't the clip
     snapFramesLeft_ = 0;
     snapCheckFrames_ = 0;
     flapsHold_ = false;
-    settling_ = false;
+    settling_ = settlingFlaps_ = false;
     flapsArriving_ = false;
     jumpPrepStarted_ = false;
     setInputMasking(false);

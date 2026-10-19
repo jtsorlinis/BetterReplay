@@ -243,6 +243,8 @@ struct FakeSim : ISimOutput {
         written.push_back(f);
         if (jumped) ++jumps;
     }
+    double speed = NAN;  // playbackSpeed's
+    void playbackSpeed(double s) override { speed = s; }
     void sendChannelEvent(int c, double v) override { events.push_back({c, v}); }
     void endPlayback(const Frame& snapshot, bool restore) override {
         ++ends;
@@ -424,7 +426,9 @@ TEST(EnginePlayback_SpeedSeekPause) {
     PlaybackHarness h;
     std::string err;
     REQUIRE(h.engine.play(h.clipFile, err));
+    CHECK_EQ(h.sim.speed, 1.0);  // the sim side knows it (a control driven ahead of the clip)
     REQUIRE(h.engine.setSpeed(2.0, err));
+    CHECK_EQ(h.sim.speed, 2.0);
     h.frames(30, -33.0);  // 0.5 s at 2x
     CHECK_NEAR(h.engine.playback().time(), 1.0, 1e-6);
     REQUIRE(h.engine.pausePlayback(err));

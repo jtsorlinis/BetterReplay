@@ -375,6 +375,12 @@ private:
     double restTol() const;  // how near where the pilot started the control counts as there
     double replayStartTol() const;  // how far from there counts as it started moving
     double startWaitSec() const;    // how long a method gets to start moving it, from its command
+    // And the way method `m` gets: a click or a step (EventStepper) is sent once more if the control
+    // hasn't moved after EventStepper::waitFrames (the aircraft's state may have been out of step:
+    // the PMDG 777's gear lowered on the second click after its lever event), so it gets that too,
+    // in seconds at the frame rate the setup sees (frameDt_).
+    double giveUpSec(const ControlMethod& m) const;
+    double frameDt_ = 1.0 / 60.0;  // the sim's frame time, smoothed
     // The method being tried: seconds until it's given up on if nothing moves, or until the rest
     // of its replay has played; -1 when neither (on its way back to rest, settling, asking).
     double attemptLeft() const;
@@ -467,6 +473,9 @@ private:
 
     // replay
     Clip mini_;  // the pilot's movement, t from 0
+    std::vector<double> miniAt_;  // when each of its frames was, by the setup's clock (trimStill moves t)
+    // Leaves out the middle of long stretches where the control sat still between its moves.
+    void trimStill();
     std::vector<double> keyColumn_;  // its KeyEvent channel as built (a learned position overwrites it)
     struct LearnedEvent {
         ControlMethod method;
@@ -481,10 +490,14 @@ private:
     Frame frame_;
     bool firstApply_ = false;
     double replayPeak_ = 0.0;
+    double replayMovedAt_ = NAN;  // replayT_ when it moved as far as counts (replayStartTol)
+    double replayLag_ = NAN;      // how much later than clipMovedAt_ that was, in the last that reached
     double replayAnchor_ = NAN;
     double replayStable_ = 0.0;
     bool stoppedEarly_ = false;
     bool started_ = false;   // the control was back where the pilot started it (or the wait ran out)
+    double restFromDist_ = NAN;  // before that: how far from there it was when the method began
+    bool restMoved_ = false;     // and it has come some way back since
     bool seenRest_ = false;  // it has been there during this replay: movement counts from then on
     double gearCommand_ = NAN, gearCommandAt_ = 0.0, gearFrom_ = NAN, gearTo_ = NAN;
 
