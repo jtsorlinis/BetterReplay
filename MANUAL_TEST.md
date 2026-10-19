@@ -225,7 +225,7 @@ Use an aircraft without a profile; the A320neo V2 is the interesting one. Start 
   - **Later** goes back to the normal panel until the next flight. The aircraft card under the status then says *Not configured* in red, and **Set up** there still starts it.
 - [ ] Click **Start setup**. The steps show across the top, the current one highlighted. **Expect** `control setup started on the ground: spoilers, flaps, throttle, gear (…)` and `recording suspended: control setup`. For each step, expect `setup scan: N input event(s), K of them readable, and M L:var(s)`.
   - **Note K.** If it's 0, input events can't be read this way, and only L:vars can be found by their movement.
-- [ ] **Spoilers:** the panel says *Deploy the spoilers*; deploy them fully and hold. A green tick appears, then *Retract the spoilers*; retract them and wait. Note whether each tick comes at the right moment. Then *Deploy the spoilers* once more: deploy them and leave them out. The setup retracts them itself, trying each method in turn (`control setup: … brought the spoilers back from where you left it`). **Expect:**
+- [ ] **Spoilers:** the panel says *Deploy the spoilers*; deploy them fully and hold. A green tick appears, then *Retract the spoilers*; retract them and wait. Note whether each tick comes at the right moment. Then *Deploy the spoilers* once more: deploy them and leave them out. The setup retracts them itself, trying each method in turn (`control setup: … brought the spoilers back from where you left it`): the panel says *Retracting the spoilers*, with *Bringing it back with method N* rows numbered only by the methods it tries there. The replays of your whole movement then start their own list at 1, under *Watch the spoilers*. **Expect:**
   ```
   control setup: the spoilers started moving (…)
   control setup:   input event … moved with it (score …, peak …)      (and/or L:var …)
@@ -233,7 +233,7 @@ Use an aircraft without a profile; the A320neo V2 is the interesting one. Start 
   control setup: replaying the spoilers with … (method 1 of N)
   ```
   - Keep your hands off the controls while it replays.
-  - Each method that doesn't move the spoilers is logged as `… moved the spoilers N% as far as you did`, and the next one starts by itself.
+  - Each method that doesn't move the spoilers is logged as `… moved the spoilers N% as far as you did`, and the next one starts by itself. One that doesn't move them at all stops 3 s after your movement had moved them (`no movement of the spoilers 3 s after yours; not replaying the rest`), not after a replay of all of it.
   - When one passes, the panel asks *Did the spoilers come up and go back down?* Watch the spoilers (the external view helps), then answer. **Watch again** replays it once more.
   - **Copy the `moved with it` lines, and note which method you said yes to.** On the A320neo V2 this step is the most likely to find something new, since it has no speed brake input event.
 - [ ] **Flaps:** one notch, wait for them to extend, retract them, and wait; then one notch once more, and leave them there. Expect the same pattern. Going by your earlier test, `HANDLING_FLAPS` with its value as read should pass.

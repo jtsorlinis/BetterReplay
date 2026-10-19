@@ -71,6 +71,7 @@ interface SetupStatus {
     hold?: number;       // how far it is, 0..1
     method?: number;      // the method being tried (1-based), of `methods` in this step
     methods?: number;
+    bringBack?: boolean;  // bringing the control back from where the pilot left it: a pass of its own
     attempts?: string[];  // how each method before it ended: "failed", "rejected", "unavailable"
     note?: string;
     plan?: SetupStep[];
@@ -388,9 +389,10 @@ function prepItems(prep: PrepState): Array<[string, string]> {
     return items;
 }
 
-// While replaying: one row per method tried in this step, the current one last. The methods still
+// While replaying: one row per method tried in this pass, the current one last. The methods still
 // to come get invisible rows, so the block (centred in the page) is as tall from the start and
-// the text above doesn't move up as rows appear.
+// the text above doesn't move up as rows appear. Bringing the control back from where the pilot
+// left it comes first, worded as such; the replays of the whole movement then start again at 1.
 function attemptsHtml(setup: SetupStatus): string {
     const phase = setup.phase || "";
     if (phase === "sweep") {
@@ -399,16 +401,19 @@ function attemptsHtml(setup: SetupStatus): string {
             pct + "%</div>";
     }
     if (phase !== "replay" && phase !== "hold" && phase !== "back" && phase !== "ask") return "";
+    const back = !!setup.bringBack;
+    const failed = (n: number) => (back ? "Method " + n + " didn't bring it back" : "Method " + n + " failed");
+    const trying = (n: number) => (back ? "Bringing it back with method " + n : "Trying method " + n);
     const done = setup.attempts || [];
     let html = "";
     for (let i = 0; i < done.length; ++i) {
-        html += '<div class="br-attempt failed"><span class="br-attempt-mark"></span>Method ' + (i + 1) + " failed</div>";
+        html += '<div class="br-attempt failed"><span class="br-attempt-mark"></span>' + failed(i + 1) + "</div>";
     }
     const n = setup.method || done.length + 1;
     html += '<div class="br-attempt current br-enter"><span class="br-attempt-mark"></span>' +
-        (phase === "ask" ? "Method " + n + " passed the check" : "Trying method " + n) + "</div>";
+        (phase === "ask" ? "Method " + n + " passed the check" : trying(n)) + "</div>";
     for (let i = n; i < (setup.methods || 0); ++i) {
-        html += '<div class="br-attempt reserved"><span class="br-attempt-mark"></span>Trying method ' + (i + 1) + "</div>";
+        html += '<div class="br-attempt reserved"><span class="br-attempt-mark"></span>' + trying(i + 1) + "</div>";
     }
     return html;
 }

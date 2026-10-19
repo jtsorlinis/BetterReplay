@@ -431,6 +431,7 @@ struct SetupHarness {
     double t = 0.0;
     int asks = 0;
     double firstReplayAt = -1.0;  // harness time when the first replay started
+    std::vector<double> replayStarts;  // and each one
     std::string lastPhase;
     std::vector<std::string> prompts;  // every main text shown, in order
     bool sawTaskDone = false;          // the last instruction was shown as done
@@ -440,6 +441,16 @@ struct SetupHarness {
     // What the setup tried bringing the control back with on its own ("back"); aircraft.tried
     // keeps the replays of the whole movement.
     std::vector<ControlMethod> backTried;
+    // What the panel was shown while the setup brought the control back ("back"), each time it changed.
+    struct BackShown {
+        bool bringBack;  // from where the pilot left it (else from where a replay left it)
+        int method, methods;
+        size_t attempts;
+        bool operator==(const BackShown& o) const {
+            return bringBack == o.bringBack && method == o.method && methods == o.methods && attempts == o.attempts;
+        }
+    };
+    std::vector<BackShown> backShown;
 
     SetupHarness() {
         g_setupLog.clear();
@@ -487,11 +498,18 @@ struct SetupHarness {
                 backTried.insert(backTried.end(), aircraft.tried.begin() + static_cast<std::ptrdiff_t>(tries), aircraft.tried.end());
                 aircraft.tried.resize(tries);
             }
+            if (p == "back") {
+                const JsonValue* a = st.get("attempts");
+                const BackShown b{st.getBool("bringBack", false), static_cast<int>(st.getNumber("method", 0.0)),
+                                  static_cast<int>(st.getNumber("methods", 0.0)), a ? a->array.size() : 0};
+                if (backShown.empty() || !(backShown.back() == b)) backShown.push_back(b);
+            }
             const std::string prompt = st.getString("prompt", "");
             if (!prompt.empty() && (prompts.empty() || prompts.back() != prompt)) prompts.push_back(prompt);
             if (st.getBool("taskDone", false)) sawTaskDone = true;
             if (p == "ask" && lastPhase != "ask") ++asks;
             if (p == "replay" && firstReplayAt < 0.0) firstReplayAt = t;
+            if (p == "replay" && lastPhase != "replay") replayStarts.push_back(t);
             lastPhase = p;
             if (until && p == until) return true;
         }
@@ -532,13 +550,13 @@ bool inOrder(const std::vector<std::string>& seen, const std::vector<std::string
 }
 
 // Deploy the spoilers over 0.5 s at t0, hold 1 s, retract over 0.5 s.
-std::function<void(double)> deploySpoilers(FakeAircraft& a, double t0) {
-    return [&a, t0](double s) {
+std::function<void(double)> deploySpoilers(FakeAircraft& a, double t0, double hold = 1.0) {
+    return [&a, t0, hold](double s) {
         const double x = s - t0;
         if (x < 0.0) a.spoilerHandle = 0.0;
         else if (x < 0.5) a.spoilerHandle = x / 0.5;
-        else if (x < 1.5) a.spoilerHandle = 1.0;
-        else if (x < 2.0) a.spoilerHandle = 1.0 - (x - 1.5) / 0.5;
+        else if (x < 0.5 + hold) a.spoilerHandle = 1.0;
+        else if (x < 1.0 + hold) a.spoilerHandle = 1.0 - (x - 0.5 - hold) / 0.5;
         else a.spoilerHandle = 0.0;
     };
 }
@@ -641,7 +659,15 @@ TEST(Setup_FailingMethodsAreSkippedWithoutAskingAndANoTriesTheNext) {
         CHECK_EQ(attempts->array[0].string, std::string("failed"));
         CHECK_EQ(attempts->array[1].string, std::string("failed"));
         CHECK_EQ(st.getNumber("method", 0), 3.0);
+        CHECK_EQ(st.getNumber("methods", 0), 7.0);
+        CHECK(!st.getBool("bringBack", true));
     }
+    // Before those, bringing them back from where the pilot left them, numbered of the six it
+    // tries (not the simvar).
+    REQUIRE(h.backShown.size() == 3);
+    CHECK(h.backShown[0] == (SetupHarness::BackShown{true, 1, 6, 0}));
+    CHECK(h.backShown[1] == (SetupHarness::BackShown{true, 2, 6, 1}));
+    CHECK(h.backShown[2] == (SetupHarness::BackShown{true, 3, 6, 2}));
     CHECK(h.aircraft.tried[0].kind == MethodKind::InputSet);
     CHECK(h.aircraft.tried[1].kind == MethodKind::InputSet);
     CHECK(h.aircraft.tried[2].kind == MethodKind::KeyEvent);
@@ -677,6 +703,26 @@ TEST(Setup_FailingMethodsAreSkippedWithoutAskingAndANoTriesTheNext) {
     REQUIRE(h.backTried.size() == 3);
     CHECK(h.backTried[2] == h.aircraft.spoilersWork);
     CHECK(h.status().getString("note", "").find("Couldn't replay the spoilers") != std::string::npos);
+}
+
+// A method that doesn't move the control fails a few seconds after the pilot's movement had moved
+// it, as on the way back, not after a replay of all of it (the spoilers held out 12 s here).
+TEST(Setup_AReplayThatDoesntMoveTheControlStopsEarly) {
+    SetupHarness h;
+    h.facts.gearRetractable = false;
+    h.aircraft.spoilersWork = ControlMethod{MethodKind::KeyEvent, "", 1.0};
+    REQUIRE(h.start());
+    CHECK(h.run(120.0, deploySpoilers(h.aircraft, 2.0, 12.0), "ask"));
+    REQUIRE(h.aircraft.tried.size() == 3);
+    CHECK(h.aircraft.tried[2] == h.aircraft.spoilersWork);
+    CHECK(logged("no movement of the spoilers 3 s after yours; not replaying the rest"));
+    CHECK(logged("moved the spoilers 0% as far as you did"));
+    REQUIRE(h.replayStarts.size() == 3);
+    CHECK(h.replayStarts[1] - h.replayStarts[0] < 8.0);
+    CHECK(h.replayStarts[2] - h.replayStarts[1] < 8.0);
+    // The one that works replays all of it.
+    CHECK(h.t - h.replayStarts[2] > 13.0);
+    CHECK_NEAR(h.aircraft.spoilerHandle, 0.0, 1e-6);
 }
 
 // The PMDG 737 ignores SPOILERS_SET but takes AXIS_SPOILER_SET, what a hardware speedbrake axis
@@ -1861,12 +1907,18 @@ TEST(Setup_Pmdg777GearLearnsEachWayOnItsOwn) {
     // Lever up at 2 s (the legs follow from 4 s), down again at 16 s.
     auto pilot = [&](double s) { h.aircraft.setGearLever(s >= 2.0 && s < 16.0 ? 0.0 : 1.0); };
     CHECK(h.run(400.0, pilot, "ask"));
-    CHECK(inOrder(h.prompts, {"Raise the gear", "Lower the gear", "Raise the gear", "Watch the gear",
+    CHECK(inOrder(h.prompts, {"Raise the gear", "Lower the gear", "Raise the gear", "Lowering the gear", "Watch the gear",
                               "Did the gear retract and extend again?"}));
     // From where the pilot left it: the event's DOWN did nothing, the click lowered it. Then the
     // whole movement: the event raised it but didn't lower it, and from there the click didn't,
     // the key events did.
     REQUIRE(h.backTried.size() == 4);
+    // The panel: bringing it back as a pass of its own; from where the replay left it, as part of
+    // the replay's method 1.
+    REQUIRE(h.backShown.size() == 3);
+    CHECK(h.backShown[0] == (SetupHarness::BackShown{true, 1, 3, 0}));
+    CHECK(h.backShown[1] == (SetupHarness::BackShown{true, 2, 3, 1}));
+    CHECK(h.backShown[2] == (SetupHarness::BackShown{false, 1, 3, 0}));
     CHECK(h.backTried[0] == kLever777);
     CHECK(h.backTried[1] == kClick777);
     REQUIRE(h.aircraft.tried.size() == 1);
