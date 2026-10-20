@@ -55,6 +55,10 @@ public:
     // variable (lv_thr_N) is turned back into the axis value through the setup's calibration.
     // After begin(); the clip must have recorded that variable (clipHasLever).
     void setLever(const LeverCalibration& cal);
+    // The spoilers' calibration (ControlProfile::lever): SPOILERS_SET or AXIS_SPOILER_SET, where
+    // it was made with that event, sends the value that put the handle where the clip has it.
+    // After begin() or beginWays(); end() drops it.
+    void setSpoilerCalibration(const LeverCalibration& cal);
     // After setLever, for the clip about to play: where its autothrust was in control
     // (autothrustStretches), the throttle follows the clip's thrust demand there (ThrustFollower),
     // no further forward than its lever. clearAutothrust() when it stops playing.
@@ -184,6 +188,7 @@ private:
     Slot slots_[kControlCount];  // the method, or the picker's first way
     std::vector<Slot> extra_[kControlCount];  // and its others (WayPicker::ways() from 1 on)
     WayPicker picker_[kControlCount];
+    LeverCalibration spoilerCal_;  // setSpoilerCalibration
     FsUnitId number_ = FS_INVALID_UNIT;
     std::vector<std::string> ownEvents_;  // mapped to kOwnEventFirst + index
 };

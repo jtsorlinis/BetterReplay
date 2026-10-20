@@ -66,6 +66,10 @@ struct FakeAircraft : IControlSim {
 
     // the one method each control follows when replayed
     ControlMethod spoilersWork{MethodKind::InputSet, "AIRLINER_SPOILER_LEVER", 0.01};
+    ControlMethod spoilersPartWay;  // and one that takes the spoilers only 70% as far
+    // Or one that puts the handle at 0.52 * value^0.42, as the A380's SPOILERS_SET: full gives its
+    // full 0.52, but sent the 0.52 the pilot's lever reads at full it gives 0.395 (76%).
+    ControlMethod spoilersCurved;
     ControlMethod throttleWorks{MethodKind::InputSet, "ENGINE_THROTTLE_#", 0.01};
     ControlMethod gearWorks{MethodKind::InputSet, "LANDING_GEAR_GEAR", 1.0};
 
@@ -78,6 +82,13 @@ struct FakeAircraft : IControlSim {
     double demandCreepPct = 0.0;  // and it keeps creeping up this much a second while off idle
     bool hideLeverVars = false;   // the INI_ L:vars don't move (the lever can't be found from them)
     bool atRequest = false;       // and an autothrust request that reads the same as the lever (the A350)
+    // The A380 instead (its simvar held at halfway but never at full): the input events read the
+    // lever, 0..100 (as the A350's ENGINE_THROTTLE_1 does), not the demand; and at full the demand
+    // stops within a few percent of halfway's (demandCapPct), or keeps hunting (demandHuntPct each way).
+    bool ieLever = false;
+    bool hideInputThrottle = false;  // or the aircraft has no throttle input events
+    double demandCapPct = 0.0;
+    double demandHuntPct = 0.0;
     double axis[2] = {0.0, 0.0};
     double out[2] = {0.0, 0.0};
     double creep[2] = {0.0, 0.0};
@@ -117,6 +128,10 @@ struct FakeAircraft : IControlSim {
     bool raisedByPilot = false;  // who last raised the gear: the pilot (setGearLever) or a replay
     bool pmdgLeverVars = false;  // and its lever's switch_295_a (0..100), and a sound flag while the legs move
     double gearRate = 0.25;     // the gear simvars' travel a second
+    double gearDownLagSec = 2.0;  // the legs start down this long after the lever (the A380's doors: about 6 s)
+    // Or the nose leg goes down first and the main legs this long after it's down (the A380: about 10 s).
+    double gearStaggerSec = 0.0;
+    double nosePos = 1.0, mainPos = 1.0, noseDownAt = 0.0;
     double legAnimRate = 0.0;   // the leg animations' (pmdgGear), if not the same
     double legAnim = 1.0;
     // Key events the sim sees while the setup watches (fire): the pilot's, and with keyNoise an
@@ -167,7 +182,7 @@ struct FakeAircraft : IControlSim {
         if (v != gearLever) gearLeverChangedAt = t;
         gearLever = v;
     }
-    double ieThrottle(int e) const { return 16.7 + 0.833 * thr[e]; }
+    double ieThrottle(int e) const { return ieLever ? tla(e) / 45.0 * 100.0 : 16.7 + 0.833 * thr[e]; }
 
     // The lever (TLA, degrees) where the axis puts it: detents at idle (0), CL (25), FLX/MCT (35)
     // and TOGA (45); reverse down to -20.
@@ -202,16 +217,25 @@ struct FakeAircraft : IControlSim {
             for (int e = 0; e < 2; ++e) {
                 const double l = tla(e);
                 creep[e] = l > 0.0 ? creep[e] + demandCreepPct * dt : 0.0;
-                const double demand = (l >= 0.0 ? l / 45.0 * 85.0 : l) + creep[e];
+                double demand = (l >= 0.0 ? l / 45.0 * 85.0 : l) + creep[e];
+                if (demandCapPct > 0.0) demand = std::fmin(demand, demandCapPct);
                 thr[e] += (demand - thr[e]) * (dt < demandLagSec ? dt / demandLagSec : 1.0);
+                if (demandHuntPct > 0.0 && l >= 44.9) thr[e] = demand + demandHuntPct * std::sin(12.0 * t);
                 out[e] += (thr[e] - out[e]) * (dt / 0.6 < 1.0 ? dt / 0.6 : 1.0);
             }
         }
         for (int e = 0; e < 2; ++e) n1[e] = approach(n1[e], 20.0 + 0.75 * std::fabs(thr[e]), 10.0, dt);
-        if (t - gearLeverChangedAt >= 2.0 && !(frozen && gearStuckFrozen)) {
-            gearPos = approach(gearPos, gearLever, gearRate, dt);
+        if (t - gearLeverChangedAt >= (gearLever > gearPos ? gearDownLagSec : 2.0) && !(frozen && gearStuckFrozen)) {
+            if (gearStaggerSec > 0.0) {
+                nosePos = approach(nosePos, gearLever, gearRate, dt);
+                if (gearLever < 0.5 || (nosePos >= 0.999 && t - noseDownAt >= gearStaggerSec)) {
+                    mainPos = approach(mainPos, gearLever, gearRate, dt);
+                }
+            }
+            gearPos = gearStaggerSec > 0.0 ? (nosePos + 2.0 * mainPos) / 3.0 : approach(gearPos, gearLever, gearRate, dt);
             legAnim = approach(legAnim, gearLever, legAnimRate > 0.0 ? legAnimRate : gearRate, dt);
         }
+        if (nosePos < 0.999) noseDownAt = t;
         if (gearPos >= 0.999) gearHandleSimvar = 1.0;  // the handle simvar lags, as on the A320
         if (gearPos <= 0.001) gearHandleSimvar = 0.0;
         if (handleFollowsLever) gearHandleSimvar = gearLever;
@@ -233,12 +257,16 @@ struct FakeAircraft : IControlSim {
         for (int e = 0; e < 2; ++e) {
             f.v[kThrottle1 + e] = !airbus && holdReverse ? -37.0 : thr[e];  // (the PMDG's simvar in full reverse)
             f.v[kEngineN1_1 + e] = n1[e];
-            f.v[kInputThrottle1 + e] = ieThrottle(e);
+            f.v[kInputThrottle1 + e] = hideInputThrottle ? NAN : ieThrottle(e);
             f.v[kReverser1 + e] = reverser ? 1.0 : 0.0;
             f.v[kReverserNozzle1 + e] = reverser || holdReverse ? 100.0 : toggled ? std::fmin(100.0, std::fmax(0.0, -5.0 * thr[e])) : 0.0;
             f.v[kThrottleAxis1 + e] = airbus && axisRecorded ? axis[e] : NAN;
         }
         f.v[kGearCenter] = f.v[kGearLeft] = f.v[kGearRight] = gearPos;
+        if (gearStaggerSec > 0.0) {
+            f.v[kGearCenter] = nosePos;
+            f.v[kGearLeft] = f.v[kGearRight] = mainPos;
+        }
         f.v[kGearHandle] = gearHandleSimvar;
         f.v[kInputGear] = gearLever;
         return f;
@@ -337,6 +365,12 @@ struct FakeAircraft : IControlSim {
             if (driven.kind == MethodKind::InputSet || driven.kind == MethodKind::InputValue) v = f.v[kInputSpeedBrakes] * driven.scale;
             if (driven.kind == MethodKind::KeyEvent || driven.kind == MethodKind::SimVar) v = f.v[kSpoilersHandle];
             if (std::isfinite(v) && v >= 0.0 && v <= 1.0) spoilerHandle = v;  // out of range: ignored
+        } else if (c == Control::Spoilers && driven == spoilersPartWay && driven.kind == MethodKind::KeyEvent) {
+            const double v = f.v[kSpoilersHandle];
+            if (std::isfinite(v) && v >= 0.0 && v <= 1.0) spoilerHandle = 0.7 * v;
+        } else if (c == Control::Spoilers && driven == spoilersCurved && driven.kind == MethodKind::KeyEvent) {
+            const double v = f.v[kSpoilersHandle];
+            if (std::isfinite(v) && v >= 0.0 && v <= 1.0) spoilerHandle = 0.52 * std::pow(v, 0.42);
         } else if (c == Control::Throttle && driven == throttleWorks && driven.kind == MethodKind::KeyEvent) {
             // Like ControlDriver: the recorded hardware axis, else the lever simvar as a fraction.
             for (int e = 0; e < engines; ++e) {
@@ -567,14 +601,14 @@ bool inOrder(const std::vector<std::string>& seen, const std::vector<std::string
     return i == want.size();
 }
 
-// Deploy the spoilers over 0.5 s at t0, hold 1 s, retract over 0.5 s.
-std::function<void(double)> deploySpoilers(FakeAircraft& a, double t0, double hold = 1.0) {
-    return [&a, t0, hold](double s) {
+// Deploy the spoilers over 0.5 s at t0, hold 1 s, retract over 0.5 s (the handle to `to`).
+std::function<void(double)> deploySpoilers(FakeAircraft& a, double t0, double hold = 1.0, double to = 1.0) {
+    return [&a, t0, hold, to](double s) {
         const double x = s - t0;
         if (x < 0.0) a.spoilerHandle = 0.0;
-        else if (x < 0.5) a.spoilerHandle = x / 0.5;
-        else if (x < 0.5 + hold) a.spoilerHandle = 1.0;
-        else if (x < 1.0 + hold) a.spoilerHandle = 1.0 - (x - 0.5 - hold) / 0.5;
+        else if (x < 0.5) a.spoilerHandle = to * x / 0.5;
+        else if (x < 0.5 + hold) a.spoilerHandle = to;
+        else if (x < 1.0 + hold) a.spoilerHandle = to * (1.0 - (x - 0.5 - hold) / 0.5);
         else a.spoilerHandle = 0.0;
     };
 }
@@ -967,8 +1001,7 @@ TEST(Setup_ThrottleLeverAskedWhenTheMovementDoesntTell) {
             continue;
         }
         // "Yes": the lever's variable from the holds already made.
-        CHECK_EQ(h.phase(), std::string("notice"));
-        REQUIRE(h.answer("begin"));
+        CHECK_EQ(h.phase(), std::string("sweep"));  // started by itself (the parking brake set)
         REQUIRE(h.run(120.0, nullptr, "done"));
         CHECK_EQ(h.flow.profile()[Control::Throttle].lever.var, std::string("INI_ENG#_THROTTLE_POS"));
         CHECK(h.flow.profile()[Control::Throttle].lever.valid());
@@ -983,7 +1016,11 @@ TEST(Setup_ThrottleLeverFoundAndCalibratedWhenTheSimvarCreeps) {
     h.facts.hasReverse = true;
     REQUIRE(h.start());
     ThrottlePilot p = throttlePilot(h);
-    confirmKeyEvents(h, p);
+    REQUIRE(h.run(240.0, followThrottle(h, p), "ask"));
+    // The parking brake let off meanwhile: the calibration waits for it, then starts by itself.
+    h.facts.parkingBrake = false;
+    h.run(0.1);
+    REQUIRE(h.answer("yes"));
     // The thrust demand kept moving while the lever sat in CL and TOGA, and the lever's own
     // variable held: straight on to its calibration, with no second pass of the throttle.
     CHECK_EQ(h.phase(), std::string("notice"));
@@ -991,14 +1028,19 @@ TEST(Setup_ThrottleLeverFoundAndCalibratedWhenTheSimvarCreeps) {
                               "Wait for the engines to spool down", "Listen to the engines",
                               "Did the engines spool up and back down?"}));
     const JsonValue notice = h.status();
-    CHECK_EQ(notice.getString("prompt", ""), std::string("Hands off the throttle"));
-    CHECK(notice.getString("detail", "").find("40 seconds") != std::string::npos);
+    CHECK_EQ(notice.getString("prompt", ""), std::string("Set the parking brake"));
+    CHECK(notice.getString("detail", "").find("Once it's set") != std::string::npos);
     const JsonValue* buttons = notice.get("buttons");
     REQUIRE(buttons && buttons->isArray() && !buttons->array.empty());
-    CHECK_EQ(buttons->array[0].string, std::string("begin"));
-
-    REQUIRE(h.answer("begin"));
+    CHECK_EQ(buttons->array[0].string, std::string("ready"));  // Continue anyway
+    h.run(2.0);
+    CHECK_EQ(h.phase(), std::string("notice"));
+    h.facts.parkingBrake = true;
+    h.run(0.1);
     CHECK_EQ(h.phase(), std::string("sweep"));
+    const JsonValue sweep = h.status();
+    CHECK_EQ(sweep.getString("prompt", ""), std::string("Moving the throttle"));
+    CHECK(sweep.getString("detail", "").find("40 seconds") != std::string::npos);
     REQUIRE(h.run(120.0, nullptr, "done"));
     CHECK(!h.aircraft.driving);
     CHECK(!h.aircraft.reverser);  // stowed again
@@ -1039,6 +1081,63 @@ TEST(Setup_ThrottleLeverFoundAndCalibratedWhenTheSimvarCreeps) {
     CHECK(a < 0.05);
 }
 
+// The A380's simvar held at halfway but never at full: there its thrust demand either stops within
+// a few percent of halfway's or keeps hunting. Its input events, the cockpit lever, hold still:
+// the holds tick by them. Without them the setup waits at "Now to full", and the log says why.
+TEST(Setup_ThrottleHoldsTickByTheInputEventsWhereTheSimvarDoesnt) {
+    for (const bool hunts : {false, true}) {
+        for (const bool inputs : {true, false}) {
+            SetupHarness h;
+            throttleOnly(h);
+            h.aircraft.airbus = true;
+            h.aircraft.ieLever = true;
+            h.aircraft.hideInputThrottle = !inputs;
+            if (hunts) h.aircraft.demandHuntPct = 3.0;
+            else h.aircraft.demandCapPct = 49.0;  // halfway (CL) reads 47.2
+            REQUIRE(h.start());
+            ThrottlePilot p = throttlePilot(h);
+            if (!inputs) {
+                h.run(60.0, followThrottle(h, p));
+                CHECK_EQ(h.phase(), std::string("user"));
+                CHECK_EQ(h.status().getString("prompt", ""), std::string("Now to full and hold it"));
+                CHECK(logged("no throttle hold yet after 15 s (hold 2 of 2)"));
+                continue;
+            }
+            REQUIRE(h.run(240.0, followThrottle(h, p), "ask"));
+            CHECK(inOrder(h.prompts, {"Move the throttle to about halfway and hold it", "Now to full and hold it",
+                                      "Back to idle", "Wait for the engines to spool down"}));
+            // Hunting, the simvar never holds; stopped short, it may (hold 1 by the input events left
+            // it still catching up, further from its stop than 4%).
+            CHECK(logged(hunts ? "throttle held, by its input events at 100 (hold 2 of 2)" : "(hold 2 of 2"));
+            CHECK(h.aircraft.tried.back().kind == MethodKind::KeyEvent);
+        }
+    }
+}
+
+// On the A380 the first hold ticked by the input events while the thrust demand was still catching
+// up (27% of its 69% at halfway); held there, the demand then ticked "full" with the lever still
+// at halfway. Once the input events have moved with the throttle, they're the hand: full takes
+// the lever moving to full.
+TEST(Setup_ThrottleFullHoldNeedsTheLeverMoved) {
+    SetupHarness h;
+    throttleOnly(h);
+    h.aircraft.airbus = true;
+    h.aircraft.ieLever = true;
+    h.aircraft.demandLagSec = 2.0;  // still well short of CL's demand when the lever has held 2 s
+    REQUIRE(h.start());
+    ThrottlePilot stay{0.0, 0.5, 0.5};  // to halfway, and left there
+    h.run(30.0, followThrottle(h, stay));
+    CHECK(logged("(hold 1 of 2)"));
+    for (const std::string& line : g_setupLog) {  // no tick for full (the waiting lines say "hold 2 of 2" too)
+        CHECK(!(line.find("throttle held") != std::string::npos && line.find("(hold 2 of 2") != std::string::npos));
+    }
+    CHECK(logged("no throttle hold yet after 15 s (hold 2 of 2)"));
+    CHECK_EQ(h.status().getString("prompt", ""), std::string("Now to full and hold it"));
+    ThrottlePilot full = throttlePilot(h);  // now on to full
+    REQUIRE(h.run(240.0, followThrottle(h, full), "ask"));
+    CHECK(logged("throttle held, by its input events at 100 (hold 2 of 2)"));
+}
+
 // A thrust demand that keeps creeping (1.5% a second) while the lever sits still: the holds still
 // tick, and the creep is what shows it isn't the lever.
 TEST(Setup_ThrottleHoldsTickWhileTheThrustDemandCreeps) {
@@ -1050,9 +1149,8 @@ TEST(Setup_ThrottleHoldsTickWhileTheThrustDemandCreeps) {
     REQUIRE(h.start());
     ThrottlePilot p = throttlePilot(h);
     confirmKeyEvents(h, p);
-    CHECK_EQ(h.phase(), std::string("notice"));
+    CHECK_EQ(h.phase(), std::string("sweep"));  // started by itself (the parking brake set)
     CHECK(inOrder(h.prompts, {"Move the throttle to about halfway and hold it", "Now to full and hold it", "Back to idle"}));
-    REQUIRE(h.answer("begin"));
     REQUIRE(h.run(120.0, nullptr, "done"));
     CHECK_EQ(h.flow.profile()[Control::Throttle].lever.var, std::string("INI_ENG#_THROTTLE_POS"));
 }
@@ -1071,8 +1169,7 @@ TEST(Setup_ThrottleLeverAxisWithItsOwnReverseZone) {
     REQUIRE(h.start());
     ThrottlePilot p = throttlePilot(h, 0.2);
     confirmKeyEvents(h, p);
-    REQUIRE(h.phase() == "notice");
-    REQUIRE(h.answer("begin"));
+    REQUIRE(h.phase() == "sweep");  // started by itself (the parking brake set)
     REQUIRE(h.run(120.0, nullptr, "done"));
     const ControlProfile& tp = h.flow.profile()[Control::Throttle];
     REQUIRE(tp.lever.valid());
@@ -1116,11 +1213,10 @@ TEST(Setup_ThrottleLeverHeldAgainWhenTheMovementDidntShowIt) {
     h.aircraft.hideLeverVars = false;
     h.prompts.clear();
     ThrottlePilot again = throttlePilot(h);
-    REQUIRE(h.run(90.0, followThrottle(h, again), "notice"));
+    REQUIRE(h.run(90.0, followThrottle(h, again), "sweep"));
     CHECK(inOrder(h.prompts, {"Move the throttle to about halfway and hold it", "Now to full and hold it", "Back to idle",
-                              "Hands off the throttle"}));
+                              "Moving the throttle"}));
     CHECK(h.sawTaskDone);
-    REQUIRE(h.answer("begin"));
     REQUIRE(h.run(120.0, nullptr, "done"));
     CHECK_EQ(h.flow.profile()[Control::Throttle].lever.var, std::string("INI_ENG#_THROTTLE_POS"));
     CHECK(h.flow.profile()[Control::Throttle].lever.valid());
@@ -1142,8 +1238,7 @@ TEST(Setup_ThrottleReverseByHoldingDecreaseOnALeverThatRunsDown) {
         REQUIRE(h.start());
         ThrottlePilot p = throttlePilot(h);
         confirmKeyEvents(h, p);
-        REQUIRE(h.phase() == "notice");
-        REQUIRE(h.answer("begin"));
+        REQUIRE(h.phase() == "sweep");  // started by itself (the parking brake set)
         REQUIRE(h.run(150.0, nullptr, "done"));
         CHECK(!h.aircraft.driving);
         CHECK(!h.aircraft.holdReverse);
@@ -1185,9 +1280,7 @@ TEST(Setup_ThrottleReverseTestedWithoutALeverCalibration) {
         REQUIRE(h.start());
         ThrottlePilot p = throttlePilot(h);
         confirmKeyEvents(h, p);
-        REQUIRE(h.phase() == "notice");
-        CHECK(h.status().getString("detail", "").find("tries reverse thrust") != std::string::npos);
-        REQUIRE(h.answer("begin"));
+        REQUIRE(h.phase() == "sweep");  // started by itself (the parking brake set)
         CHECK(h.status().getString("detail", "").find("tries reverse thrust") != std::string::npos);
         REQUIRE(h.run(60.0, nullptr, "done"));
         const ControlProfile& tp = h.flow.profile()[Control::Throttle];
@@ -1240,8 +1333,7 @@ TEST(Setup_ThrottleReverseByToggle) {
             REQUIRE(h.start());
             ThrottlePilot p = throttlePilot(h);
             confirmKeyEvents(h, p);
-            REQUIRE(h.phase() == "notice");
-            REQUIRE(h.answer("begin"));
+            REQUIRE(h.phase() == "sweep");  // started by itself (the parking brake set)
             REQUIRE(h.run(150.0, nullptr, "done"));
             const ControlProfile& tp = h.flow.profile()[Control::Throttle];
             CHECK(tp.state == ControlState::Ok);
@@ -1278,9 +1370,8 @@ TEST(Setup_ThrottleToggleThatWontComeOutStopsTheSweep) {
     REQUIRE(h.start());
     ThrottlePilot p = throttlePilot(h);
     confirmKeyEvents(h, p);
-    REQUIRE(h.phase() == "notice");
+    REQUIRE(h.phase() == "sweep");  // started by itself (the parking brake set)
     h.aircraft.toggleStuck = true;
-    REQUIRE(h.answer("begin"));
     REQUIRE(h.run(60.0, nullptr, "retry"));
     CHECK(h.status().getString("note", "").find("toggle reverse") != std::string::npos);
     CHECK(!h.aircraft.driving);
@@ -1294,8 +1385,7 @@ TEST(Setup_ThrottleLeverSweepStopsWhenTheAircraftRolls) {
     REQUIRE(h.start());
     ThrottlePilot p = throttlePilot(h);
     confirmKeyEvents(h, p);
-    REQUIRE(h.phase() == "notice");
-    REQUIRE(h.answer("begin"));
+    REQUIRE(h.phase() == "sweep");  // started by itself (the parking brake set)
     h.run(3.0);
     h.aircraft.gs = 5.0;  // the parking brake isn't holding
     REQUIRE(h.run(1.0, nullptr, "retry"));
@@ -2067,6 +2157,179 @@ TEST(Setup_AClickGetsItsSecondTryOnTheWayBack) {
     CHECK(logged("the aircraft's own event #69927 (536870912, then 131072) as a toggle brought the gear back from where "
                  "you left it"));
     CHECK(!logged("none of the method(s) brought the gear back"));
+}
+
+// The A380's gear: its legs start down seconds after the lever (the doors first), then take 12 s.
+// The first way back had them on their way when its wait ran out, short of where they count as
+// back: it brought them back, not the next one tried (a light's L:var on the A380).
+TEST(Setup_TheWayBackCountsALateSlowGearOnItsWay) {
+    SetupHarness h;
+    h.aircraft.onGround = false;
+    h.aircraft.gearWorks = ControlMethod{MethodKind::KeyEvent, "", 1.0};  // GEAR_SET/UP/DOWN, as on the A380
+    h.aircraft.gearRate = 0.08;
+    h.aircraft.pmdgGear = true;  // no lever the scan sees (the A380 showed none either), only leg animations
+    // A method gets 6 s here (nothing showed the lever ahead of the legs): on their way 0.05 at
+    // 5.4 s, 0.15 only at 6.7 s.
+    h.aircraft.gearDownLagSec = 4.8;
+    REQUIRE(h.start());
+    auto pilot = [&](double s) { h.aircraft.setGearLever(s >= 2.0 && s < 20.0 ? 0.0 : 1.0); };
+    CHECK(h.run(400.0, pilot, "ask"));
+    CHECK(logged("a method gets 6.0 s to start moving it"));
+    REQUIRE(h.backTried.size() == 1);
+    CHECK(h.backTried[0] == h.aircraft.gearWorks);
+    CHECK(logged("key events GEAR_SET/GEAR_UP/GEAR_DOWN brought the gear back from where you left it"));
+    REQUIRE(h.answer("yes"));
+    CHECK(h.flow.profile()[Control::Gear].state == ControlState::Ok);
+    CHECK(!h.flow.profile()[Control::Gear].perDirection());  // one way both ways
+}
+
+// The A380 lowers its nose leg all the way first and its main legs about 10 s later: the pause, one
+// leg down and two up (their mean 0.33, still), isn't the gear stopping short on the way back.
+TEST(Setup_TheWayBackWaitsForGearLegsThatGoInTurn) {
+    SetupHarness h;
+    h.aircraft.onGround = false;
+    h.aircraft.gearWorks = ControlMethod{MethodKind::KeyEvent, "", 1.0};  // GEAR_SET/UP/DOWN, as on the A380
+    h.aircraft.gearStaggerSec = 6.0;
+    REQUIRE(h.start());
+    auto pilot = [&](double s) { h.aircraft.setGearLever(s >= 2.0 && s < 20.0 ? 0.0 : 1.0); };
+    CHECK(h.run(400.0, pilot, "ask"));
+    CHECK(logged("key events GEAR_SET/GEAR_UP/GEAR_DOWN brought the gear back from where you left it"));
+    CHECK(!logged("stopped short"));
+    REQUIRE(!h.backTried.empty());
+    CHECK(h.backTried.back() == h.aircraft.gearWorks);  // nothing after it got the credit
+    CHECK(h.aircraft.tried.back() == h.aircraft.gearWorks);
+    REQUIRE(h.answer("yes"));
+    CHECK(!h.flow.profile()[Control::Gear].perDirection());  // one way both ways
+}
+
+// The A380's speed brake lever armed (its handle at 0.0625) at the start: deployed (to its 0.52 at
+// full) and retracted to 0, past where they started, the spoilers are back, and the setup goes on.
+// Back meant within 0.05 of 0.0625 (a tenth of the movement, 0.05 at least).
+TEST(Setup_SpoilersRetractedPastWhereTheyStartedAreBack) {
+    SetupHarness h;
+    h.facts.gearRetractable = false;
+    h.aircraft.spoilerHandle = h.aircraft.spoilerSurface = h.aircraft.spoilerHandleWas = 0.0625;
+    REQUIRE(h.start());
+    auto pilot = [&](double s) {
+        const double x = s - 2.0;
+        h.aircraft.spoilerHandle = x < 0.0   ? 0.0625
+                                   : x < 0.5 ? 0.0625 + (0.52 - 0.0625) * x / 0.5
+                                   : x < 1.5 ? 0.52
+                                   : x < 2.0 ? 0.52 * (1.0 - (x - 1.5) / 0.5)
+                                             : 0.0;  // retracted, not armed again
+    };
+    h.away = [&] { h.aircraft.spoilerHandle = 0.52; };  // "Deploy the spoilers" once more
+    CHECK(h.run(240.0, pilot, "ask"));
+    CHECK(logged("the spoilers started moving (0.0625 -> "));
+    CHECK(inOrder(h.prompts, {"Deploy the spoilers", "Retract the spoilers", "Watch the spoilers"}));
+    CHECK(std::find(h.prompts.begin(), h.prompts.end(), "That didn't register") == h.prompts.end());
+    REQUIRE(h.answer("yes"));
+    CHECK(h.flow.profile()[Control::Spoilers].state == ControlState::Ok);
+}
+
+// A method that passes but goes only part way (the A380's SPOILERS_SET went 76%, its spoilers half
+// out) is asked about only once the others have been tried: one that goes all the way is asked
+// about instead; if none goes further, it's replayed once more and asked about.
+TEST(Setup_AMethodThatGoesOnlyPartWayIsAskedAboutLast) {
+    for (const bool another : {true, false}) {
+        SetupHarness h;
+        h.facts.gearRetractable = false;
+        const ControlMethod spoilersSet{MethodKind::KeyEvent, "", 1.0};
+        const ControlMethod spoilerAxis{MethodKind::KeyEvent, kKeySpoilersAxis, 1.0};
+        h.aircraft.spoilersPartWay = spoilersSet;
+        h.aircraft.spoilersWork = another ? spoilerAxis : ControlMethod();
+        REQUIRE(h.start());
+        CHECK(h.run(240.0, deploySpoilers(h.aircraft, 2.0), "ask"));
+        CHECK(logged("key event SPOILERS_SET moved the spoilers only 70% as far as you did; trying the other method(s) first"));
+        REQUIRE(!h.aircraft.tried.empty());
+        const JsonValue st = h.status();
+        const JsonValue* attempts = st.get("attempts");
+        REQUIRE(attempts && attempts->isArray());
+        bool shortSeen = false;
+        for (const JsonValue& a : attempts->array) shortSeen |= a.string == "short";
+        CHECK(shortSeen);
+        // 70% at most, at any value (0.7 of it): no calibration to make.
+        CHECK(logged("SPOILERS_SET doesn't take the spoilers as far as you did at any value; not calibrating it"));
+        if (another) {
+            // The axis event went all the way: asked about it, and SPOILERS_SET never again (but
+            // for being stepped through its range).
+            CHECK(h.aircraft.tried.back() == spoilerAxis);
+            CHECK(std::count(h.aircraft.tried.begin(), h.aircraft.tried.end(), spoilersSet) == 2);
+            CHECK(st.getString("note", "").empty());
+            REQUIRE(h.answer("yes"));
+            CHECK(h.flow.profile()[Control::Spoilers].method == spoilerAxis);
+        } else {
+            // Nothing went further: SPOILERS_SET once more, after all the others, and the note says why.
+            CHECK(logged("back to key event SPOILERS_SET, which went furthest (70% as far as you did); replaying it once "
+                         "more to ask"));
+            CHECK(h.aircraft.tried.back() == spoilersSet);
+            CHECK(std::count(h.aircraft.tried.begin(), h.aircraft.tried.end(), spoilersSet) == 3);
+            CHECK(st.getString("note", "").find("70% as far as you did") != std::string::npos);
+            REQUIRE(h.answer("yes"));
+            CHECK(h.flow.profile()[Control::Spoilers].method == spoilersSet);
+        }
+        CHECK(h.flow.profile()[Control::Spoilers].state == ControlState::Ok);
+    }
+}
+
+// The A380's SPOILERS_SET (and AXIS_SPOILER_SET) took the spoilers 76% as far as the pilot: its
+// lever half way for the handle's 0.52 at full. Stepped through its range, the event's values are
+// mapped to where they put the handle, and the replay goes through that: all the way.
+TEST(Setup_ASpoilerEventThatGoesPartWayIsCalibrated) {
+    SetupHarness h;
+    h.facts.gearRetractable = false;
+    const ControlMethod spoilersSet{MethodKind::KeyEvent, "", 1.0};
+    const ControlMethod spoilerAxis{MethodKind::KeyEvent, kKeySpoilersAxis, 1.0};
+    h.aircraft.spoilersCurved = spoilersSet;
+    h.aircraft.spoilersWork = ControlMethod();
+    h.away = [&] { h.aircraft.spoilerHandle = 0.52; };  // "Deploy the spoilers" once more: full
+    REQUIRE(h.start());
+    bool sawCalibrate = false;
+    double progress = 0.0;
+    auto pilot = deploySpoilers(h.aircraft, 2.0, 1.0, 0.52);
+    for (double s = 0.0; s < 240.0 && h.phase() != "ask"; s += 0.5) {
+        h.run(0.5, [&](double x) { pilot(s + x); });
+        const JsonValue st = h.status();
+        if (st.getString("phase", "") == "calibrate") {
+            sawCalibrate = true;
+            progress = std::max(progress, st.getNumber("progress", 0.0));
+            CHECK_EQ(st.getString("prompt", ""), std::string("Watch the spoilers"));
+            CHECK(st.getString("detail", "").find("through its range") != std::string::npos);
+        }
+    }
+    REQUIRE(h.phase() == "ask");
+    CHECK(sawCalibrate);
+    CHECK(progress > 0.8);
+    CHECK(logged("key event SPOILERS_SET moved the spoilers only 76% as far as you did; stepping it through its range"));
+    CHECK(logged("SPOILERS_SET calibrated (21 points)"));
+    // Replayed through it, all the way: asked about at once, the axis event never tried.
+    CHECK(h.aircraft.tried.back() == spoilersSet);
+    CHECK(std::count(h.aircraft.tried.begin(), h.aircraft.tried.end(), spoilerAxis) == 0);
+    CHECK(h.status().getString("note", "").empty());
+    REQUIRE(h.answer("yes"));
+    const ControlProfile& sp = h.flow.profile()[Control::Spoilers];
+    CHECK(sp.state == ControlState::Ok);
+    CHECK(sp.method == spoilersSet);
+    REQUIRE(sp.lever.valid());
+    CHECK_EQ(sp.lever.var, std::string("SPOILERS_SET"));
+    CHECK_NEAR(spoilerCommand(sp.lever, spoilersSet, 0.52), 1.0, 0.02);
+    CHECK_NEAR(spoilerCommand(sp.lever, spoilersSet, 0.395), 0.52, 0.05);
+    CHECK_NEAR(spoilerCommand(sp.lever, spoilersSet, 0.0), 0.0, 1e-9);
+    CHECK_NEAR(spoilerCommand(sp.lever, spoilerAxis, 0.395), 0.395, 1e-9);  // made with the other event
+    CHECK(describeControl(Control::Spoilers, sp).find("through SPOILERS_SET's calibration (21 points)") != std::string::npos);
+
+    // Kept in aircraft.json.
+    ProfileStore store;
+    store.upsert("simobjects/airplanes/inibuilds-a380")[Control::Spoilers] = sp;
+    std::string json;
+    store.toJson(json);
+    ProfileStore back;
+    std::string err;
+    REQUIRE(back.fromJson(json.data(), json.size(), &err));
+    const AircraftProfile* b = back.find("simobjects/airplanes/inibuilds-a380");
+    REQUIRE(b);
+    CHECK_EQ((*b)[Control::Spoilers].lever.var, std::string("SPOILERS_SET"));
+    CHECK_EQ((*b)[Control::Spoilers].lever.forward.size(), sp.lever.forward.size());
 }
 
 // A method that can't bring the control back to where the pilot's movement started it isn't

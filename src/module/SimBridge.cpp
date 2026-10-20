@@ -1141,6 +1141,8 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
                           kChannels[kThrottle1].simvar, why.c_str());
             }
         }
+        // The spoilers through where their event puts the handle (the setup's calibration).
+        if (c == Control::Spoilers && cp.state == ControlState::Ok && cp.lever.valid()) driver_.setSpoilerCalibration(cp.lever);
         // Reverse thrust from the clip's reversers, with or without a lever calibration.
         if (c == Control::Throttle && cp.state == ControlState::Ok) driver_.setReverseBy(cp.reverseBy);
         if (cp.state == ControlState::Ok && c != Control::Throttle && cp.leadSec > 0.0) {

@@ -252,7 +252,11 @@ struct ControlProfile {
     ControlState state = ControlState::Pending;
     ControlMethod method;
     bool confirmed = false;  // the pilot said the replay looked right (not only the automatic check)
-    LeverCalibration lever;  // throttle only, with the key-event method
+    // The throttle with the key-event method: its lever's own variable. The spoilers: where a key
+    // event that takes a position (`var`: SPOILERS_SET or AXIS_SPOILER_SET) puts the handle, each
+    // point the event's fraction and the handle there (spoilerPositionEvent): the A380 puts its
+    // lever half way for the handle's 0.52 at full.
+    LeverCalibration lever;
     ReverseBy reverseBy = ReverseBy::Unknown;  // throttle only, with the key-event method
     // The gear, flaps and spoilers, where one method doesn't move them both ways or from wherever
     // they are (the PMDG 777's gear): for each Direction, the ways to try, in order. Playback sends
@@ -378,6 +382,12 @@ double invertLever(const std::vector<LeverPoint>& table, double lever);
 // Idle is the forward table's lowest axis reading; the lever variable may run either way from
 // there (the PMDG 737's goes from 500 at idle down to 75 at full).
 bool leverAxis(const LeverCalibration& cal, double lever, double clipReverser, bool liveReverse, double& axis);
+// The spoilers' key event that takes a position, for method `m` (SPOILERS_SET for the key event
+// with no var, AXIS_SPOILER_SET), as a spoiler calibration names it; nullptr for any other.
+const char* spoilerPositionEvent(const ControlMethod& m);
+// The spoilers' handle value to send with `m` for the clip's `handle`: through the calibration
+// where it was made with that event, else the handle as it is.
+double spoilerCommand(const LeverCalibration& cal, const ControlMethod& m, double handle);
 // Whether engine `engine` (0-based) is in reverse in this frame, by what the reversers did: the
 // reverse nozzles out, or the lever simvar below idle. Some aircraft reverse without setting
 // GENERAL ENG REVERSE THRUST ENGAGED (the PMDG 737 with "decrease throttle" held), or set it

@@ -511,6 +511,9 @@ std::string describeControl(Control c, const ControlProfile& cp) {
     } else {
         s = describeMethod(c, cp.method);
     }
+    if (c == Control::Spoilers && cp.lever.valid()) {
+        s += ", through " + cp.lever.var + "'s calibration (" + std::to_string(cp.lever.forward.size()) + " points)";
+    }
     if (c != Control::Throttle) return s;
     if (cp.lever.valid()) s += ", lever from L:var " + cp.lever.var;
     switch (cp.reverseBy) {
@@ -596,6 +599,18 @@ bool leverAxis(const LeverCalibration& cal, double lever, double clipReverser, b
     if (clipReverse && beyondIdle) return false;
     axis = invertLever(cal.forward, lever);
     return true;
+}
+
+const char* spoilerPositionEvent(const ControlMethod& m) {
+    if (m.kind != MethodKind::KeyEvent) return nullptr;
+    if (m.var.empty()) return "SPOILERS_SET";
+    return m.var == kKeySpoilersAxis ? kKeySpoilersAxis : nullptr;
+}
+
+double spoilerCommand(const LeverCalibration& cal, const ControlMethod& m, double handle) {
+    const char* event = spoilerPositionEvent(m);
+    if (!std::isfinite(handle) || !event || !cal.valid() || cal.var != event) return handle;
+    return invertLever(cal.forward, handle);
 }
 
 bool reversing(const Frame& f, int engine) {

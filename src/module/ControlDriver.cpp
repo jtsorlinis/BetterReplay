@@ -68,6 +68,7 @@ bool ControlDriver::dueWhenLasting(Slot& s, int i, double v, bool force, double 
 bool ControlDriver::begin(Control c, const ControlMethod& m, std::string& why) {
     const int i = static_cast<int>(c);
     extra_[i].clear();
+    if (c == Control::Spoilers) spoilerCal_ = LeverCalibration();  // set again after, where the profile has one
     ControlProfile one;
     one.method = m;
     picker_[i].begin(c, one);
@@ -80,6 +81,7 @@ bool ControlDriver::beginWays(Control c, const ControlProfile& cp, std::string& 
     WayPicker& p = picker_[ci];
     p.begin(c, cp);
     extra_[ci].clear();
+    if (c == Control::Spoilers) spoilerCal_ = LeverCalibration();
     std::vector<Slot> slots;
     for (size_t i = 0; i < p.ways().size();) {
         Slot s;
@@ -228,6 +230,12 @@ void ControlDriver::setLever(const LeverCalibration& cal) {
     s.useLever = true;
     log::info("controls: throttle levers from L:var %s (%zu calibration point(s)%s)", cal.var.c_str(), cal.forward.size(),
               cal.reverse.empty() ? "" : ", reverse too");
+}
+
+void ControlDriver::setSpoilerCalibration(const LeverCalibration& cal) {
+    if (!slots_[static_cast<int>(Control::Spoilers)].active || !cal.valid()) return;
+    spoilerCal_ = cal;
+    log::info("controls: the spoilers through %s's calibration (%zu point(s))", cal.var.c_str(), cal.forward.size());
 }
 
 void ControlDriver::findAutothrust(const std::vector<Frame>& clipFrames) {
@@ -717,9 +725,11 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                 stepFlaps(s, std::round(idx), force);
                 break;
             }
+            // FLAPS NUM HANDLE POSITIONS is the highest index (the A350 says 4, and FULL is its
+            // index 4), so the A380's 2 of 4 is half the range: as 2 of 3 it went to 3.
             const int positions = ctx_.flapPositions ? *ctx_.flapPositions : 0;
             if (positions < 2) break;
-            const double fraction = clamp(std::round(idx), 0.0, positions - 1.0) / (positions - 1.0);
+            const double fraction = clamp(std::round(idx), 0.0, static_cast<double>(positions)) / positions;
             if (s.method.var == kKeyFlapsAxis) {
                 const double value = std::round(fraction * 32766.0 - 16383.0);
                 if (dueOnChange(s, 0, value, force, 1.0)) keyEvent(KEY_AXIS_FLAPS_SET, static_cast<int32_t>(value));
@@ -730,7 +740,9 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
             break;
         }
         case Control::Spoilers: {
-            const double h = f.v[kSpoilersHandle];
+            // Through the calibration where it was made with this event: the A380 puts its lever
+            // half way for the handle's 0.52 at full, so the event needs more than the clip's value.
+            const double h = spoilerCommand(spoilerCal_, s.method, f.v[kSpoilersHandle]);
             if (!std::isfinite(h)) break;
             if (s.method.var == kKeySpoilersAxis) {
                 const double value = std::round(clamp(h, 0.0, 1.0) * 32766.0 - 16383.0);
@@ -781,6 +793,7 @@ void ControlDriver::end(Control c) {
     Slot& s = slots_[ci];
     if (!s.active) return;
     s.active = false;
+    if (c == Control::Spoilers) spoilerCal_ = LeverCalibration();
     for (const Slot& w : extra_[ci]) {
         log::info("controls: %d value(s) sent to the %s with %s", w.sends, controlSpec(c).label, describeMethod(c, w.method).c_str());
         if (w.errors > 0) log::warn("controls: %d error(s) driving the %s with %s", w.errors, controlSpec(c).label,

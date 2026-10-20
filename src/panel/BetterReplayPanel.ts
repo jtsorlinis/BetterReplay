@@ -69,7 +69,7 @@ interface SetupStatus {
     steps?: number;
     prompt?: string;  // one short instruction or question
     detail?: string;  // what it's for (the throttle's holds and lever phases, the gear above the runway)
-    progress?: number;  // the throttle sweep, 0..1
+    progress?: number;  // the throttle sweep or the spoiler calibration, 0..1
     task?: number;    // the pilot's instruction showing, of `tasks` in this step
     tasks?: number;
     taskDone?: boolean;  // the last one is done (things settling)
@@ -79,7 +79,7 @@ interface SetupStatus {
     methods?: number;
     bringBack?: boolean;  // bringing the control back from where the pilot left it: a pass of its own
     left?: number;        // seconds the method being tried has left (-1: not counting down)
-    attempts?: string[];  // how each method before it ended: "failed", "rejected", "unavailable"
+    attempts?: string[];  // how each method before it ended: "failed", "short", "rejected", "unavailable"
     note?: string;
     plan?: SetupStep[];
     buttons?: string[];
@@ -205,6 +205,7 @@ const SETUP_PHASES: { [phase: string]: string } = {
     positions: "Your turn",
     notice: "Get ready",
     sweep: "Hands off",
+    calibrate: "Hands off",
     done: "All done",
 };
 // Phases where the pilot is doing something: when what they were told changes there, they did it.
@@ -404,10 +405,11 @@ function prepItems(prep: PrepState): Array<[string, string]> {
 // left it comes first, worded as such; the replays of the whole movement then start again at 1.
 function attemptsHtml(setup: SetupStatus): string {
     const phase = setup.phase || "";
-    if (phase === "sweep") {
+    if (phase === "sweep" || phase === "calibrate") {
+        // The throttle's sweep, or the spoilers' event stepped through its range.
         const pct = Math.round(100 * Math.min(1, Math.max(0, setup.progress || 0)));
-        return '<div class="br-attempt current"><span class="br-attempt-mark"></span>Testing the throttle: ' +
-            pct + "%</div>";
+        return '<div class="br-attempt current"><span class="br-attempt-mark"></span>Testing the ' +
+            (phase === "sweep" ? "throttle" : "spoilers") + ": " + pct + "%</div>";
     }
     if (phase !== "replay" && phase !== "hold" && phase !== "back" && phase !== "ask") return "";
     const back = !!setup.bringBack;
@@ -416,14 +418,20 @@ function attemptsHtml(setup: SetupStatus): string {
     const done = setup.attempts || [];
     let html = "";
     for (let i = 0; i < done.length; ++i) {
-        html += '<div class="br-attempt failed"><span class="br-attempt-mark"></span>' + failed(i + 1) + "</div>";
+        // "short": it passed but went only part way, so the others are tried first.
+        html += done[i] === "short"
+            ? '<div class="br-attempt short"><span class="br-attempt-mark"></span>Method ' + (i + 1) +
+              " only went part way</div>"
+            : '<div class="br-attempt failed"><span class="br-attempt-mark"></span>' + failed(i + 1) + "</div>";
     }
     const n = setup.method || done.length + 1;
+    const again = n <= done.length;  // the one that went furthest, once more after the others
     // The countdown goes in its own span (attemptLeftText), so the row isn't redrawn every second.
     html += '<div class="br-attempt current br-enter"><span class="br-attempt-mark"></span>' +
         (phase === "ask" ? "Method " + n + " passed the check"
-            : trying(n) + '<span id="br-attempt-left" class="br-attempt-left"></span>') + "</div>";
-    for (let i = n; i < (setup.methods || 0); ++i) {
+            : trying(n) + (again ? " again" : "") + '<span id="br-attempt-left" class="br-attempt-left"></span>') +
+        "</div>";
+    for (let i = Math.max(n, done.length + 1); i < (setup.methods || 0); ++i) {
         html += '<div class="br-attempt reserved"><span class="br-attempt-mark"></span>' + trying(i + 1) + "</div>";
     }
     return html;

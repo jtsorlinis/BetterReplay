@@ -41,15 +41,18 @@ window.harnessSetup = (function () {
       "thrust this aircraft reports isn't where its levers are. Your movement didn't show which kind this is."],
     positions: ["", "The thrust this aircraft reports isn't where its levers are, so BetterReplay looks for the lever's own " +
       "position. Hold each position until it's ticked. On a lever with detents, the detent nearest halfway will do."],
-    notice: ["Hands off the throttle", "BetterReplay now moves the throttle itself, from idle to full and back, to learn " +
-      "where the lever's positions are, then tries reverse thrust if the aircraft has it. The engines spool up against " +
-      "the parking brake for about 20 seconds."],
-    sweep: ["Moving the throttle", "Keep your hands off the throttle while BetterReplay learns where the lever's positions are."],
+    notice: ["Set the parking brake", "Once it's set, BetterReplay moves the throttle itself, from idle to full and back, " +
+      "to learn where the lever's positions are, then tries reverse thrust if the aircraft has it. The engines spool up " +
+      "against the parking brake for 20 to 40 seconds."],
+    sweep: ["Moving the throttle", "Keep your hands off the throttle: BetterReplay moves it itself, from idle to full and " +
+      "back, to learn where the lever's positions are, then tries reverse thrust if the aircraft has it. The engines " +
+      "spool up against the parking brake for 20 to 40 seconds."],
   };
   const REVERSE_TEXT = {
-    notice: "BetterReplay now tries reverse thrust itself, to learn how to replay it on this aircraft. The engines spool " +
-      "up against the parking brake for a few seconds.",
-    sweep: "Keep your hands off the throttle while BetterReplay tries reverse thrust.",
+    notice: "Once it's set, BetterReplay tries reverse thrust itself, to learn how to replay it on this aircraft. The " +
+      "engines spool up against the parking brake for up to half a minute.",
+    sweep: "Keep your hands off the throttle while BetterReplay tries reverse thrust. The engines spool up against the " +
+      "parking brake for up to half a minute.",
   };
   // Recording stops while the setup runs (ControlSetup.cpp: kTakeoffDetail, kDoneDetail).
   const PAUSE_TEXT = {
@@ -68,6 +71,9 @@ window.harnessSetup = (function () {
   const AIRBORNE_SEC = 5;  // SetupFlow::kHoverAirborneSec
   const GEAR_WAIT_SEC = 6; // stands in for kLandGearWaitSec (30 s)
   const SWEEP_SEC = 8;
+  const CAL_SEC = 4;      // stands in for the spoiler calibration's 21 steps
+  const CAL_DETAIL = "That only took them part way. BetterReplay now moves the speed brake lever through its range to " +
+    "see where each setting puts it, then replays your movement through that.";
   const TASK_SEC = 1.6;   // the pilot does each instruction in this long, once started
   const HOLD_SEC = 3.2;   // a hold: half a second to get there, then the ring fills
   const SETTLE_SEC = 1.2; // then everything settles (the last instruction shows as done)
@@ -76,7 +82,8 @@ window.harnessSetup = (function () {
 
   // Starts at the gate with the engines off, so the "get ready" page shows first.
   const sim = { onGround: true, onRunway: false, taxiing: false, parkingBrake: false, engines: false, autoPilot: true,
-    nothingWorks: false, airbus: true, unclear: false, leverHidden: false, hoverOnGround: false, gearLeftUp: false };
+    nothingWorks: false, airbus: true, unclear: false, leverHidden: false, hoverOnGround: false, gearLeftUp: false,
+    partWay: false };
   const s = { declined: false, snoozed: false, results: null, methods: {}, active: false, plan: [], step: 0, phase: "",
     t: 0, moving: -1, task: 0, taskDone: false, hold: 0, method: 0, attempts: [], note: "", need: "", stoppedEarly: false,
     lever: false, hovering: false, gearUp: false, landThen: "", landPut: false };
@@ -89,6 +96,11 @@ window.harnessSetup = (function () {
     s.moving = -1;
     s.method = 0;
     s.attempts = [];
+    s.shortBest = -1;  // a method that passed but went only part way (ControlSetup.cpp: kPassFull)
+    s.shortPct = 0;
+    s.shortRerun = false;
+    s.askAnyway = false;
+    s.calibrated = false;  // the spoilers' event stepped through its range (Phase::Calibrate)
     s.need = "";
     s.lever = false;
     s.reverseOnly = false;
@@ -136,9 +148,11 @@ window.harnessSetup = (function () {
     s.phase = "positions"; s.t = 0; s.moving = -1; s.task = 0; s.taskDone = false; s.hold = 0; s.note = note || "";
   }
   // No lever to calibrate (the simvar is the lever, or its levers move with the thrust): only reverse is tried.
-  function reverseOnly() { s.lever = true; s.reverseOnly = true; s.phase = "notice"; s.note = ""; }
+  // The sweep starts by itself; the notice only waits for the parking brake (enterNotice).
+  function enterNotice() { s.note = ""; s.t = 0; s.phase = sim.parkingBrake ? "sweep" : "notice"; }
+  function reverseOnly() { s.lever = true; s.reverseOnly = true; enterNotice(); }
   // The lever's own variable, from the movement's holds (or, with "leverHidden", the holds once more).
-  function leverFromMovement() { if (sim.leverHidden) beginPositions(POSITIONS_AGAIN); else { s.phase = "notice"; s.note = ""; } }
+  function leverFromMovement() { if (sim.leverHidden) beginPositions(POSITIONS_AGAIN); else enterNotice(); }
   // The pilot's instructions, `m` s after starting to move: sets the one showing and a hold's
   // progress; returns how long ago the last one was done (negative until then).
   function follow(list, holds, m) {
@@ -165,16 +179,35 @@ window.harnessSetup = (function () {
   function startMethod(i) { s.method = i; s.phase = "replay"; s.t = 0; s.stoppedEarly = false; }
   function nextMethod() {
     const c = control();
-    if (s.method + 1 < METHODS[c].length) { startMethod(s.method + 1); return; }
+    s.askAnyway = false;
+    if (!s.shortRerun && s.method + 1 < METHODS[c].length) { startMethod(s.method + 1); return; }
+    // None went further than the one that went part way: it once more, to ask about.
+    if (!s.shortRerun && s.shortBest >= 0) { s.shortRerun = s.askAnyway = true; startMethod(s.shortBest); return; }
     s.note = "Couldn't replay the " + c + " on this aircraft; replays will leave them alone.";
     finish("failed");
   }
   function evaluate() {
     const c = control();
     // On the A320neo V2 only the key events move the throttle.
-    const passes = sim.airbus && c === "throttle" ? METHODS[c][s.method][0].indexOf("key events") === 0 : METHODS[c][s.method][1];
+    const passing = (i) => sim.airbus && c === "throttle" ? METHODS[c][i][0].indexOf("key events") === 0 : METHODS[c][i][1];
+    const passes = passing(s.method);
+    // "The first passing method only goes part way": 70% as far as the pilot.
+    const pct = sim.partWay && passes && METHODS[c].findIndex((m, i) => passing(i)) === s.method &&
+      !(c === "spoilers" && s.calibrated) ? 70 : 100;
+    // The spoilers' part-way event: stepped through its range, then replayed through that (all the way).
+    if (!s.stoppedEarly && !sim.nothingWorks && passes && pct < 90 && !s.askAnyway && c === "spoilers" && !s.calibrated) {
+      s.calibrated = true;
+      s.phase = "calibrate";
+      s.t = 0;
+      return;
+    }
+    if (!s.stoppedEarly && !sim.nothingWorks && passes && pct < 90 && !s.askAnyway) {
+      if (s.shortBest < 0 || pct > s.shortPct) { s.shortBest = s.method; s.shortPct = pct; }
+      if (s.method + 1 < METHODS[c].length || s.shortBest !== s.method) { s.attempts.push("short"); nextMethod(); return; }
+    }
     if (s.stoppedEarly || (!sim.nothingWorks && passes)) {
-      s.note = s.stoppedEarly ? "Stopped early: the aircraft started to roll. Is the parking brake set?" : "";
+      s.note = s.stoppedEarly ? "Stopped early: the aircraft started to roll. Is the parking brake set?" :
+        pct < 90 && s.shortBest === s.method ? "This one went " + pct + "% as far as you did. No other method went further." : "";
       s.phase = "ask";
       return;
     }
@@ -214,9 +247,11 @@ window.harnessSetup = (function () {
       evaluate();
     } else if (s.phase === "positions") {
       const m = pilotTime();
-      if (m >= 0 && follow(POSITION_TASKS, 2, m) >= SETTLE_SEC) { s.note = ""; s.phase = "notice"; }
+      if (m >= 0 && follow(POSITION_TASKS, 2, m) >= SETTLE_SEC) enterNotice();
     } else if (s.phase === "notice") {
-      s.need = sim.parkingBrake ? "" : "Set the parking brake";
+      if (sim.parkingBrake) enterNotice();
+    } else if (s.phase === "calibrate" && s.t > CAL_SEC) {
+      startMethod(s.method);
     } else if (s.phase === "sweep" && s.t > SWEEP_SEC) {
       finish("ok");
     }
@@ -269,9 +304,15 @@ window.harnessSetup = (function () {
       leverFromMovement();
       return true;
     }
-    if (p === "notice" && a === "begin") { s.phase = "sweep"; s.t = 0; return true; }
-    if (p === "ask" && a === "no") { s.attempts.push("rejected"); s.note = ""; nextMethod(); return true; }
-    if (p === "ask" && a === "again") { startMethod(s.method); return true; }
+    if (p === "notice" && (a === "ready" || a === "begin")) { s.phase = "sweep"; s.t = 0; return true; }
+    if (p === "ask" && a === "no") {
+      s.attempts.push("rejected");
+      s.note = "";
+      if (s.method === s.shortBest) s.shortBest = -1;
+      nextMethod();
+      return true;
+    }
+    if (p === "ask" && a === "again") { s.askAnyway = true; startMethod(s.method); return true; }
     if (p === "retry" && a === "retry") { s.note = ""; beginUser(); return true; }
     if (p === "prepare" && a === "ready" && (control() === "gear" ? !sim.onGround : sim.onGround)) { beginUser(); return true; }
     if (p === "done" && a === "close") { s.active = false; return true; }
@@ -307,16 +348,16 @@ window.harnessSetup = (function () {
     const prompts = {
       prepare: s.need || (TASKS[c] || [""])[0], user: (TASKS[c] || [])[s.task], takeoff: "Take off",
       retry: "That didn't register", replay: WATCH[c], ask: QUESTIONS[c], done: "Setup finished",
-      query: LEVER_TEXT.query[0], positions: POSITION_TASKS[s.task] || "", notice: s.need || LEVER_TEXT.notice[0],
+      query: LEVER_TEXT.query[0], positions: POSITION_TASKS[s.task] || "", notice: LEVER_TEXT.notice[0],
       sweep: LEVER_TEXT.sweep[0], hover: s.need || "Lifting the aircraft off the runway",
       land: s.landPut || (!s.gearUp && s.t > 0.1) ? "Putting the aircraft back" : "Waiting for the gear to come down",
-      lower: "Lower the gear",
+      lower: "Lower the gear", calibrate: WATCH[c],
     };
     const buttons = {
       prepare: (s.need ? ["ready"] : []).concat(["skip", "cancel"]), user: ["skip", "cancel"], takeoff: ["skip", "later"],
       retry: ["retry", "skip", "cancel"], replay: ["cancel"], ask: ["yes", "no", "again", "skip"], done: ["close"],
-      query: ["yes", "no"], positions: ["skip", "cancel"], notice: ["begin", "skip", "cancel"], sweep: ["cancel"],
-      hover: ["skip", "cancel"], lower: ["cancel"],
+      query: ["yes", "no"], positions: ["skip", "cancel"], notice: ["ready", "skip", "cancel"], sweep: ["cancel"],
+      hover: ["skip", "cancel"], lower: ["cancel"], calibrate: ["cancel"],
     }[s.phase] || [];
     const pilot = s.phase === "user" || s.phase === "positions" || s.phase === "lower";
     const holding = pilot && c === "throttle" && s.task < 2;
@@ -325,9 +366,9 @@ window.harnessSetup = (function () {
       phase: s.phase, step: done ? "" : c, title: done ? "Done" : TITLE[c], stepNo: done ? s.plan.length : s.step + 1,
       steps: s.plan.length, prompt: prompts[s.phase] || "", note: s.note,
       detail: s.reverseOnly && REVERSE_TEXT[s.phase] ? REVERSE_TEXT[s.phase] :
-        LEVER_TEXT[s.phase] ? LEVER_TEXT[s.phase][1] : s.phase === "user" && holding ? HOLD_DETAIL :
+        LEVER_TEXT[s.phase] ? LEVER_TEXT[s.phase][1] : s.phase === "calibrate" ? CAL_DETAIL : s.phase === "user" && holding ? HOLD_DETAIL :
         hoverDetail || PAUSE_TEXT[s.phase] || "",
-      progress: s.phase === "sweep" ? Math.min(1, s.t / SWEEP_SEC) : 0,
+      progress: s.phase === "sweep" ? Math.min(1, s.t / SWEEP_SEC) : s.phase === "calibrate" ? Math.min(1, s.t / CAL_SEC) : 0,
       task: pilot && s.phase !== "lower" ? s.task : 0,
       tasks: done ? 0 : s.phase === "lower" ? 1 : s.phase === "positions" ? POSITION_TASKS.length : TASKS[c].length,
       taskDone: pilot && s.taskDone, holdTask: holding, hold: holding ? s.hold : 0,
@@ -373,7 +414,8 @@ window.harnessSetup = (function () {
       ["autoPilot", "Do each movement automatically"], ["nothingWorks", "Nothing works on this aircraft"],
       ["airbus", "Throttle simvar isn't the lever (A320)"], ["unclear", "...and the movement doesn't tell"],
       ["leverHidden", "...and doesn't show the lever's variable"],
-      ["hoverOnGround", "Counts as on the ground above the runway"], ["gearLeftUp", "A failed gear method leaves it up"]];
+      ["hoverOnGround", "Counts as on the ground above the runway"], ["gearLeftUp", "A failed gear method leaves it up"],
+      ["partWay", "The first passing method only goes part way"]];
     toggles.forEach((t) => {
       const label = document.createElement("label");
       label.style.cssText = "display:block;margin:4px 0;cursor:pointer;";

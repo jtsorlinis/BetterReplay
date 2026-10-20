@@ -58,7 +58,7 @@ struct SetupFacts {
     int engines = 1;
     bool gearRetractable = true;
     bool hasSpoilers = true;
-    int flapPositions = 0;  // FLAPS NUM HANDLE POSITIONS (including up)
+    int flapPositions = 0;  // FLAPS NUM HANDLE POSITIONS: the highest handle index (up is 0)
     bool hasReverse = false;  // THROTTLE LOWER LIMIT below zero: thrust reversers
 };
 
@@ -317,10 +317,11 @@ private:
     // the way back replayed from there (or from where a method's replay left it). Hover: the gear
     // step on the ground, lifting the aircraft above the runway; Land: waiting for its gear to be
     // down, putting it back and waiting for the sim to show it there; Lower: the pilot is asked to
-    // lower the gear.
+    // lower the gear. Calibrate: a spoiler key event that took them only part way is stepped through
+    // its range, to replay through where each value puts them.
     enum class Phase {
         Idle, Prepare, Takeoff, User, Retry, Replay, Hold, Ask, Done, Query, Positions, Notice, Sweep, Away, Back,
-        Hover, Land, Lower
+        Hover, Land, Lower, Calibrate
     };
     enum class LeverVerdict { Steady, Creeps, Unclear };  // the lever simvar while the hand was still
 
@@ -330,7 +331,7 @@ private:
     void userFrame(double dt, const Frame& live);
     void scanFrame(double h, double o);  // a capture-clock scan, every kScanInterval
     void resetHolds();
-    void trackHolds(double h, double dh, bool enough);  // the throttle's holds (task_ 0 and 1)
+    void trackHolds(const Frame& live, double h, bool enough);  // the throttle's holds (task_ 0 and 1)
     void analyze();
     LeverVerdict checkLever();
     void confirmMethod();  // the pilot said yes to the method being tried
@@ -384,12 +385,16 @@ private:
     // The method being tried: seconds until it's given up on if nothing moves, or until the rest
     // of its replay has played; -1 when neither (on its way back to rest, settling, asking).
     double attemptLeft() const;
+    double fromRest(double v, double rest) const;  // how far from where the pilot started it
     bool atRest(const Frame& live) const;
+    bool legsMidway(const Frame& live) const;  // the gear's legs going in turn, between them
+    bool legMoved_[3] = {};                    // which legs moved in the pilot's movement
     // The gear's replay, for the log: each command (0 up, 1 down) and where the gear went until the next.
     void noteGearCommand(double command, const Frame& live);
     void logGearCommand() const;
     bool rolling(const Frame& live) const;
     void evaluate(const Frame& live);
+    void judge(bool passed, bool reached, bool returned, int pct);  // evaluate's verdict, acted on
     void nextMethod();
     void finishStep(ControlState state, const ControlMethod& method, bool confirmed);
     // The gear step on the ground. LandThen: what follows putting the aircraft back: the next
@@ -455,17 +460,52 @@ private:
     double outcomeStillSince_ = 0.0;
     size_t task_ = 0;        // the pilot's instruction showing ("Deploy the spoilers", "Retract...")
     bool taskDone_ = false;  // the last one is done; waiting for things to settle
+    // The throttle's holds, each on the lever simvar and on the throttle's input events (the
+    // cockpit lever, where the aircraft has them): either one held still is the hand still.
     static constexpr size_t kHoldPast = 10;
-    double holdPast_[kHoldPast] = {};  // the throttle's holds: the simvar over the last second (a ring)
-    size_t holdSamples_ = 0;
-    double holdNext_ = 0.0;
-    double holdSince_ = 0.0;    // since when it's been moving slowly enough to be held
-    double holdLevel_ = NAN;    // where the last hold was, and when it was done
-    double holdDoneAt_ = 0.0;
+    struct HoldSignal {
+        double past[kHoldPast] = {};  // over the last second (a ring)
+        size_t samples = 0;
+        double next = 0.0;
+        double since = 0.0;  // since when it's been moving slowly enough to be held
+        double rest = NAN;   // where it started
+        double level = NAN;  // where it was at the last hold
+        bool moved = false;  // it has gone away from where it started
+        double lastSecond(double v) const;  // how far it moved in the last second
+    };
+    HoldSignal holdSim_, holdInput_;
+    double holdProgress(HoldSignal& s, double v, bool enough);  // how far through a hold (0..1)
+    double holdDoneAt_ = 0.0;   // when the last hold was done
     double hold_ = 0.0;         // how far the hold showing is (0..1)
+    double holdLogAt_ = 0.0;    // waiting this long for a hold logs what the throttle is doing
     bool moved_ = false;
     double movedAt_ = 0.0;
     double windowFrom_ = 0.0;
+    // A method that passed the check but went less than kPassFull as far as the pilot: the others
+    // are tried first, and if none went further it's replayed once more and asked about.
+    int shortBest_ = -1;       // the one that went furthest so far
+    int shortPct_ = 0;         // how far, in percent of the pilot's movement
+    bool shortRerun_ = false;  // replaying it once more, after the others
+    bool askAnyway_ = false;   // this replay is asked about however far it goes (that, or Watch again)
+    // The spoiler calibration (Phase::Calibrate): the event stepped through its range, where each
+    // value put the handle; replays with that event go through it (drivenFrame).
+    LeverCalibration spoilerCal_;
+    unsigned calTried_ = 0;  // the events stepped already in this step (bit 0 SPOILERS_SET, 1 AXIS_SPOILER_SET)
+    std::vector<LeverPoint> calPoints_;
+    int calStep_ = 0;
+    double calStepT_ = 0.0;   // in the step
+    double calStill_ = 0.0;   // since when the handle has been still
+    double calAnchor_ = NAN;
+    bool calFresh_ = false;   // the step's value not sent yet
+    bool calBack_ = false;    // all steps done: back to where the pilot started them
+    bool calPassed_ = false, calReached_ = false;  // how the replay before it went
+    int calPct_ = 0;
+    Frame calFrame_, driveFrame_;
+    bool canCalibrate(const ControlMethod& m) const;
+    bool beginCalibrate();
+    void calibrateFrame(double dt, const Frame& live);
+    void finishCalibrate();
+    const Frame& drivenFrame(const Frame& f, const ControlMethod& m);
     bool judgeOutcome_ = true;  // check replays on the outcome (surfaces, N1), else on the handle
     double userPeak_ = 0.0;     // the pilot's movement on that signal
     double clipMovedAt_ = NAN;  // when it started moving, from the start of mini_

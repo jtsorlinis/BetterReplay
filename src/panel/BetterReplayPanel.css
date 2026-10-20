@@ -871,6 +871,21 @@ button {
   transform: rotate(-45deg);
 }
 
+/* passed, but went only part way (the others are tried first): an amber dash */
+.br-attempt.short .br-attempt-mark {
+  background: rgba(245, 177, 61, 0.16);
+}
+
+.br-attempt.short .br-attempt-mark::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  left: 5px;
+  width: 12px;
+  height: 2px;
+  background: var(--br-amber);
+}
+
 /* current: a pulsing ring (blue while replaying, green when it passed the check) */
 .br-attempt.current .br-attempt-mark {
   border: 3px solid var(--br-blue);
