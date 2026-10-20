@@ -116,6 +116,7 @@ private:
         kExAirspeedIndicated,
         kExJetThrust1,
         kExJetThrust2,
+        kExSpoilersArmed,  // for ground spoilers in replays
         kExtraCount
     };
 
@@ -393,6 +394,7 @@ private:
     int throttleOffFrames_ = 0;
     bool firstThrottleEvent_ = false;
     double throttleLowerLimit_ = NAN;  // THROTTLE LOWER LIMIT (percent, negative with reversers)
+    double spoilersArmed_ = NAN;       // SPOILERS ARMED
     // The pilot's hardware throttle axis per engine (0..1), from the key events; NaN until it moves
     // (and after a flight load, when the aircraft's levers start from scratch).
     double throttleAxis_[4] = {NAN, NAN, NAN, NAN};
@@ -499,6 +501,8 @@ private:
     double n1DiffSum_[4] = {};
     double n1DiffMax_[4] = {};
     int n1Frames_[4] = {};
+    double n1RevDiffSum_[4] = {};  // where the clip's reversers were out
+    int n1RevFrames_[4] = {};
     double n1Last_[4] = {};      // live, then the clip: direction changes of each
     double n1ClipLast_[4] = {};
     int n1Dir_[4] = {};

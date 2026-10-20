@@ -613,6 +613,91 @@ double spoilerCommand(const LeverCalibration& cal, const ControlMethod& m, doubl
     return invertLever(cal.forward, handle);
 }
 
+double spoilerReach(const LeverCalibration& cal) {
+    if (!cal.valid()) return NAN;
+    double top = -INFINITY;
+    for (const LeverPoint& p : cal.forward) top = std::isfinite(p.lever) && p.lever > top ? p.lever : top;
+    return std::isfinite(top) ? top : NAN;
+}
+
+std::vector<GroundSpoilerStretch> groundSpoilerStretches(const LeverCalibration& cal, const std::vector<Frame>& frames) {
+    std::vector<GroundSpoilerStretch> out;
+    const double reach = spoilerReach(cal);
+    if (!std::isfinite(reach)) return out;
+    const double beyond = reach + kGroundSpoilerMargin;
+    for (size_t i = 0; i < frames.size(); ++i) {
+        if (!(frames[i].v[kSpoilersHandle] > beyond) || !(frames[i].v[kOnGround] >= 0.5)) continue;
+        // Until the handle is back within the lever's reach (through gaps in the clip).
+        size_t j = i;
+        while (j + 1 < frames.size() && !(frames[j + 1].v[kSpoilersHandle] <= beyond)) ++j;
+        out.push_back({frames[i].t, frames[j].t});
+        i = j;
+    }
+    return out;
+}
+
+void SpoilerArming::begin(std::vector<GroundSpoilerStretch> stretches, double reach) {
+    clear();
+    stretches_ = std::move(stretches);
+    reach_ = reach;
+}
+
+void SpoilerArming::clear() {
+    stretches_.clear();
+    armed_ = deployed_ = gaveUp_ = armChecked_ = false;
+    stretch_ = -1;
+    armedT_ = waitFrom_ = NAN;
+}
+
+SpoilerArming::Step SpoilerArming::step(double t, double clipHandle, double liveHandle, double liveArmed, bool jumped) {
+    Step out;
+    // The stretch t is in, else the one it's armed ahead of (the clip's lever retracted there).
+    int in = -1;
+    bool inside = false;
+    for (size_t i = 0; i < stretches_.size() && in < 0; ++i) {
+        if (t >= stretches_[i].startT && t <= stretches_[i].endT) {
+            in = static_cast<int>(i);
+            inside = true;
+        }
+    }
+    for (size_t i = 0; i < stretches_.size() && in < 0; ++i) {
+        // Armed with the lever retracted; then up to the stretch, as the clip's ground spoilers
+        // start coming out (the A380's handle 0.38 to 0.57 before it's beyond the lever's reach).
+        const double start = stretches_[i].startT;
+        const bool armedFor = stretch_ == static_cast<int>(i) && !jumped;
+        if (t >= start - kLeadSec && t < start && (armedFor || !(clipHandle > kRetractedMax))) in = static_cast<int>(i);
+    }
+    if (in < 0) {
+        out.disarm = armed_;
+        armed_ = deployed_ = gaveUp_ = false;
+        stretch_ = -1;
+        return out;
+    }
+    if (in != stretch_ || jumped) {
+        // Another stretch, or a jump: armed (again: the lever may have been moved since), and
+        // the ground spoilers waited for afresh.
+        stretch_ = in;
+        deployed_ = gaveUp_ = armChecked_ = false;
+        waitFrom_ = NAN;
+        armedT_ = t;
+        armed_ = out.arm = true;
+    }
+    if (gaveUp_) return out;
+    out.mode = Mode::Armed;
+    if (!armChecked_ && t - armedT_ >= kArmCheckSec) {
+        armChecked_ = true;
+        out.armAgain = std::isfinite(liveArmed) && liveArmed < 0.5;
+    }
+    if (!inside) return out;
+    if (!std::isfinite(waitFrom_)) waitFrom_ = t;
+    if (!deployed_ && liveHandle > reach_ + kGroundSpoilerMargin) deployed_ = out.deployed = true;
+    if (!deployed_ && t - waitFrom_ >= kWaitSec) {
+        gaveUp_ = out.gaveUp = true;
+        out.mode = Mode::Lever;
+    }
+    return out;
+}
+
 bool reversing(const Frame& f, int engine) {
     if (engine < 0 || engine > 3) return false;
     const double nozzle = f.v[kReverserNozzle1 + engine];
@@ -647,13 +732,19 @@ ReverseToggle::Step ReverseToggle::step(bool clipReverse, bool liveReverse, doub
     else if (!heading) ++evidence_;
     if (evidence_ >= kEvidenceFrames) {
         on_ = !on_;
-        evidence_ = 0;
+        evidence_ = probe_ = 0;
         ++corrections_;
         out.corrected = true;
     }
+    const bool was = confirmed_;
     confirmed_ = on_ && (confirmed_ || liveReverse);
     if (clipReverse == on_) {
         idle_ = 0;
+        if (on_ && !confirmed_ && last_ == Drive::Reverse && !liveForward && !(moved > kHeadingPct)) {
+            // The first amount sent, and no forward thrust from it (a toggle not taken makes some).
+            confirmed_ = ++probe_ >= kProbeFrames;
+        }
+        if (confirmed_ && !was) out.confirmed = liveReverse ? Confirmed::Shown : Confirmed::NoThrust;
         out.drive = last_ = on_ ? Drive::Reverse : Drive::Forward;
         out.cap = confirmed_ ? 1.0 : kProbeAmount;
         return out;
@@ -666,7 +757,7 @@ ReverseToggle::Step ReverseToggle::step(bool clipReverse, bool liveReverse, doub
     idle_ = 0;
     on_ = !on_;
     confirmed_ = false;
-    evidence_ = 0;
+    evidence_ = probe_ = 0;
     wait_ = kSettleFrames;
     ++tries_;
     ++toggles_;

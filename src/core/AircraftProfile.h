@@ -388,6 +388,64 @@ const char* spoilerPositionEvent(const ControlMethod& m);
 // The spoilers' handle value to send with `m` for the clip's `handle`: through the calibration
 // where it was made with that event, else the handle as it is.
 double spoilerCommand(const LeverCalibration& cal, const ControlMethod& m, double handle);
+
+// Ground spoilers: where the clip's spoiler handle went further than the spoilers' event can put
+// it (the top of its calibration), from a moment on the ground. The A380's lever, and SPOILERS_SET,
+// take the handle to 0.52 at full (the speedbrake); armed, its ground spoilers took it to 1 at
+// touchdown, the surfaces all the way out, and a replay through the lever got them half out.
+struct GroundSpoilerStretch {
+    double startT;  // clip time
+    double endT;
+};
+// The furthest the calibrated event puts the handle; NaN without a calibration.
+double spoilerReach(const LeverCalibration& cal);
+std::vector<GroundSpoilerStretch> groundSpoilerStretches(const LeverCalibration& cal, const std::vector<Frame>& frames);
+constexpr double kGroundSpoilerMargin = 0.05;  // beyond the reach by this much
+
+// Ground spoilers in a replay: the spoilers armed ahead of each stretch, with the clip's lever
+// retracted, and the handle left to the aircraft through it; back to the lever after, disarmed.
+// If the aircraft's ground spoilers haven't come out kWaitSec into a stretch, the lever as the clip
+// has it for the rest of it, as before. Arming is checked by SPOILERS ARMED, and tried once more
+// with SPOILERS_ARM_ON if it didn't show.
+class SpoilerArming {
+public:
+    enum class Mode : uint8_t {
+        Lever,  // the clip's handle through the event
+        Armed,  // armed, the handle left to the aircraft
+    };
+    struct Step {
+        Mode mode = Mode::Lever;
+        bool arm = false;       // SPOILERS_ARM_SET 1 now
+        bool armAgain = false;  // SPOILERS_ARM_ON now: the first didn't show
+        bool disarm = false;    // back to how they were before (SPOILERS_ARM_SET), then the lever at once
+        bool deployed = false;  // the aircraft's ground spoilers came out
+        bool gaveUp = false;    // they didn't: the lever from here
+    };
+    void begin(std::vector<GroundSpoilerStretch> stretches, double reach);
+    void clear();  // no stretches, and nothing armed (put it back first: armedByUs)
+    bool any() const { return !stretches_.empty(); }
+    const std::vector<GroundSpoilerStretch>& stretches() const { return stretches_; }
+    // One frame at clip time t. clipHandle: the clip's; liveHandle, liveArmed: the aircraft's
+    // (SPOILERS ARMED, NaN if unknown). jumped: a seek or the start.
+    Step step(double t, double clipHandle, double liveHandle, double liveArmed, bool jumped);
+    bool armedByUs() const { return armed_; }
+
+    static constexpr double kLeadSec = 30.0;     // armed this long before a stretch
+    static constexpr double kRetractedMax = 0.1; // the clip's handle at most this there (the A380's armed: 0.06)
+    static constexpr double kWaitSec = 3.0;      // for the ground spoilers, from the stretch or a jump into it
+    static constexpr double kArmCheckSec = 1.0;  // for SPOILERS ARMED to show it
+
+private:
+    std::vector<GroundSpoilerStretch> stretches_;
+    double reach_ = NAN;
+    bool armed_ = false;
+    bool deployed_ = false;
+    bool gaveUp_ = false;
+    bool armChecked_ = false;
+    int stretch_ = -1;     // the stretch armed for
+    double armedT_ = NAN;  // clip time armed at
+    double waitFrom_ = NAN;
+};
 // Whether engine `engine` (0-based) is in reverse in this frame, by what the reversers did: the
 // reverse nozzles out, or the lever simvar below idle. Some aircraft reverse without setting
 // GENERAL ENG REVERSE THRUST ENGAGED (the PMDG 737 with "decrease throttle" held), or set it
@@ -408,13 +466,19 @@ public:
         Idle,     // the levers at idle, around a toggle
         Reverse,  // the clip's reverse amount (throttle simvar / THROTTLE LOWER LIMIT), at most `cap`
     };
+    enum class Confirmed : uint8_t {
+        No,
+        Shown,     // the aircraft showed reverse
+        NoThrust,  // the small first amount made no forward thrust, though it showed no reverse either
+    };
     struct Step {
         Drive drive = Drive::Forward;
-        // Until the aircraft has shown reverse, a small amount: if it didn't take the toggle, that's
-        // a little forward thrust, which shows it.
+        // Until the aircraft is known to be in reverse, a small amount: if it didn't take the
+        // toggle, that's a little forward thrust, which shows it.
         double cap = 1.0;
         bool toggle = false;     // send the toggle now, after the levers' idle
         bool corrected = false;  // the aircraft showed it isn't in the mode it was thought to be in
+        Confirmed confirmed = Confirmed::No;  // known to be in reverse from this frame, and how
     };
     // One frame. clipReverse: the clip is in reverse here (reversing(), any engine); liveReverse:
     // the aircraft is; liveThrottle: its throttle simvar (the highest engine's), forward thrust
@@ -424,7 +488,7 @@ public:
     bool busy() const { return on_ || wait_ > 0; }  // or a toggle is still settling
     void forget() {                                 // the aircraft was reset: out of reverse
         on_ = confirmed_ = false;
-        wait_ = 0;
+        wait_ = probe_ = 0;
     }
     int toggles() const { return toggles_; }
     int corrections() const { return corrections_; }
@@ -433,6 +497,10 @@ public:
     static constexpr double kProbeAmount = 0.2;
     static constexpr double kHeadingPct = 0.01;  // a frame: the throttle simvar heading back to idle
     static constexpr int kSettleFrames = 30;     // after a toggle: idle this long, or until it shows reverse
+    // The first amount this long without forward thrust, the simvar not rising: the toggle took.
+    // The A380 shows nothing at it: a replay stayed there through the clip's full reverse, its
+    // reversing engines' N1 at idle.
+    static constexpr int kProbeFrames = 30;
     static constexpr int kIdleFrames = 300;      // the longest wait for the throttle to come back to idle
     static constexpr int kEvidenceFrames = 10;   // the aircraft showing otherwise this long corrects the mode
     static constexpr int kTries = 3;             // toggles each time the clip goes in or out of reverse
@@ -446,6 +514,7 @@ private:
     int wait_ = 0;
     int idle_ = 0;
     int evidence_ = 0;
+    int probe_ = 0;  // frames at the first amount without forward thrust
     int tries_ = 0;
     int toggles_ = 0;
     int corrections_ = 0;

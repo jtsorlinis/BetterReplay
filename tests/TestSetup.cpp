@@ -1538,8 +1538,9 @@ TEST(Profile_LeverCalibrationTables) {
 namespace {
 
 // The A350 in a replay: "toggle reverse" switches it in or out of reverse with the levers at
-// idle (or not at all, `ignore` times); in reverse the throttle simvar heads for -20% x the axis,
-// forward for 100% x the axis, 1.6% at least (idle). Nothing shows at reverse idle.
+// idle (or not at all, `ignore` times); in reverse the throttle simvar heads for -20% x the axis
+// (beyond `revIdleAxis`, reverse idle below it), forward for 100% x the axis, 1.6% at least
+// (idle). Nothing shows at reverse idle.
 struct ToggleAircraft {
     bool reverse = false;
     double axis = 0.0;
@@ -1547,6 +1548,7 @@ struct ToggleAircraft {
     int toggles = 0;
     int ignore = 0;
     double lagSec = 0.4;  // the simvar behind the lever (the A350's: about 1.5 s)
+    double revIdleAxis = 0.0;
     void toggle() {
         ++toggles;
         if (ignore > 0) {
@@ -1556,7 +1558,8 @@ struct ToggleAircraft {
         if (axis < 0.01) reverse = !reverse;
     }
     void step(double dt) {
-        const double target = reverse ? -20.0 * axis : std::fmax(1.6, 100.0 * axis);
+        const double amount = std::fmax(0.0, (axis - revIdleAxis) / (1.0 - revIdleAxis));
+        const double target = reverse ? -20.0 * amount : std::fmax(1.6, 100.0 * axis);
         thr += (target - thr) * std::fmin(1.0, dt / lagSec);
     }
     bool reversing() const { return thr < -1.0; }
@@ -1615,20 +1618,51 @@ TEST(Playback_ToggleReverseReplaysTheAmount) {
     }
 }
 
+// The A380: the first half of the axis is reverse idle, so the small first amount shows nothing.
+// No forward thrust from it either, so the toggle took: the clip's full reverse is replayed, not
+// reverse idle throughout.
+TEST(Playback_ToggleReverseWithAReverseIdleZone) {
+    for (const double lag : {0.4, 1.5}) {
+        TogglePlayback p;
+        p.ac.lagSec = lag;
+        p.ac.revIdleAxis = 0.5;
+        p.play(2.0, 1.6);
+        ReverseToggle::Confirmed how = ReverseToggle::Confirmed::No;
+        for (int i = 0; i < 60 * 8; ++i) {
+            const ReverseToggle::Step st = p.rt.step(true, p.ac.reversing(), p.ac.thr);
+            if (st.confirmed != ReverseToggle::Confirmed::No) how = st.confirmed;
+            p.ac.axis = st.drive == ReverseToggle::Drive::Reverse ? st.cap : 0.0;  // the clip's full reverse
+            if (st.toggle) p.ac.toggle();
+            p.ac.step(1.0 / 60.0);
+            p.mostForward = std::fmax(p.mostForward, p.ac.thr);
+        }
+        CHECK(how == ReverseToggle::Confirmed::NoThrust);
+        CHECK(p.ac.reverse);
+        CHECK_NEAR(p.ac.thr, -20.0, 0.5);
+        CHECK(p.mostForward < 2.0);
+        p.play(3.0 * lag / 0.4, 1.6);
+        CHECK(!p.ac.reverse);
+        CHECK_EQ(p.ac.toggles, 2);
+        CHECK_EQ(p.rt.corrections(), 0);
+    }
+}
+
 // A toggle the aircraft didn't take shows: going into reverse, as a little forward thrust from
 // the small first amount; coming out, as reverse where the clip has forward thrust. Either way
-// it's toggled again, and the aircraft ends up out of reverse.
+// it's toggled again, and the aircraft ends up out of reverse. A simvar as slow as the A350's
+// isn't taken for no thrust while it's still rising.
 TEST(Playback_ToggleReverseRetriesAToggleNotTaken) {
-    {
+    for (const double lag : {0.4, 1.5}) {
         TogglePlayback p;
+        p.ac.lagSec = lag;
         p.ac.ignore = 1;
         p.play(1.0, 1.6);
-        p.play(5.0, -10.0);
+        p.play(5.0 * lag / 0.4, -10.0);
         CHECK(p.ac.reverse);
         CHECK_NEAR(p.ac.thr, -10.0, 0.5);
         CHECK(p.mostForward < 25.0);  // the probe's thrust, briefly
         CHECK(p.rt.corrections() >= 1);
-        p.play(3.0, 1.6);
+        p.play(3.0 * lag / 0.4, 1.6);
         CHECK(!p.ac.reverse);
         CHECK_EQ(p.ac.toggles, 3);
     }
@@ -1805,6 +1839,151 @@ TEST(Playback_ThrustFollowerTracksAnApproach) {
     follower.reset();
     CHECK_NEAR(follower.step(0.0, 0.0, 0.3, 1.0, 0.0), 0.3, 1e-12);
     CHECK_NEAR(follower.step(100.0, 100.0, 0.3, 1.0, 0.0), 1.0, 1e-12);
+}
+
+namespace {
+
+// The A380's spoilers: SPOILERS_SET puts the handle at most at 0.52 (the speedbrake), as the
+// setup's calibration found.
+LeverCalibration a380Spoilers() {
+    LeverCalibration cal;
+    cal.var = "SPOILERS_SET";
+    cal.forward = leverTable({{0.0, 0.0}, {0.5, 0.389}, {1.0, 0.5185}});
+    return cal;
+}
+
+// The A380's landing at 30 Hz: on the ground at 180 s, its ground spoilers (armed) take the handle
+// from 0 to 1 within a second, in again at 231 s, the lever then 0.08 on its way back.
+std::vector<Frame> groundSpoilerLanding() {
+    std::vector<Frame> frames;
+    for (int i = 0; i <= 240 * 30; ++i) {
+        Frame f;
+        for (double& v : f.v) v = 0.0;
+        f.t = i / 30.0;
+        f.v[kOnGround] = f.t >= 180.0 ? 1.0 : 0.0;
+        double h = 0.0;
+        if (f.t >= 180.1 && f.t < 181.0) h = 0.38 + (f.t - 180.1) / 0.9 * 0.62;
+        if (f.t >= 181.0 && f.t < 231.0) h = 1.0;
+        if (f.t >= 231.0) h = std::fmax(0.0, 0.08 - (f.t - 231.0) * 0.01);
+        f.v[kSpoilersHandle] = h;
+        frames.push_back(f);
+    }
+    return frames;
+}
+
+// An A380 in a replay: armed, its ground spoilers come out from 180 s, handle 1 within a second
+// (`takesArming` false: it ignores the arming, and SPOILERS ARMED stays 0); disarmed, they go in.
+struct ArmingPlayback {
+    SpoilerArming a;
+    bool takesArming = true;
+    bool armed = false;
+    double handle = 0.0;
+    int arms = 0, armAgains = 0, disarms = 0, deployed = 0, gaveUp = 0;
+    double armedAt = NAN, deployedAt = NAN, gaveUpAt = NAN, disarmedAt = NAN;
+    std::vector<double> leverAt;  // clip times driven by the lever
+    void frame(const Frame& f, bool jumped) {
+        const SpoilerArming::Step st = a.step(f.t, f.v[kSpoilersHandle], handle, armed ? 1.0 : 0.0, jumped);
+        if (st.arm) {
+            ++arms;
+            armedAt = f.t;
+            armed = takesArming;
+        }
+        if (st.armAgain) ++armAgains;
+        if (st.disarm) {
+            ++disarms;
+            disarmedAt = f.t;
+            armed = false;
+        }
+        if (st.deployed) {
+            ++deployed;
+            deployedAt = f.t;
+        }
+        if (st.gaveUp) {
+            ++gaveUp;
+            gaveUpAt = f.t;
+        }
+        if (st.mode == SpoilerArming::Mode::Lever) {
+            handle = std::fmin(f.v[kSpoilersHandle], 0.5185);  // the lever: no further than 0.52
+            leverAt.push_back(f.t);
+        } else if (armed && f.t >= 180.0) {
+            handle = std::fmin(1.0, handle + 1.0 / 30.0);
+        }
+    }
+};
+
+}  // namespace
+
+// The A380's ground spoilers took the handle to 1, where its lever reaches 0.52: one stretch, from
+// the moment on the ground it went beyond, to where it came back. Not without a calibration, nor
+// beyond the reach in the air.
+TEST(Playback_GroundSpoilerStretchesFromTheClip) {
+    const std::vector<Frame> frames = groundSpoilerLanding();
+    CHECK_NEAR(spoilerReach(a380Spoilers()), 0.5185, 1e-9);
+    const std::vector<GroundSpoilerStretch> s = groundSpoilerStretches(a380Spoilers(), frames);
+    REQUIRE(s.size() == 1u);
+    CHECK_NEAR(s[0].startT, 180.4, 0.1);  // past 0.57
+    CHECK_NEAR(s[0].endT, 231.0, 0.05);
+    CHECK(groundSpoilerStretches(LeverCalibration(), frames).empty());
+    std::vector<Frame> air = frames;
+    for (Frame& f : air) f.v[kOnGround] = 0.0;
+    CHECK(groundSpoilerStretches(a380Spoilers(), air).empty());
+    LeverCalibration full = a380Spoilers();
+    full.forward = leverTable({{0.0, 0.0}, {1.0, 1.0}});  // a lever that reaches 1: nothing to do
+    CHECK(groundSpoilerStretches(full, frames).empty());
+}
+
+// Armed 30 s ahead, the handle left to the aircraft, whose ground spoilers come out; disarmed and
+// back to the lever where the clip's go in. An aircraft that ignores the arming: SPOILERS_ARM_ON
+// after a second, and the lever after 3 s into the stretch, as before. A seek into the stretch
+// arms again and waits afresh.
+TEST(Playback_GroundSpoilersArmedAheadAndLeftToTheAircraft) {
+    const std::vector<Frame> frames = groundSpoilerLanding();
+    const std::vector<GroundSpoilerStretch> s = groundSpoilerStretches(a380Spoilers(), frames);
+    REQUIRE(s.size() == 1u);
+    {
+        ArmingPlayback p;
+        p.a.begin(s, spoilerReach(a380Spoilers()));
+        for (size_t i = 0; i < frames.size(); ++i) p.frame(frames[i], i == 0);
+        CHECK_EQ(p.arms, 1);
+        CHECK_NEAR(p.armedAt, s[0].startT - SpoilerArming::kLeadSec, 0.05);
+        CHECK_EQ(p.armAgains, 0);
+        CHECK_EQ(p.deployed, 1);
+        CHECK(p.deployedAt >= s[0].startT && p.deployedAt < s[0].startT + 1.0);
+        CHECK_EQ(p.gaveUp, 0);
+        CHECK_EQ(p.disarms, 1);
+        CHECK(p.disarmedAt > s[0].endT && p.disarmedAt < s[0].endT + 0.1);
+        CHECK(!p.a.armedByUs());
+        // The lever drove the spoilers everywhere but the lead and the stretch.
+        for (double t : p.leverAt) CHECK(t < s[0].startT - SpoilerArming::kLeadSec || t > s[0].endT);
+    }
+    {
+        ArmingPlayback p;
+        p.takesArming = false;
+        p.a.begin(s, spoilerReach(a380Spoilers()));
+        for (size_t i = 0; i < frames.size(); ++i) p.frame(frames[i], i == 0);
+        CHECK_EQ(p.armAgains, 1);
+        CHECK_EQ(p.deployed, 0);
+        CHECK_EQ(p.gaveUp, 1);
+        CHECK_NEAR(p.gaveUpAt, s[0].startT + SpoilerArming::kWaitSec, 0.05);
+        CHECK_NEAR(p.handle, 0.0, 1e-9);  // the lever after, as the clip has it
+        CHECK_EQ(p.disarms, 1);           // armed by us, put back
+    }
+    {
+        ArmingPlayback p;
+        p.takesArming = false;
+        p.a.begin(s, spoilerReach(a380Spoilers()));
+        size_t i = 0;
+        for (; frames[i].t < 190.0; ++i) p.frame(frames[i], i == 0);  // given up at 183.4
+        REQUIRE(p.gaveUp == 1);
+        p.takesArming = true;
+        size_t j = 0;
+        while (frames[j].t < 200.0) ++j;
+        p.frame(frames[j], true);  // a seek to 200 s, the spoilers out in the clip
+        CHECK_EQ(p.arms, 2);
+        for (++j; frames[j].t < 205.0; ++j) p.frame(frames[j], false);
+        CHECK_EQ(p.deployed, 1);
+        CHECK_EQ(p.gaveUp, 1);
+    }
 }
 
 TEST(Playback_LeverWatchCatchesAnAutothrottleBackOn) {

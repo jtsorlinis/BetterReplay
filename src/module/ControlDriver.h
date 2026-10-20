@@ -35,6 +35,7 @@ public:
         const int* engines = nullptr;
         const int* flapPositions = nullptr;
         const double* throttleLowerLimit = nullptr;  // percent, negative with reversers
+        const double* spoilersArmed = nullptr;       // SPOILERS ARMED
         const std::vector<InputEventInfo>* inputEvents = nullptr;
         const ChannelMask* clipChannels = nullptr;  // the playing clip's channels (empty otherwise)
         // A way that moved the control when the one before it in its list didn't (WayPicker): for
@@ -64,6 +65,13 @@ public:
     // no further forward than its lever. clearAutothrust() when it stops playing.
     void findAutothrust(const std::vector<Frame>& clipFrames);
     void clearAutothrust();
+    // After setSpoilerCalibration, for the clip about to play: where its ground spoilers took the
+    // handle further than the lever reaches (groundSpoilerStretches), the spoilers are armed ahead
+    // and the handle left to the aircraft (SpoilerArming). clearGroundSpoilers() when it stops
+    // playing, before the controls are put back: armed by the replay, they're put back as they
+    // were (putBack; not after a flight load, which reset them).
+    void findGroundSpoilers(const std::vector<Frame>& clipFrames);
+    void clearGroundSpoilers(bool putBack);
     // How this aircraft's reverse thrust is commanded (the setup's sweep found it), for the
     // key-event throttle: "hold" holds THROTTLE_DECR while the clip's reversers are out; "events"
     // also puts the reverser in when the clip reversed without the reverse flag; "toggle" toggles
@@ -189,6 +197,14 @@ private:
     std::vector<Slot> extra_[kControlCount];  // and its others (WayPicker::ways() from 1 on)
     WayPicker picker_[kControlCount];
     LeverCalibration spoilerCal_;  // setSpoilerCalibration
+    // Ground spoilers (findGroundSpoilers): false while the handle is the aircraft's; force set
+    // where the lever has to be sent again at once.
+    bool armSpoilers(const Frame& f, bool& force);
+    SpoilerArming arming_;
+    double armedBefore_ = NAN;  // SPOILERS ARMED when the replay began
+    int arms_ = 0;
+    int deployed_ = 0;
+    int leverInstead_ = 0;
     FsUnitId number_ = FS_INVALID_UNIT;
     std::vector<std::string> ownEvents_;  // mapped to kOwnEventFirst + index
 };

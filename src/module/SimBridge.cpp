@@ -152,6 +152,7 @@ bool SimBridge::open() {
         {"AIRSPEED INDICATED", "knots"},
         {"TURB ENG JET THRUST:1", "pounds"},
         {"TURB ENG JET THRUST:2", "pounds"},
+        {"SPOILERS ARMED", "bool"},
     };
     for (const auto& e : kExtras) {
         track(SimConnect_AddToDataDefinition(h_, DEF_RECORD, e.simvar, e.units, SIMCONNECT_DATATYPE_FLOAT64), e.simvar);
@@ -224,6 +225,7 @@ bool SimBridge::open() {
     ctx.engines = &numEngines_;
     ctx.flapPositions = &flapPositions_;
     ctx.throttleLowerLimit = &throttleLowerLimit_;
+    ctx.spoilersArmed = &spoilersArmed_;
     ctx.inputEvents = &inputEvents_;
     ctx.clipChannels = &playPresent_;
     ctx.wayWorked = &SimBridge::wayWorkedThunk;
@@ -606,6 +608,7 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     const double engines = ex[kExNumEngines];
     if (std::isfinite(engines) && engines >= 0.0 && engines <= 16.0) numEngines_ = static_cast<int>(engines);
     throttleLowerLimit_ = ex[kExThrottleLowerLimit];
+    spoilersArmed_ = ex[kExSpoilersArmed];
     liveTas_ = ex[kExAirspeedTrue];
     liveIas_ = ex[kExAirspeedIndicated];
     liveThrust_[0] = ex[kExJetThrust1];
@@ -1080,6 +1083,8 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
         n1DiffSum_[e] = 0.0;
         n1DiffMax_[e] = 0.0;
         n1Frames_[e] = 0;
+        n1RevDiffSum_[e] = 0.0;
+        n1RevFrames_[e] = 0;
         n1Last_[e] = NAN;
         n1ClipLast_[e] = NAN;
         n1Dir_[e] = 0;
@@ -1142,7 +1147,10 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
             }
         }
         // The spoilers through where their event puts the handle (the setup's calibration).
-        if (c == Control::Spoilers && cp.state == ControlState::Ok && cp.lever.valid()) driver_.setSpoilerCalibration(cp.lever);
+        if (c == Control::Spoilers && cp.state == ControlState::Ok && cp.lever.valid()) {
+            driver_.setSpoilerCalibration(cp.lever);
+            driver_.findGroundSpoilers(clip.frames);  // beyond where that puts the handle
+        }
         // Reverse thrust from the clip's reversers, with or without a lever calibration.
         if (c == Control::Throttle && cp.state == ControlState::Ok) driver_.setReverseBy(cp.reverseBy);
         if (cp.state == ControlState::Ok && c != Control::Throttle && cp.leadSec > 0.0) {
@@ -1714,6 +1722,10 @@ void SimBridge::trackEngines(const Frame& frame, bool jumped) {
         n1DiffSum_[e] += diff;
         if (diff > n1DiffMax_[e]) n1DiffMax_[e] = diff;
         ++n1Frames_[e];
+        if (reversing(frame, e)) {
+            n1RevDiffSum_[e] += diff;
+            ++n1RevFrames_[e];
+        }
         countReversal(live, n1Last_[e], n1Dir_[e], n1Reversals_[e]);
         countReversal(clip, n1ClipLast_[e], n1ClipDir_[e], n1ClipReversals_[e]);
     }
@@ -1724,9 +1736,14 @@ void SimBridge::logEngines() {
     if (secs < 1.0) return;
     for (int e = 0; e < numEngines_ && e < 4; ++e) {
         if (n1Frames_[e] == 0) continue;
-        log::info("playback: engine %d N1 was %.1f%% off the clip on average (at most %.1f%%) and changed direction "
+        char rev[64] = {};
+        if (n1RevFrames_[e] > 0) {
+            std::snprintf(rev, sizeof(rev), "; %.1f%% where the clip's reversers were out", n1RevDiffSum_[e] / n1RevFrames_[e]);
+        }
+        log::info("playback: engine %d N1 was %.1f%% off the clip on average (at most %.1f%%%s) and changed direction "
                   "%.1f times a second (the clip: %.1f)",
-                  e + 1, n1DiffSum_[e] / n1Frames_[e], n1DiffMax_[e], n1Reversals_[e] / secs, n1ClipReversals_[e] / secs);
+                  e + 1, n1DiffSum_[e] / n1Frames_[e], n1DiffMax_[e], rev, n1Reversals_[e] / secs,
+                  n1ClipReversals_[e] / secs);
     }
 }
 
@@ -2361,6 +2378,7 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     playChannelCount_ = 0;
     directChannelCount_ = 0;
     driver_.clearAutothrust();  // the snapshot below isn't the clip
+    driver_.clearGroundSpoilers(restore);
     snapFramesLeft_ = 0;
     snapCheckFrames_ = 0;
     flapsHold_ = false;

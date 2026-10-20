@@ -268,6 +268,71 @@ void ControlDriver::clearAutothrust() {
     s.followMs = 0;
 }
 
+void ControlDriver::findGroundSpoilers(const std::vector<Frame>& clipFrames) {
+    clearGroundSpoilers(true);
+    if (!slots_[static_cast<int>(Control::Spoilers)].active || !spoilerCal_.valid()) return;
+    std::vector<GroundSpoilerStretch> found = groundSpoilerStretches(spoilerCal_, clipFrames);
+    if (found.empty()) return;
+    const double reach = spoilerReach(spoilerCal_);
+    double seconds = 0.0;
+    for (const GroundSpoilerStretch& g : found) seconds += g.endT - g.startT;
+    log::info("controls: ground spoilers in %zu stretch(es) of the clip (%.0f s, the first at %.1f s): the handle beyond "
+              "the lever's %.2f; armed %.0f s ahead, the handle left to the aircraft there",
+              found.size(), seconds, found.front().startT, reach, SpoilerArming::kLeadSec);
+    arming_.begin(std::move(found), reach);
+    armedBefore_ = ctx_.spoilersArmed ? *ctx_.spoilersArmed : NAN;
+    arms_ = deployed_ = leverInstead_ = 0;
+}
+
+void ControlDriver::clearGroundSpoilers(bool putBack) {
+    if (arming_.armedByUs() && putBack) {
+        const int before = armedBefore_ >= 0.5 ? 1 : 0;
+        keyEvent(KEY_SPOILERS_ARM_SET, before);
+        log::info("controls: spoilers %s again (SPOILERS_ARM_SET %d), as before the replay", before ? "armed" : "disarmed",
+                  before);
+    }
+    if (arms_ > 0) {
+        log::info("controls: ground spoilers: armed %d time(s); the aircraft's came out %d time(s), the lever instead %d time(s)",
+                  arms_, deployed_, leverInstead_);
+    }
+    arming_.clear();
+    arms_ = deployed_ = leverInstead_ = 0;
+}
+
+bool ControlDriver::armSpoilers(const Frame& f, bool& force) {
+    const double liveHandle = ctx_.live ? ctx_.live->v[kSpoilersHandle] : NAN;
+    const double liveArmed = ctx_.spoilersArmed ? *ctx_.spoilersArmed : NAN;
+    const SpoilerArming::Step st = arming_.step(f.t, f.v[kSpoilersHandle], liveHandle, liveArmed, force);
+    if (st.disarm) {
+        keyEvent(KEY_SPOILERS_ARM_SET, 0);
+        log::info("controls: spoilers disarmed (SPOILERS_ARM_SET 0) at %.1f s: the clip's ground spoilers are in; the lever "
+                  "as the clip has it",
+                  f.t);
+        force = true;
+    }
+    if (st.arm) {
+        keyEvent(KEY_SPOILERS_ARM_SET, 1);
+        ++arms_;
+        log::info("controls: spoilers armed (SPOILERS_ARM_SET 1) at %.1f s, ahead of the clip's ground spoilers", f.t);
+    }
+    if (st.armAgain) {
+        keyEvent(KEY_SPOILERS_ARM_ON, 0);
+        log::info("controls: SPOILERS ARMED still reads 0 %.0f s after arming; SPOILERS_ARM_ON", SpoilerArming::kArmCheckSec);
+    }
+    if (st.deployed) {
+        ++deployed_;
+        log::info("controls: the aircraft's ground spoilers came out at %.1f s (handle %.2f)", f.t, liveHandle);
+    }
+    if (st.gaveUp) {
+        ++leverInstead_;
+        log::info("controls: no ground spoilers %.0f s into the clip's (handle %.2f, SPOILERS ARMED %.0f); the lever as the "
+                  "clip has it from here",
+                  SpoilerArming::kWaitSec, liveHandle, liveArmed);
+        force = true;
+    }
+    return st.mode == SpoilerArming::Mode::Lever;
+}
+
 bool ControlDriver::inAutothrust(const Slot& s, int e, double t) {
     for (const AutothrustStretch& a : s.autothrust[e]) {
         if (t >= a.startT && t <= a.endT) return true;
@@ -352,6 +417,7 @@ void ControlDriver::apply(Control c, const Frame& f, bool force) {
     const int ci = static_cast<int>(c);
     Slot& first = slots_[ci];
     if (!first.active) return;
+    if (c == Control::Spoilers && arming_.any() && !armSpoilers(f, force)) return;
     WayPicker& p = picker_[ci];
     if (!p.multi() || !ctx_.live) {
         applySlot(c, first, f, force);
@@ -564,6 +630,12 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                 toggled = s.toggle.step(clipOut, liveOut, liveThrottle);
                 if (toggled.corrected) {
                     log::info("controls: the aircraft %s in reverse after all", s.toggle.on() ? "is" : "isn't");
+                }
+                if (toggled.confirmed == ReverseToggle::Confirmed::Shown) {
+                    log::info("controls: the aircraft shows reverse; the clip's reverse amount from now on");
+                } else if (toggled.confirmed == ReverseToggle::Confirmed::NoThrust) {
+                    log::info("controls: no forward thrust from the first reverse amount, nor reverse shown: taken as in "
+                              "reverse; the clip's reverse amount from now on");
                 }
             }
             const double limit = ctx_.throttleLowerLimit ? *ctx_.throttleLowerLimit : NAN;
@@ -793,7 +865,10 @@ void ControlDriver::end(Control c) {
     Slot& s = slots_[ci];
     if (!s.active) return;
     s.active = false;
-    if (c == Control::Spoilers) spoilerCal_ = LeverCalibration();
+    if (c == Control::Spoilers) {
+        clearGroundSpoilers(true);  // (switching clips: put back here)
+        spoilerCal_ = LeverCalibration();
+    }
     for (const Slot& w : extra_[ci]) {
         log::info("controls: %d value(s) sent to the %s with %s", w.sends, controlSpec(c).label, describeMethod(c, w.method).c_str());
         if (w.errors > 0) log::warn("controls: %d error(s) driving the %s with %s", w.errors, controlSpec(c).label,
