@@ -23,22 +23,22 @@ The other big reason was getting the animations right. Other replay tools didn't
 
 ## Aircraft
 
-Any aircraft can be taught with the control setup. These are the ones I've tested. **Included** means BetterReplay comes with the aircraft's control profile, so it replays right away without the setup.
+Any aircraft can be taught with the control setup. **Included** means BetterReplay comes with the aircraft's control profile, so it replays right away without the setup.
 
-| Aircraft                       | Tested | Included |
-| ------------------------------ | ------ | -------- |
-| iniBuilds A320neo V2 (default) | ❌     | ❌       |
-| iniBuilds A330 (default)       | ❌     | ❌       |
-| Working Title 787-10 (default) | ❌     | ❌       |
-| Working Title 747-8 (default)  | ❌     | ❌       |
-| iniBuilds A340                 | ❌     | ❌       |
-| iniBuilds A350                 | ✅     | ✅       |
-| iniBuilds A380                 | ✅     | ✅       |
-| Fenix A320                     | ❌     | ❌       |
-| Synaptic A220                  | ✅     | ✅       |
-| FlightSim Studio E-Jets        | ❌     | ❌       |
-| PMDG 737                       | ✅     | ✅       |
-| PMDG 777                       | ✅     | ✅       |
+| Aircraft                       | Included | Known issues                                              |
+| ------------------------------ | -------- | --------------------------------------------------------- |
+| iniBuilds A320neo V2 (default) | ❌       |                                                           |
+| iniBuilds A330 (default)       | ❌       |                                                           |
+| Working Title 787-10 (default) | ❌       |                                                           |
+| Working Title 747-8 (default)  | ❌       |                                                           |
+| iniBuilds A340                 | ❌       |                                                           |
+| iniBuilds A350                 | ✅       | Engine sounds in passenger views near the engines         |
+| iniBuilds A380                 | ✅       | Engine sounds in external views from some angles          |
+| Fenix A320                     | ❌       |                                                           |
+| Synaptic A220                  | ✅       |                                                           |
+| FlightSim Studio E-Jets        | ❌       |                                                           |
+| PMDG 737                       | ✅       |                                                           |
+| PMDG 777                       | ✅       | Throttle can change at at acceleration altitude after T/O |
 
 ## Install
 
@@ -70,14 +70,14 @@ The newest 10 takeoff and landing clips of each aircraft are kept, and older one
 
 - **PMDG 777:** in a takeoff replay the autothrottle can engage itself at acceleration altitude. BetterReplay disconnects it again, but a moment late, so the change from MCT to CLB isn't smooth.
 - **iniBuilds A350:** in the cabin, the engine whine keeps playing, distorted, after the thrust comes back from takeoff to climb. In the flight itself it stops there.
-- **iniBuilds A380, Synaptic A220 and probably other fly-by-wire aircraft:** the ailerons, elevator and rudder don't follow the clip, because the aircraft's own fly-by-wire keeps moving them. On the A380 the elevator stays at full nose-up.
+- **iniBuilds A380, and probably other fly-by-wire aircraft:** the ailerons, elevator and rudder don't follow the clip, because the aircraft's own fly-by-wire keeps moving them. On the A380 the elevator stays at full nose-up.
 
 The details are under [Known gaps](DEVELOPMENT.md#known-gaps).
 
 ## Planned
 
 - **Lights on all aircraft.** Nav, beacon, strobe, landing and taxi lights replay through the sim's own light events, which not every aircraft responds to.
-- **Manual recording:** start and stop a clip yourself, so a whole flight can be recorded (*Save last 10 minutes* only keeps the last 10 minutes).
+- **Manual recording:** start and stop a clip yourself, so a whole flight can be recorded (_Save last 10 minutes_ only keeps the last 10 minutes).
 - **Weather and time of day** from the clip.
 
 ## Development
