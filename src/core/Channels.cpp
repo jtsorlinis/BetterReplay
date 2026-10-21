@@ -144,6 +144,12 @@ const ChannelDef kChannels[kChannelCount] = {
     {"n2_2", "TURB ENG N2:2", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 2},
     {"n2_3", "TURB ENG N2:3", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 3},
     {"n2_4", "TURB ENG N2:4", "percent", F32, LIN, NONE, nullptr, nullptr, nullptr, 4},
+    // The parking brake. Left set from where the replay started, the brakes worked against the
+    // velocities written every frame: the aircraft (frozen) didn't slow, but the sim's
+    // acceleration did, and ChasePlane's head movement showed hard braking all through a taxi.
+    // The simvar isn't settable; PARKING_BRAKE_SET takes 1/0. Clips from before it was recorded
+    // replay with it off (assumeParkingBrakeOff).
+    {"pbrake", "BRAKE PARKING POSITION", "bool", U8, STEP, EVT, "PARKING_BRAKE_SET"},
 };
 
 int findChannel(const char* key) {

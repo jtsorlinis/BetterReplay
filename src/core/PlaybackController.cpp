@@ -89,6 +89,13 @@ bool deriveGearCommand(Clip& clip) {
     return true;
 }
 
+bool assumeParkingBrakeOff(Clip& clip) {
+    if (clip.present.test(static_cast<size_t>(kParkingBrake))) return false;
+    for (Frame& f : clip.frames) f.v[kParkingBrake] = 0.0;
+    clip.present.set(static_cast<size_t>(kParkingBrake));
+    return true;
+}
+
 double gearDownTime(const Clip& clip) {
     if (clip.frames.size() < 2 || !clip.present.test(static_cast<size_t>(kGearHandle))) return NAN;
     const bool landing = clip.meta.event == EventType::Landing;
@@ -158,6 +165,7 @@ void PlaybackController::load(Clip&& clip, const std::string& file) {
     clip_ = std::move(clip);
     dropEmptyChannels(clip_);
     deriveGearCommand(clip_);
+    assumeParkingBrakeOff(clip_);
     gearDownT_ = gearDownTime(clip_);
     peak_ = Frame();
     for (const Frame& f : clip_.frames) {

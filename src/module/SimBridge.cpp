@@ -139,7 +139,6 @@ bool SimBridge::open() {
         {"NUMBER OF ENGINES", "number"},
         {"THROTTLE LOWER LIMIT", "percent"},
         {"ENGINE TYPE", "enum"},
-        {"BRAKE PARKING POSITION", "bool"},
         {"ON ANY RUNWAY", "bool"},
         {"GENERAL ENG COMBUSTION:1", "bool"},
         {"GENERAL ENG COMBUSTION:2", "bool"},
@@ -618,7 +617,7 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     SetupFacts& facts = input_.facts;
     facts.engines = numEngines_;
     facts.engineType = std::isfinite(ex[kExEngineType]) ? static_cast<int>(ex[kExEngineType]) : 1;
-    facts.parkingBrake = ex[kExParkingBrake] >= 0.5;
+    facts.parkingBrake = input_.raw.v[kParkingBrake] >= 0.5;
     facts.onRunway = ex[kExOnRunway] >= 0.5;
     facts.engineRunning = false;
     for (int e = 0; e < 4 && e < numEngines_; ++e) facts.engineRunning |= ex[kExCombustion1 + e] >= 0.5;

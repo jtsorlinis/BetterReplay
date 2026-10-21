@@ -13,6 +13,10 @@ namespace br {
 // extending. Leaves the clip alone if it has no gear positions or the gear never moved (fixed gear).
 // Returns true if the channel was rewritten.
 bool deriveGearCommand(Clip& clip);
+// A clip recorded before the parking brake was gets it off throughout, so a replay started
+// parked lets go of it (a takeoff or landing clip has it off nearly all the way). Returns true if
+// the channel was filled in.
+bool assumeParkingBrakeOff(Clip& clip);
 // When the gear started coming down (the gear handle channel turning to down, so after
 // deriveGearCommand), in seconds from the clip's start: on a landing the last time before the
 // touchdown, otherwise the first. NaN if it never did.

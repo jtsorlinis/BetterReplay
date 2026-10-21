@@ -102,7 +102,6 @@ private:
         kExThrottleLowerLimit,
         // for the control setup (SetupFacts)
         kExEngineType,
-        kExParkingBrake,
         kExOnRunway,
         kExCombustion1,
         kExCombustion2,

@@ -152,6 +152,26 @@ TEST(Playback_FixedGearKeepsRecordedHandle) {
     CHECK(!deriveGearCommand(none));
 }
 
+TEST(Playback_OlderClipsReplayWithTheParkingBrakeOff) {
+    // Recorded before the parking brake was: off throughout, so a replay started parked lets go.
+    Clip old = makeClip(10.0);
+    old.present.reset(kParkingBrake);
+    for (Frame& f : old.frames) f.v[kParkingBrake] = NAN;
+    PlaybackController p;
+    p.load(std::move(old), "a.rpl");
+    REQUIRE(p.present().test(kParkingBrake));
+    Frame f;
+    p.current(f);
+    CHECK_NEAR(f.v[kParkingBrake], 0.0, 0);
+
+    // Recorded: left as it was (set while holding, then released).
+    Clip recorded = makeClip(10.0);
+    for (Frame& r : recorded.frames) r.v[kParkingBrake] = r.t < 5.0 ? 1.0 : 0.0;
+    CHECK(!assumeParkingBrakeOff(recorded));
+    CHECK_NEAR(recorded.frames.front().v[kParkingBrake], 1.0, 0);
+    CHECK_NEAR(recorded.frames.back().v[kParkingBrake], 0.0, 0);
+}
+
 namespace {
 
 // Gear legs taking 8 s each way: up, down at 40 s, up again at 60 s, down at 80 s.
