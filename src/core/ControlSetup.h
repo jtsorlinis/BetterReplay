@@ -101,6 +101,11 @@ public:
     virtual void setReverser(bool on) = 0;
     virtual void throttleDecrease() = 0;
     virtual void toggleReverse() = 0;
+    // While the engines run up on the ground: one BRAKES, as a held brakes key (".") sends every
+    // frame (the toe brakes, which let go by themselves once it stops), and PARKING_BRAKE_SET, to
+    // set the parking brake again if holding the brakes let go of it.
+    virtual void holdBrakes() = 0;
+    virtual void setParkingBrake(bool on) = 0;
     // The gear step on the ground: beginHover snapshots the aircraft, puts it `liftFt` straight up
     // from where it stands (heading and attitude kept, velocities zero) and freezes it, holding it
     // there until endHover. endHover puts the snapshot back and unfreezes it; with `restore` false
@@ -393,6 +398,13 @@ private:
     void noteGearCommand(double command, const Frame& live);
     void logGearCommand() const;
     bool rolling(const Frame& live) const;
+    // The brakes held while the engines run up on the ground (the pilot's throttle movement, its
+    // replays, the lever's sweep): the A220's parking brake alone didn't hold it at full thrust.
+    bool brakesWanted() const;
+    void letGoBrakes(bool parkAgain);  // and the parking brake set again if they let go of it
+    bool braking_ = false;
+    bool brakeParked_ = false;   // the parking brake was set when they were first held
+    bool brakesLogged_ = false;  // in this step
     void evaluate(const Frame& live);
     void judge(bool passed, bool reached, bool returned, int pct);  // evaluate's verdict, acted on
     void nextMethod();

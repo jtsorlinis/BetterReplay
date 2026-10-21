@@ -237,22 +237,28 @@ const char* const kPositionsDetail =
 const char* const kPositionsAgain = "Couldn't find the lever's own position in that movement. Once more, please.";
 const char* const kNoticeDetail =
     "Once it's set, BetterReplay moves the throttle itself, from idle to full and back, to learn where the lever's "
-    "positions are, then tries reverse thrust if the aircraft has it. The engines spool up against the parking brake "
-    "for 20 to 40 seconds.";
+    "positions are, then tries reverse thrust if the aircraft has it. The engines spool up against the parking brake, "
+    "with the brakes held as well, for 20 to 40 seconds.";
 const char* const kSweepDetail =
     "Keep your hands off the throttle: BetterReplay moves it itself, from idle to full and back, to learn where the "
     "lever's positions are, then tries reverse thrust if the aircraft has it. The engines spool up against the "
-    "parking brake for 20 to 40 seconds.";
+    "parking brake, with the brakes held as well, for 20 to 40 seconds.";
+// The aircraft started to move though the setup held the brakes (an aircraft that ignores BRAKES).
+const char* const kRolledReplay =
+    "Stopped early: the aircraft started to move. If the parking brake is set, hold the brakes as well, then Watch "
+    "again.";
+const char* const kRolledSweep =
+    "Stopped: the aircraft started to move. If the parking brake is set, hold the brakes as well, then Try again.";
 // Phase::Calibrate.
 const char* const kCalibrateDetail =
     "That only took them part way. BetterReplay now moves the speed brake lever through its range to see where each "
     "setting puts it, then replays your movement through that.";
 const char* const kReverseNoticeDetail =
     "Once it's set, BetterReplay tries reverse thrust itself, to learn how to replay it on this aircraft. The engines "
-    "spool up against the parking brake for up to half a minute.";
+    "spool up against the parking brake, with the brakes held as well, for up to half a minute.";
 const char* const kReverseSweepDetail =
     "Keep your hands off the throttle while BetterReplay tries reverse thrust. The engines spool up against the "
-    "parking brake for up to half a minute.";
+    "parking brake, with the brakes held as well, for up to half a minute.";
 
 // The gear step on the ground: held above the runway, then put back.
 const char* const kHoverPrompt = "Lifting the aircraft off the runway";
@@ -863,7 +869,12 @@ double SetupFlow::handleSignal(const Frame& f) const {
 double SetupFlow::outcomeSignal(const Frame& f) const {
     switch (control()) {
         case Control::Spoilers: return std::isfinite(f.v[kSpoilersLeft]) ? f.v[kSpoilersLeft] : f.v[kSpoilersHandle];
-        case Control::Flaps: return std::isfinite(f.v[kFlapsLeft]) ? f.v[kFlapsLeft] : f.v[kFlapsHandleIndex];
+        case Control::Flaps: {
+            // The trailing edge and the slats together: the A220's notch 1 moves only its slats.
+            const double te = f.v[kFlapsLeft], le = f.v[kSlatsLeft];
+            if (!std::isfinite(te) && !std::isfinite(le)) return f.v[kFlapsHandleIndex];
+            return (std::isfinite(te) ? te : 0.0) + (std::isfinite(le) ? le : 0.0);
+        }
         case Control::Throttle:
             return meanOf(f, jetLike(facts_.engineType) ? kEngineN1_1 : kEngineRpm1, engineCount(facts_));
         case Control::Gear: return meanOf(f, kGearCenter, 3);
@@ -925,6 +936,7 @@ bool SetupFlow::start(const AircraftProfile& profile, const Frame& live, const S
 void SetupFlow::enterStep() {
     need_.clear();
     phaseT_ = 0.0;
+    brakesLogged_ = false;
     leverVerdict_ = LeverVerdict::Steady;
     leverStage_ = false;
     reverseOnly_ = false;
@@ -1012,6 +1024,43 @@ void SetupFlow::onFrame(double dt, const Frame& live, const SetupFacts& facts) {
         case Phase::Calibrate: calibrateFrame(dt, live); break;
         default: break;
     }
+    if (!active()) return;
+    if (brakesWanted()) {
+        if (!braking_) {
+            braking_ = true;
+            brakeParked_ = facts_.parkingBrake;
+            if (!brakesLogged_) {
+                brakesLogged_ = true;
+                logf(0, "control setup: holding the brakes (BRAKES, as the \".\" key) while the engines run up, %s",
+                     brakeParked_ ? "as well as the parking brake" : "the parking brake not set");
+            }
+        }
+        sim_->holdBrakes();
+    } else {
+        letGoBrakes(true);
+    }
+}
+
+bool SetupFlow::brakesWanted() const {
+    switch (phase_) {
+        case Phase::User:
+        case Phase::Positions:
+        case Phase::Replay:
+        case Phase::Hold:
+        case Phase::Sweep: return control() == Control::Throttle && onGround_;
+        default: return false;
+    }
+}
+
+// Pressing the brakes lets go of the parking brake on some aircraft (as the pedals do on a real
+// Boeing): set again, it holds the aircraft at idle and the sweep's wait for it doesn't stall.
+void SetupFlow::letGoBrakes(bool parkAgain) {
+    if (!braking_) return;
+    braking_ = false;
+    if (parkAgain && brakeParked_ && !facts_.parkingBrake) {
+        logf(0, "control setup: the parking brake was let go while the brakes were held; setting it again");
+        sim_->setParkingBrake(true);
+    }
 }
 
 void SetupFlow::beginUser() {
@@ -1053,6 +1102,9 @@ void SetupFlow::userFrame(double dt, const Frame& live) {
     const double o = outcomeSignal(live);
     if (std::isnan(handleRest_)) handleRest_ = h;
     if (std::isnan(outcomeRest_)) outcomeRest_ = o;
+    // Until the pilot moves the throttle, engines still spooling down are settling: they started
+    // where they come to (the A220's idle, not the 29% N1 it was still coming down from).
+    if (!moved_ && control() == Control::Throttle && o < outcomeRest_) outcomeRest_ = o;
     const double dh = fromRest(h, handleRest_);
     const double dout = fromRest(o, outcomeRest_);
 
@@ -2096,8 +2148,14 @@ double SetupFlow::attemptLeft() const {
 // How far `v` is from `rest`, where the pilot's movement started the control. The spoilers only
 // count going out: back past where they started is back, not a movement of its own (the A380's
 // lever armed at 0.06, then deployed and retracted to 0, waited for 0.06 on "Retract the spoilers").
+// So does the throttle: engines below where they started have spooled down (the A220's were still
+// coming down from the taxi at 29% N1, and its "Wait for the engines to spool down" waited for that
+// at its 21% idle).
 double SetupFlow::fromRest(double v, double rest) const {
-    if (control() == Control::Spoilers && std::isfinite(v) && std::isfinite(rest)) return std::max(0.0, v - rest);
+    const Control c = control();
+    if ((c == Control::Spoilers || c == Control::Throttle) && std::isfinite(v) && std::isfinite(rest)) {
+        return std::max(0.0, v - rest);
+    }
     return absDiff(v, rest);
 }
 
@@ -2144,7 +2202,12 @@ void SetupFlow::replayFrame(double dt, const Frame& live) {
         // until the control is there.
         sim_->applyControl(c, drivenFrame(mini_.frames.front(), methods_[method_]), firstApply_);
         firstApply_ = false;
-        const bool there = atRest(live);
+        // The throttle's also waits for the aircraft to stop (the brakes held meanwhile): the A220
+        // was still rolling at 7.5 kt from the pilot's run-up, and the roll check stopped the
+        // replay at once.
+        const bool rest = atRest(live);
+        const bool still = c != Control::Throttle || !onGround_ || live.v[kGroundSpeed] <= kStopKt;
+        const bool there = rest && still;
         // Not on its way there as soon as a method has to start moving it (giveUpSec): it can't
         // be replayed from there, as the check only counts movement from there. Left up by the
         // way back, the PMDG 777's gear waited 30 s for its lever event, then replayed all 48 s.
@@ -2163,9 +2226,12 @@ void SetupFlow::replayFrame(double dt, const Frame& live) {
         }
         if (!there && phaseT_ < kRestWaitSec) return;
         started_ = true;
-        if (!there) {
+        if (!rest) {
             logf(1, "control setup: the %s didn't go back to where you started it within %.0f s; replaying anyway", label,
                  kRestWaitSec);
+        } else if (!still) {
+            logf(1, "control setup: the aircraft is still moving (%.1f kt) after %.0f s; replaying anyway",
+                 live.v[kGroundSpeed], kRestWaitSec);
         } else if (phaseT_ > 0.5) {
             logf(0, "control setup: the %s was back where you started it after %.1f s", label, phaseT_);
         }
@@ -2297,7 +2363,7 @@ void SetupFlow::judge(bool passed, bool reached, bool returned, int pct) {
         }
         logf(0, "control setup: %s moved the %s %d%% as far as you did%s; asking", desc.c_str(), controlSpec(c).label, pct,
              returned ? "" : " (it didn't come all the way back)");
-        note_ = stoppedEarly_ ? "Stopped early: the aircraft started to roll. Is the parking brake set?" : "";
+        note_ = stoppedEarly_ ? kRolledReplay : "";
         if (!stoppedEarly_ && replayPeak_ < kPassFull * userPeak_ && shortBest_ == static_cast<int>(method_)) {
             note_ = "This one went " + std::to_string(pct) + "% as far as you did. No other method went further.";
         }
@@ -2763,7 +2829,7 @@ void SetupFlow::sweepTo(double axis, bool force) {
 void SetupFlow::sweepFrame(double dt, const Frame& live) {
     if (rolling(live)) {
         logf(1, "control setup: the aircraft started to roll (%.1f kt); stopping the throttle calibration", live.v[kGroundSpeed]);
-        stopSweep("Stopped: the aircraft started to roll. Is the parking brake set?");
+        stopSweep(kRolledSweep);
         return;
     }
     if (phaseT_ > kSweepMaxSec) {
@@ -3261,6 +3327,7 @@ void SetupFlow::cancel(const char* why) {
 
 void SetupFlow::abandon(const char* why) {
     if (!active()) return;
+    letGoBrakes(false);  // the sim reset the aircraft: its parking brake is as the flight has it
     if (phase_ == Phase::Sweep) parkThrottle();
     if (hovering()) {
         logf(0, "control setup: letting the aircraft go where it is (%s)", why);
@@ -3270,6 +3337,7 @@ void SetupFlow::abandon(const char* why) {
 }
 
 void SetupFlow::stop(const std::string& why) {
+    letGoBrakes(true);
     clearStep();
     phase_ = Phase::Idle;
     logf(0, "control setup stopped (%s)", why.c_str());

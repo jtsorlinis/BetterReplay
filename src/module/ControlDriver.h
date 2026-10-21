@@ -82,6 +82,10 @@ public:
     // THROTTLE_REVERSE_THRUST_TOGGLE (the setup's tests).
     void throttleDecrease();
     void toggleReverse();
+    // One BRAKES, as a held brakes key (".") sends every frame, and PARKING_BRAKE_SET (the setup's
+    // throttle run-ups).
+    void brakes();
+    void parkingBrake(bool on);
     // The "toggle" throttle has the aircraft in reverse, or a toggle is still settling: ending it
     // now would toggle it back out at once, whether the levers are at idle or not.
     bool reverseToggled() const;

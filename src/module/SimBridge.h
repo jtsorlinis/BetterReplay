@@ -53,6 +53,8 @@ public:
     void setReverser(bool on) override;
     void throttleDecrease() override;
     void toggleReverse() override;
+    void holdBrakes() override;
+    void setParkingBrake(bool on) override;
     bool beginHover(double liftFt, std::string& why) override;
     void endHover(bool restore) override;
     bool hovering() const override { return hovering_; }

@@ -139,6 +139,7 @@ enum Channel : uint16_t {
     kEngineN2_3,
     kEngineN2_4,
     kParkingBrake,
+    kSlatsLeft,
     kChannelCount
 };
 

@@ -353,6 +353,10 @@ void ControlDriver::throttleDecrease() { keyEvent(KEY_THROTTLE_DECR, 0); }
 
 void ControlDriver::toggleReverse() { keyEvent(KEY_THROTTLE_REVERSE_THRUST_TOGGLE, 0); }
 
+void ControlDriver::brakes() { keyEvent(KEY_BRAKES, 0); }
+
+void ControlDriver::parkingBrake(bool on) { keyEvent(KEY_PARKING_BRAKE_SET, on ? 1 : 0); }
+
 bool ControlDriver::reverseToggled() const {
     const Slot& s = slots_[static_cast<int>(Control::Throttle)];
     return s.active && s.reverseBy == ReverseBy::Toggle && s.toggle.busy();

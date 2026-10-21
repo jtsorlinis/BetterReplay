@@ -58,11 +58,23 @@ struct FakeAircraft : IControlSim {
     double thr[2] = {0.0, 0.0};
     double n1[2] = {20.0, 20.0};
     double gearLever = 1.0, gearPos = 1.0, gearLeverChangedAt = -100.0, gearHandleSimvar = 1.0;
+    // The flap handle (its index) with the A220's surfaces: notch 1 puts the slats out to 21 of
+    // their 27 degrees and leaves the trailing edge up; notch 2 and on move that too.
+    double flapHandle = 0.0, slats = 0.0, flaps = 0.0;
     double t = 0.0;
     bool onGround = true;
     double gs = 0.0;
     int engines = 2;
     bool rollWhenDriven = false;  // full thrust from a replay makes it roll (parking brake not holding)
+    // Or anyone's full thrust (the A220's parking brake): it rolls on, slowing a little at idle,
+    // until the brakes are held (BRAKES every frame), which hold it still. With brakesHold false it
+    // ignores BRAKES; with brakesUnpark pressing them lets go of the parking brake.
+    bool weakParkingBrake = false;
+    bool brakesHold = true;
+    bool brakesUnpark = false;
+    double brakedAt = -100.0;
+    int brakeCalls = 0, parkSets = 0;
+    SetupFacts* facts = nullptr;  // the harness's, where the parking brake reads
 
     // the one method each control follows when replayed
     ControlMethod spoilersWork{MethodKind::InputSet, "AIRLINER_SPOILER_LEVER", 0.01};
@@ -225,6 +237,8 @@ struct FakeAircraft : IControlSim {
             }
         }
         for (int e = 0; e < 2; ++e) n1[e] = approach(n1[e], 20.0 + 0.75 * std::fabs(thr[e]), 10.0, dt);
+        slats = approach(slats, flapHandle >= 1.0 ? 0.78 : 0.0, 1.0 / 12.0, dt);  // 12 s and 26 s all the way
+        flaps = approach(flaps, flapHandle >= 2.0 ? 0.27 * (flapHandle - 1.0) : 0.0, 1.0 / 26.0, dt);
         if (t - gearLeverChangedAt >= (gearLever > gearPos ? gearDownLagSec : 2.0) && !(frozen && gearStuckFrozen)) {
             if (gearStaggerSec > 0.0) {
                 nosePos = approach(nosePos, gearLever, gearRate, dt);
@@ -239,7 +253,10 @@ struct FakeAircraft : IControlSim {
         if (gearPos >= 0.999) gearHandleSimvar = 1.0;  // the handle simvar lags, as on the A320
         if (gearPos <= 0.001) gearHandleSimvar = 0.0;
         if (handleFollowsLever) gearHandleSimvar = gearLever;
-        if (rollWhenDriven && driving && drivenControl == Control::Throttle && (thr[0] > 50.0 || thr[1] > 50.0)) gs = 5.0;
+        const bool braked = brakesHold && t - brakedAt < 0.1;
+        const bool fullThrust = thr[0] > 50.0 || thr[1] > 50.0;
+        if (rollWhenDriven && driving && drivenControl == Control::Throttle && fullThrust && !braked) gs = 5.0;
+        if (weakParkingBrake) gs = fullThrust && !braked ? approach(gs, 20.0, 3.0, dt) : approach(gs, 0.0, braked ? 4.0 : 0.2, dt);
         if (keyNoise) fire(kElevatorAxis, std::round(300.0 * std::sin(7.0 * t)));
     }
 
@@ -269,6 +286,9 @@ struct FakeAircraft : IControlSim {
         }
         f.v[kGearHandle] = gearHandleSimvar;
         f.v[kInputGear] = gearLever;
+        f.v[kFlapsHandleIndex] = flapHandle;
+        f.v[kFlapsLeft] = f.v[kFlapsRight] = flaps;
+        f.v[kSlatsLeft] = slats;
         return f;
     }
 
@@ -343,6 +363,15 @@ struct FakeAircraft : IControlSim {
         ++toggles;
         if (!reverseByToggle || toggles == ignoreToggle || (toggleStuck && toggled)) return;
         if (airbus ? axis[0] < 0.05 : std::fabs(thr[0]) < 1.0) toggled = !toggled;  // only at idle
+    }
+    void holdBrakes() override {
+        ++brakeCalls;
+        brakedAt = t;
+        if (brakesUnpark && facts) facts->parkingBrake = false;
+    }
+    void setParkingBrake(bool on) override {
+        ++parkSets;
+        if (facts) facts->parkingBrake = on;
     }
 
     bool beginControl(Control c, const ControlMethod& m, std::string& why) override {
@@ -508,6 +537,7 @@ struct SetupHarness {
         g_setupLog.clear();
         flow.setLogger(&testLog, nullptr);
         flow.setSim(&aircraft);
+        aircraft.facts = &facts;
     }
 
     bool start() {
@@ -1389,7 +1419,7 @@ TEST(Setup_ThrottleLeverSweepStopsWhenTheAircraftRolls) {
     h.run(3.0);
     h.aircraft.gs = 5.0;  // the parking brake isn't holding
     REQUIRE(h.run(1.0, nullptr, "retry"));
-    CHECK(h.status().getString("note", "").find("roll") != std::string::npos);
+    CHECK(h.status().getString("note", "").find("hold the brakes as well, then Try again") != std::string::npos);
     CHECK(!h.aircraft.driving);
     CHECK(h.aircraft.axis[0] < 0.05);  // put back to idle
     h.aircraft.gs = 0.0;
@@ -2046,12 +2076,85 @@ TEST(Setup_ThrottleReplayStopsWhenTheAircraftRolls) {
     h.facts.hasSpoilers = false;
     h.facts.gearRetractable = false;
     h.aircraft.rollWhenDriven = true;
+    h.aircraft.brakesHold = false;  // nor do the brakes the setup holds (it ignores BRAKES)
     REQUIRE(h.start());
     ThrottlePilot p{0.0, 50.0, 100.0};
     CHECK(h.run(90.0, followThrottle(h, p), "ask"));
-    CHECK(h.status().getString("note", "").find("roll") != std::string::npos);
+    CHECK(h.status().getString("note", "").find("hold the brakes as well, then Watch again") != std::string::npos);
+    CHECK(h.aircraft.brakeCalls > 0);
     CHECK_NEAR(h.aircraft.thr[0], 0.0, 1e-6);  // put back to idle
     CHECK(!h.aircraft.driving);
+}
+
+// The A220's parking brake doesn't hold it at full thrust. The setup holds the brakes while the
+// engines run up (BRAKES every frame, as the "." key), and only then: not while it asks. Where
+// pressing them lets go of the parking brake, it's set again after.
+TEST(Setup_ThrottleRunUpsHoldTheBrakes) {
+    for (const bool unpark : {false, true}) {
+        SetupHarness h;
+        h.facts.hasSpoilers = false;
+        h.facts.gearRetractable = false;
+        h.aircraft.weakParkingBrake = true;
+        h.aircraft.brakesUnpark = unpark;
+        REQUIRE(h.start());
+        ThrottlePilot p{0.0, 50.0, 100.0};
+        double fastest = 0.0;
+        auto pilot = [&](double s) {
+            p(h, s);
+            fastest = std::max(fastest, h.aircraft.gs);
+        };
+        REQUIRE(h.run(90.0, pilot, "replay"));
+        CHECK(h.aircraft.brakeCalls > 0);
+        CHECK(logged("holding the brakes (BRAKES, as the \".\" key) while the engines run up, as well as the parking brake"));
+        for (int i = 0; i < 90 * 60 && h.phase() != "ask"; ++i) {  // the replays, a frame at a time
+            h.run(kDt);
+            fastest = std::max(fastest, h.aircraft.gs);
+        }
+        REQUIRE(h.phase() == "ask");
+        CHECK(fastest < 1.0);
+        CHECK_EQ(h.status().getString("note", ""), std::string(""));
+        h.run(2.0);
+        CHECK(h.aircraft.brakedAt < h.aircraft.t - 1.5);  // let go while it asks
+        CHECK(h.facts.parkingBrake);
+        CHECK_EQ(h.aircraft.parkSets, unpark ? 1 : 0);
+        CHECK_EQ(logged("the parking brake was let go while the brakes were held; setting it again"), unpark);
+    }
+}
+
+// The A220's throttle step started with its engines still spooling down from the taxi (29% N1, its
+// idle 21%): that fall started "your movement" before the throttle moved, and "Wait for the engines
+// to spool down" waited for 29% at idle. Where they settle is where they started.
+TEST(Setup_ThrottleStepStartedWhileTheEnginesSpoolDown) {
+    SetupHarness h;
+    h.facts.hasSpoilers = false;
+    h.facts.gearRetractable = false;
+    h.aircraft.n1[0] = h.aircraft.n1[1] = 30.0;  // idle is 20
+    REQUIRE(h.start());
+    ThrottlePilot p{0.0, 50.0, 100.0};
+    CHECK(h.run(90.0, followThrottle(h, p), "ask"));
+    CHECK(logged("the throttle started moving (0 -> "));
+    CHECK(!logged("the throttle started moving (0 -> 0,"));  // not on the engines' fall
+    CHECK(logged(", outcome 20 -> "));
+    CHECK(inOrder(h.prompts, {"Back to idle", "Wait for the engines to spool down", "Listen to the engines"}));
+}
+
+// The pilot's run-up left the A220 rolling (7.5 kt), before the setup held the brakes, and the
+// replay was stopped at once. It waits for the aircraft to stop, the brakes held meanwhile.
+TEST(Setup_ThrottleReplayWaitsForTheAircraftToStop) {
+    SetupHarness h;
+    h.facts.hasSpoilers = false;
+    h.facts.gearRetractable = false;
+    h.aircraft.weakParkingBrake = true;
+    h.aircraft.brakesHold = false;
+    REQUIRE(h.start());
+    ThrottlePilot p{0.0, 50.0, 100.0};
+    REQUIRE(h.run(90.0, followThrottle(h, p), "replay"));
+    REQUIRE(h.aircraft.gs > 5.0);
+    h.aircraft.brakesHold = true;
+    CHECK(h.run(90.0, nullptr, "ask"));
+    CHECK(logged("the throttle was back where you started it after"));
+    CHECK(logged("as far as you did; asking"));
+    CHECK_EQ(h.status().getString("note", ""), std::string(""));
 }
 
 namespace {
@@ -2404,6 +2507,27 @@ TEST(Setup_SpoilersRetractedPastWhereTheyStartedAreBack) {
     CHECK(std::find(h.prompts.begin(), h.prompts.end(), "That didn't register") == h.prompts.end());
     REQUIRE(h.answer("yes"));
     CHECK(h.flow.profile()[Control::Spoilers].state == ControlState::Ok);
+}
+
+// The A220's notch 1 puts out only its slats. "Wait for the flaps to extend" went by the trailing
+// edge, which never moved, so it never ticked and the pilot went on to notch 2. The slats count.
+TEST(Setup_AFlapNotchThatMovesOnlyTheSlatsCounts) {
+    SetupHarness h;
+    h.facts.hasSpoilers = false;
+    h.facts.gearRetractable = false;
+    h.facts.flapPositions = 5;
+    REQUIRE(h.start());
+    bool retract = false;
+    auto pilot = [&](double s) {
+        if (h.status().getNumber("task", 0.0) >= 2.0) retract = true;  // "Retract the flaps one notch"
+        h.aircraft.flapHandle = s >= 1.0 && !retract ? 1.0 : 0.0;
+    };
+    CHECK(h.run(90.0, pilot, "away"));
+    CHECK(retract);
+    CHECK(inOrder(h.prompts, {"Lower the flaps one notch", "Wait for the flaps to extend", "Retract the flaps one notch"}));
+    CHECK(logged("handle moved 1, outcome 0.78; checking replays on the outcome"));
+    CHECK(logged("the outcome moved 0."));  // with the handle, not a notch later
+    CHECK_NEAR(h.aircraft.flaps, 0.0, 0);  // the trailing edge never moved
 }
 
 // A method that passes but goes only part way (the A380's SPOILERS_SET went 76%, its spoilers half

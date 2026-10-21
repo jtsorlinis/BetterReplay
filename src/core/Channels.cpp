@@ -150,6 +150,10 @@ const ChannelDef kChannels[kChannelCount] = {
     // The simvar isn't settable; PARKING_BRAKE_SET takes 1/0. Clips from before it was recorded
     // replay with it off (assumeParkingBrakeOff).
     {"pbrake", "BRAKE PARKING POSITION", "bool", U8, STEP, EVT, "PARKING_BRAKE_SET"},
+    // The leading-edge flaps (slats). Airbus-style aircraft move only these at flap lever 1: the
+    // A220's notch 1 is slats 21 degrees, flaps 0, so the trailing edge alone didn't show the control
+    // setup it. The setup counts them with the flaps. Recorded only.
+    {"slat_l", "LEADING EDGE FLAPS LEFT PERCENT", "percent over 100", F32, LIN, NONE, nullptr},
 };
 
 int findChannel(const char* key) {

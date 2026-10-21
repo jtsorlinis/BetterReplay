@@ -2635,6 +2635,14 @@ void SimBridge::toggleReverse() {
     if (!playing_) driver_.toggleReverse();
 }
 
+void SimBridge::holdBrakes() {
+    if (!playing_) driver_.brakes();
+}
+
+void SimBridge::setParkingBrake(bool on) {
+    if (!playing_) driver_.parkingBrake(on);
+}
+
 // The gear step on the ground: the aircraft straight up from where it stands, its heading and
 // attitude kept and its velocities zero, held there with playback's freeze.
 bool SimBridge::beginHover(double liftFt, std::string& why) {
