@@ -25,20 +25,20 @@ The other big reason was getting the animations right. Other replay tools didn't
 
 Any aircraft can be taught with the control setup. **Included** means BetterReplay comes with the aircraft's control profile, so it replays right away without the setup.
 
-| Aircraft                       | Included | Known issues                                              |
-| ------------------------------ | -------- | --------------------------------------------------------- |
-| iniBuilds A320neo V2 (default) | ❌       |                                                           |
-| iniBuilds A330 (default)       | ❌       |                                                           |
-| Working Title 787-10 (default) | ❌       |                                                           |
-| Working Title 747-8 (default)  | ❌       |                                                           |
-| iniBuilds A340                 | ❌       |                                                           |
-| iniBuilds A350                 | ✅       | Engine sounds in passenger views near the engines         |
-| iniBuilds A380                 | ✅       | Engine sounds in external views from some angles          |
-| Fenix A320                     | ❌       |                                                           |
-| Synaptic A220                  | ✅       |                                                           |
-| FlightSim Studio E-Jets        | ❌       |                                                           |
-| PMDG 737                       | ✅       |                                                           |
-| PMDG 777                       | ✅       | Throttle can change at at acceleration altitude after T/O |
+| Aircraft                       | Included | Known issues                                     |
+| ------------------------------ | -------- | ------------------------------------------------ |
+| iniBuilds A320neo V2 (default) | ❌       |                                                  |
+| iniBuilds A330 (default)       | ❌       |                                                  |
+| Working Title 787-10 (default) | ❌       |                                                  |
+| Working Title 747-8 (default)  | ❌       |                                                  |
+| iniBuilds A340                 | ❌       |                                                  |
+| iniBuilds A350                 | ✅       | Engine whine in passenger views near the engines |
+| iniBuilds A380                 | ✅       | Engine whine in external views from some angles  |
+| Fenix A320                     | ❌       |                                                  |
+| Synaptic A220                  | ✅       |                                                  |
+| FlightSim Studio E-Jets        | ❌       |                                                  |
+| PMDG 737                       | ✅       |                                                  |
+| PMDG 777                       | ✅       | Throttle can change at accel altitude after T/O  |
 
 ## Install
 
