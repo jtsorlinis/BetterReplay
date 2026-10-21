@@ -677,6 +677,10 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                     clipFlag = NAN;
                     clipReverse = false;
                 } else if (by == ReverseBy::Events) {
+                    // The aircraft in reverse by what its reversers did too, as the setup's test
+                    // goes: the A220 never sets the flag, and waiting for it a whole landing's full
+                    // reverse replayed at reverse idle, the reverser put in again every 30 frames.
+                    if (ctx_.live && reversing(*ctx_.live, e)) liveReverse = true;
                     const bool flagOn = std::isfinite(flag) && flag >= 0.5;
                     const bool out = reversing(f, e);
                     if (out && !flagOn) {
@@ -693,6 +697,7 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                     }
                     clipReverse = flagOn || out;
                     clipFlag = clipReverse ? 1.0 : 0.0;
+                    if (!clipReverse) s.leverReversed[e] = false;
                 } else if (by == ReverseBy::Toggle) {
                     // Out of reverse (above): forward, whatever the flags say.
                     clipFlag = 0.0;
@@ -723,6 +728,7 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                         ++s.gapFrames;
                     } else {
                         s.leverGap[e] = 0;
+                        if (clipReverse && leverInReverse(s.lever, lv)) s.leverReversed[e] = true;
                         if (leverAxis(s.lever, lv, clipFlag, liveReverse, fraction)) {
                             ++s.leverFrames;
                         } else {
@@ -763,11 +769,8 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                 if (by == ReverseBy::Events) {
                     if (clipReverse != liveReverse) {
                         fraction = 0.0;  // idle in whichever mode the aircraft is in, until it matches
-                    } else if (clipReverse && lower < 0.0 && std::isfinite(pct) && pct < 0.0) {
-                        // The reverse amount: the lever variable may not show it (with "decrease
-                        // throttle" held it stays at idle), the simvar does.
-                        const double amount = pct / lower;
-                        fraction = std::isfinite(fraction) && fraction > amount ? fraction : amount;
+                    } else if (clipReverse) {
+                        fraction = eventsReverseAmount(fraction, s.leverReversed[e], pct, lower);
                     }
                 }
                 const double axis = static_cast<double>(std::lround(clamp(fraction, 0.0, 1.0) * 32768.0 - 16384.0));

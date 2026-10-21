@@ -1563,6 +1563,49 @@ TEST(Profile_LeverCalibrationTables) {
     CHECK(!reversing(f, 0));
 }
 
+// Reverse on an "events" aircraft whose throttle simvar doesn't show the amount: the A220's sits at
+// its lower limit (-20%) all through reverse, and its lever variable (idle 0.216, reverse idle 0.129,
+// full reverse 0) shows it. A landing with full reverse, back to reverse idle, then the lever at idle
+// before the reversers go in: from the lever once it has shown reverse, not full reverse throughout.
+TEST(Playback_EventsReverseFromTheLeverOnceItShowsReverse) {
+    LeverCalibration cal;
+    cal.var = "A22X Throttle # TLA";
+    cal.forward = leverTable({{0.0, 0.216}, {1.0, 1.0}});
+    cal.reverse = leverTable({{0.0, 0.1288}, {0.5, 0.0644}, {1.0, 0.0}});
+    CHECK(leverInReverse(cal, 0.0));
+    CHECK(leverInReverse(cal, 0.129));   // reverse idle
+    CHECK(!leverInReverse(cal, 0.216));  // idle
+    CHECK(!leverInReverse(cal, 0.6));
+    CHECK(!leverInReverse(cal, NAN));
+    LeverCalibration forwardOnly = cal;
+    forwardOnly.reverse.clear();
+    CHECK(!leverInReverse(forwardOnly, 0.0));  // no reverse table: the lever doesn't show the amount
+
+    const double lower = -20.0;
+    bool shown = false;
+    // One frame in reverse, the clip and the aircraft both reversing: the axis fraction sent.
+    auto amount = [&](double lever, double pct) {
+        if (leverInReverse(cal, lever)) shown = true;
+        double a = NAN;
+        CHECK(leverAxis(cal, lever, 1.0, true, a));
+        return eventsReverseAmount(a, shown, pct, lower);
+    };
+    CHECK_NEAR(amount(0.0, -20.0), 1.0, 1e-9);    // full reverse
+    CHECK_NEAR(amount(0.0644, -20.0), 0.5, 1e-9);
+    CHECK_NEAR(amount(0.129, -20.0), 0.0, 1e-3);  // reverse idle, the simvar still at -20
+    CHECK_NEAR(amount(0.216, -20.0), 0.0, 1e-3);  // the lever at idle, the reversers still out
+
+    // "Decrease throttle" held: the lever variable stays at idle and only the simvar shows the
+    // amount, so that goes, as before.
+    shown = false;
+    CHECK_NEAR(amount(0.216, -10.0), 0.5, 1e-9);
+    CHECK_NEAR(amount(0.216, -20.0), 1.0, 1e-9);
+    // Without a reverse limit, or the simvar not in reverse: the lever's.
+    CHECK_NEAR(eventsReverseAmount(0.3, false, -10.0, 0.0), 0.3, 1e-12);
+    CHECK_NEAR(eventsReverseAmount(0.3, false, 0.0, lower), 0.3, 1e-12);
+    CHECK_NEAR(eventsReverseAmount(0.7, false, -10.0, lower), 0.7, 1e-12);  // the lever's where it's more
+}
+
 // ---------------------------------------------------------------------------- toggle reverse in replays
 
 namespace {

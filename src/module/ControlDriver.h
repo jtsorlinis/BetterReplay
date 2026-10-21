@@ -161,6 +161,7 @@ private:
         int holdFrames = 0;
         bool engaged[4] = {};     // the reverser put in by us (the clip reversed without its flag)
         int engageWait[4] = {};   // frames until it's put in again if the aircraft hasn't taken it
+        bool leverReversed[4] = {};  // the clip's lever has shown reverse since its reversers came out
         ReverseToggle toggle;     // "toggle": the aircraft's reverse
         int toggleFrames = 0;     // per engine, a reverse amount sent
         std::vector<AutothrustStretch> autothrust[4];  // the playing clip's, per engine

@@ -382,6 +382,16 @@ double invertLever(const std::vector<LeverPoint>& table, double lever);
 // Idle is the forward table's lowest axis reading; the lever variable may run either way from
 // there (the PMDG 737's goes from 500 at idle down to 75 at full).
 bool leverAxis(const LeverCalibration& cal, double lever, double clipReverser, bool liveReverse, double& axis);
+// Whether a recorded lever value is in reverse by the calibration: beyond idle, the other way from
+// full, where there's a reverse table. There the lever variable shows the reverse amount itself.
+bool leverInReverse(const LeverCalibration& cal, double lever);
+// The axis fraction in reverse on an "events" aircraft (ReverseBy::Events), the clip and the
+// aircraft both in reverse. `fromLever`: the lever's (leverAxis, or the hardware axis); leverShown:
+// the clip's lever variable has shown reverse since its reversers came out (leverInReverse). Until
+// it has, the clip's throttle simvar over THROTTLE LOWER LIMIT where that's more: with "decrease
+// throttle" held the lever stays at idle and only the simvar shows the amount. After, the lever's:
+// the A220's simvar sits at its lower limit all through reverse, reverse idle too.
+double eventsReverseAmount(double fromLever, bool leverShown, double pct, double lower);
 // The spoilers' key event that takes a position, for method `m` (SPOILERS_SET for the key event
 // with no var, AXIS_SPOILER_SET), as a spoiler calibration names it; nullptr for any other.
 const char* spoilerPositionEvent(const ControlMethod& m);

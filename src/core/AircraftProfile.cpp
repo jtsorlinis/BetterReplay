@@ -570,15 +570,25 @@ double invertLever(const std::vector<LeverPoint>& t, double x) {
     return t.back().axis;
 }
 
-bool leverAxis(const LeverCalibration& cal, double lever, double clipReverser, bool liveReverse, double& axis) {
-    if (!std::isfinite(lever) || cal.forward.size() < 2) return false;
-    double flo = 0.0, fhi = 0.0;
-    const double tol = leverRange(cal.forward, flo, fhi);
+namespace {
+
+// Whether `lever` is beyond the forward table's idle, the other way from full.
+bool beyondIdle(const LeverCalibration& cal, double lever) {
+    double lo = 0.0, hi = 0.0;
+    const double tol = leverRange(cal.forward, lo, hi);
     const double idle = cal.forward.front().lever;
     const double toFull = cal.forward.back().lever >= idle ? 1.0 : -1.0;
-    const bool beyondIdle = (lever - idle) * toFull < -tol;  // the other way from full
+    return (lever - idle) * toFull < -tol;
+}
+
+}  // namespace
+
+bool leverAxis(const LeverCalibration& cal, double lever, double clipReverser, bool liveReverse, double& axis) {
+    if (!std::isfinite(lever) || cal.forward.size() < 2) return false;
+    const double idle = cal.forward.front().lever;
+    const bool beyond = beyondIdle(cal, lever);  // the other way from full
     const bool separate = cal.reverse.size() >= 2;
-    const bool clipReverse = std::isfinite(clipReverser) ? clipReverser >= 0.5 : separate && beyondIdle;
+    const bool clipReverse = std::isfinite(clipReverser) ? clipReverser >= 0.5 : separate && beyond;
     if (separate) {
         if (clipReverse != liveReverse) {
             // The clip's reverser events switch the aircraft's over; until then, idle in whichever
@@ -596,9 +606,20 @@ bool leverAxis(const LeverCalibration& cal, double lever, double clipReverser, b
         return true;
     }
     // Without a separate table only an axis with its own reverse zone reaches beyond idle.
-    if (clipReverse && beyondIdle) return false;
+    if (clipReverse && beyond) return false;
     axis = invertLever(cal.forward, lever);
     return true;
+}
+
+bool leverInReverse(const LeverCalibration& cal, double lever) {
+    return std::isfinite(lever) && cal.forward.size() >= 2 && cal.reverse.size() >= 2 && beyondIdle(cal, lever);
+}
+
+double eventsReverseAmount(double fromLever, bool leverShown, double pct, double lower) {
+    if (leverShown && std::isfinite(fromLever)) return fromLever;
+    if (!(lower < 0.0) || !std::isfinite(pct) || !(pct < 0.0)) return fromLever;
+    const double amount = pct / lower;
+    return std::isfinite(fromLever) && fromLever > amount ? fromLever : amount;
 }
 
 const char* spoilerPositionEvent(const ControlMethod& m) {
