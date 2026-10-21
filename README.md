@@ -51,7 +51,7 @@ The newest 10 takeoff and landing clips of each aircraft are kept, and older one
 
 ## Development
 
-Building from source, how it works, configuration and known gaps are in [DEVELOPMENT.md](DEVELOPMENT.md). [MANUAL_TEST.md](MANUAL_TEST.md) is the in-sim test checklist.
+Building from source, how it works, configuration and known gaps are in [DEVELOPMENT.md](DEVELOPMENT.md). [MANUAL_TEST.md](MANUAL_TEST.md) is the in-sim test checklist. [NOTES.md](NOTES.md) has the open bugs, the wishlist and which aircraft have been tested.
 
 ## License
 
