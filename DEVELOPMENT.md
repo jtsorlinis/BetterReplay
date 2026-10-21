@@ -2,7 +2,7 @@
 
 How to build BetterReplay, how it works, and what's still unverified. For installing and using it, see [README.md](README.md).
 
-> **Status: early testing.** The platform-independent core has 219 unit tests and the module builds and links against the MSFS 2024 SDK. In-sim test runs have led to the playback fixes for airspeed, gear, throttle, flaps and reverse described below. The control setup has run in the sim and set up all four controls on the PMDG 777 and 737, the iniBuilds A350 and A380, and the Synaptic A220, the A350's gear above the runway without a takeoff. Findings below on the A320neo V2 and the CJ4 are from older versions and still to be retested. Open bugs and which aircraft have been tested are in [NOTES.md](NOTES.md). Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
+> **Status: early testing.** The platform-independent core has 219 unit tests and the module builds and links against the MSFS 2024 SDK. In-sim test runs have led to the playback fixes for airspeed, gear, throttle, flaps and reverse described below. The control setup has run in the sim and set up all four controls on the PMDG 777 and 737, the iniBuilds A350 and A380, and the Synaptic A220, the A350's gear above the runway without a takeoff. Findings below on the A320neo V2 and the CJ4 are from older versions and still to be retested. Which aircraft have been tested and the known issues are in the README ([Aircraft](README.md#aircraft), [Known issues](README.md#known-issues)). Work through [MANUAL_TEST.md](MANUAL_TEST.md) and see [Known gaps](#known-gaps).
 
 ## Requirements
 
