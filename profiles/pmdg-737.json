@@ -1,0 +1,38 @@
+{
+  "key": "simobjects/airplanes/pmdg 737",
+  "title": "737-800 PAX BW TC",
+  "updatedUtcMs": 1792405786935,
+  "controls": {
+    "spoilers": {
+      "state": "ok",
+      "method": "key_event",
+      "var": "AXIS_SPOILER_SET",
+      "scale": 1,
+      "confirmed": true
+    },
+    "flaps": {
+      "state": "ok",
+      "method": "key_event",
+      "var": "FLAPS_INCR",
+      "scale": 1,
+      "confirmed": true,
+      "leadSec": 2.763803421
+    },
+    "throttle": {
+      "state": "ok",
+      "method": "key_event",
+      "var": "",
+      "scale": 1,
+      "confirmed": true,
+      "reverseBy": "hold"
+    },
+    "gear": {
+      "state": "ok",
+      "method": "key_event",
+      "var": "",
+      "scale": 1,
+      "confirmed": true,
+      "leadSec": 1.472236022
+    }
+  }
+}
