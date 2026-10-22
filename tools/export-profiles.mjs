@@ -63,8 +63,8 @@ const fileName = (key) => {
   }
 };
 
-// The states the module follows a profile for (ok, failed) or that say what the aircraft lacks.
-const setUp = (p) => Object.values(p.controls ?? {}).some((c) => ['ok', 'failed', 'absent'].includes(c.state));
+// The states the module follows a profile for (ok, failed, automatic) or that say what the aircraft lacks.
+const setUp = (p) => Object.values(p.controls ?? {}).some((c) => ['ok', 'failed', 'absent', 'automatic'].includes(c.state));
 
 // Indented, but arrays of plain values (the lever tables' [axis, lever] pairs) on one line, so
 // diffs stay readable.

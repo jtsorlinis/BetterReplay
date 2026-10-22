@@ -62,7 +62,10 @@ public:
     void setSpoilerCalibration(const LeverCalibration& cal);
     // After setLever, for the clip about to play: where its autothrust was in control
     // (autothrustStretches), the throttle follows the clip's thrust demand there (ThrustFollower),
-    // no further forward than its lever. clearAutothrust() when it stops playing.
+    // no further forward than its lever. clearAutothrust() when it stops playing. On a throttle
+    // input event that reads the pilot's throttle (the FSS E-Jets'), after begin(): where the clip's
+    // autothrottle held the levers away from it (autothrottleLeverStretches), the levers' position
+    // goes through the input instead.
     void findAutothrust(const std::vector<Frame>& clipFrames);
     void clearAutothrust();
     // After setSpoilerCalibration, for the clip about to play: where its ground spoilers took the
@@ -168,11 +171,15 @@ private:
         ThrustFollower follower[4];
         int64_t followMs = 0;   // when the throttle was last applied, for the follower's time step
         int followFrames = 0;   // per engine, following the clip's thrust demand
+        int atLeverFrames = 0;  // per engine, an input event sent the clip's lever (its autothrottle's)
     };
     bool beginSlot(Control c, Slot& s, const ControlMethod& m, std::string& why);
     void applySlot(Control c, Slot& s, const Frame& f, bool force);
     // Whether clip time t is in one of engine e's autothrust stretches.
     static bool inAutothrust(const Slot& s, int e, double t);
+    // An input event's value for engine e: the clip's, or in an autothrottle stretch the clip's
+    // lever as a fraction of its travel.
+    static double inputValue(Control c, Slot& s, const Frame& f, int e);
     // Whether value v for output i is due (changed, forced or time to resend); records it.
     static bool due(Slot& s, int i, double v, bool force);
     // For key events, which act like moving the hardware: due only when forced or when v moved at

@@ -52,6 +52,30 @@ constexpr double kLegTravelMinSec = 2.0;
 // method may have left it elsewhere: the PMDG 777's lever event raised the gear but didn't lower
 // it), for up to this long; only movement from there counts.
 constexpr double kRestWaitSec = 30.0;
+// An input event's _SET may take another range than the event reads (the FSS E-Jets' throttle
+// takes the axis's -1..1 for a lever that reads 0..1: sent the 0 it read at idle, it went to half).
+// While one replays, what it was sent and what the event read are paired once the argument has held
+// kSetSettleFrames (within kSetSameShare of the range it's sent over). Spread over kSetMinSpread of
+// that range at least, a straight line through them within kSetFitTol of what they read (a clamp
+// isn't one), that reads more than kSetFitTol off what the replay meant is undone in the next try.
+constexpr int kSetSettleFrames = 6;
+constexpr double kSetSameShare = 0.005;
+constexpr double kSetMinSpread = 0.25;
+constexpr double kSetFitTol = 0.03;
+constexpr size_t kSetSeenMax = 6000;
+// The spoilers on the ground: a variable named like their lever (kLeverWords) that stayed this
+// share of its range (1, or 100 where it reads more than 1.5) from where it was for kSpoilerLeverSec,
+// while the spoilers didn't move, is their lever, and they don't come up on the ground here (the
+// FSS E-Jets'): they're taken as automatic. Only one that held still for the step's first
+// kSpoilerLeverQuietSec counts (not something settling as the step starts).
+constexpr double kSpoilerLeverMoved = 0.2;
+constexpr double kSpoilerLeverSec = 1.5;
+constexpr double kSpoilerLeverQuietSec = 1.0;
+// A throttle replay of a variable logs what it sent and what that read this often.
+constexpr double kTraceSec = 2.0;
+// The throttle's input event is probed this share of the way from idle to where the pilot took it.
+constexpr double kProbeShare = 0.25;
+constexpr double kProbeMaxSec = 1.0;  // each of its two values held this long at most
 // Key events seen while the pilot moved the control (those that fired steadily before it are
 // noise: KeyEventTracker::kSteadyBefore). A position's value is where the control was
 // kKeySettleSec after it fired (or when it fired again); a click's effect is the control's first
@@ -169,6 +193,10 @@ bool hasWord(const std::string& name, const char* const* words) {
 }
 
 const char* const kSpoilerWords[] = {"SPOILER", "SPEED_BRAKE", "SPEEDBRAKE", "SPD_BRK", "SPDBRK", nullptr};
+// The spoilers' lever without them on the ground: an input event named like the spoilers (a
+// cockpit control), or an L:var named like their lever (not an indication), not an arming flag.
+const char* const kArmWords[] = {"ARM", nullptr};
+const char* const kLeverWords[] = {"LEVER", "HANDLE", nullptr};
 const char* const kFlapWords[] = {"FLAP", nullptr};
 const char* const kThrottleWords[] = {"THROTTLE", "THRUST_LEVER", "TLA", "LEVER", nullptr};
 const char* const kGearWords[] = {"GEAR", nullptr};
@@ -267,12 +295,21 @@ const char* const kHoverDetail =
     "gear, then puts it back.";
 const char* const kHeldDetail = "The aircraft is held frozen just above the runway until the gear step is done.";
 const char* const kLandDetail = "Once the gear is down, BetterReplay puts the aircraft back on the runway.";
+// Phase::Rest: a throttle method left the engines off idle and the next can't bring them back.
+const char* const kRestPrompt = "Bring the throttle back to idle";
+const char* const kRestDetail =
+    "The last method left the engines above idle, and this one can't bring them back. Move your throttle up a little "
+    "and back to idle, then wait for the engines to spool down: this method is tried again from there.";
 const char* const kLowerDetail =
     "The gear is still up. Once it's down, BetterReplay puts the aircraft back on the runway. Cancel setup puts it "
     "back as it is.";
 
 // Recording stops while the setup runs (SetupFlow::running), so its tests stay out of clips.
 const char* const kTakeoffDetail = "Recording is paused until the setup is done, so this takeoff isn't saved.";
+// The spoilers' lever moved on the ground without them (ControlState::Automatic).
+const char* const kSpoilersAutomaticNote =
+    "The spoilers don't come up on the ground on this aircraft, so they're taken as automatic: replays leave them to "
+    "the aircraft.";
 const char* const kDoneDetail = "Recording starts again now, with these controls.";
 
 const char* question(Control c) {
@@ -333,6 +370,7 @@ const char* stateLabel(ControlState s) {
         case ControlState::Skipped: return "skipped";
         case ControlState::Absent: return "not on this aircraft";
         case ControlState::Pending: return "not set up";
+        case ControlState::Automatic: return "automatic";
     }
     return "";
 }
@@ -450,6 +488,26 @@ void CandidateTracker::dropChangedBefore(double t) {
         std::vector<float>().swap(tr.series);
         --stored_;
     }
+}
+
+std::vector<size_t> CandidateTracker::namedMoves(const char* const* words, const char* const* unless,
+                                                const char* const* lvarWords, double after, double share) const {
+    std::vector<std::pair<double, size_t>> found;
+    for (size_t i = 0; i < tracks_.size(); ++i) {
+        const Track& tr = tracks_[i];
+        if (tr.noise || tr.first < 0 || tr.series.empty() || times_[static_cast<size_t>(tr.first)] < after) continue;
+        const double v = tr.series.back();
+        const double range = std::fabs(v) > 1.5 || std::fabs(tr.base) > 1.5 ? 100.0 : 1.0;
+        const double moved = std::fabs(v - tr.base) / range;
+        if (moved < share || !hasWord(vars_[i].name, words)) continue;
+        if (unless && hasWord(vars_[i].name, unless)) continue;
+        if (vars_[i].lvar && lvarWords && !hasWord(vars_[i].name, lvarWords)) continue;
+        found.push_back({moved, i});
+    }
+    std::stable_sort(found.begin(), found.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::vector<size_t> out;
+    for (const auto& f : found) out.push_back(f.second);
+    return out;
 }
 
 double CandidateTracker::sampleValue(const Track& tr, size_t s) const {
@@ -950,6 +1008,7 @@ void SetupFlow::enterStep() {
     std::vector<LeverPoint>().swap(sweepReverse_);
     for (std::vector<ControlMethod>& w : ways_) w.clear();
     pilotBack_ = replayBack_ = -1;
+    restAskedFor_ = SIZE_MAX;
     if (step_ >= plan_.size()) {
         phase_ = Phase::Done;
         std::string summary;
@@ -1022,6 +1081,8 @@ void SetupFlow::onFrame(double dt, const Frame& live, const SetupFacts& facts) {
             break;
         case Phase::Sweep: sweepFrame(dt, live); break;
         case Phase::Calibrate: calibrateFrame(dt, live); break;
+        case Phase::Rest: restFrame(dt, live); break;
+        case Phase::Probe: probeFrame(live); break;
         default: break;
     }
     if (!active()) return;
@@ -1047,6 +1108,8 @@ bool SetupFlow::brakesWanted() const {
         case Phase::Positions:
         case Phase::Replay:
         case Phase::Hold:
+        case Phase::Rest:
+        case Phase::Probe:
         case Phase::Sweep: return control() == Control::Throttle && onGround_;
         default: return false;
     }
@@ -1083,6 +1146,7 @@ void SetupFlow::beginUser() {
     resetHolds();
     need_.clear();
     gearHandleRest_ = gearHandleUpAt_ = NAN;
+    leverSeenAt_ = NAN;
     std::vector<ScanVar> vars;
     sim_->scanBegin(vars);
     scanning_ = true;
@@ -1125,6 +1189,31 @@ void SetupFlow::userFrame(double dt, const Frame& live) {
     sim_->scanKeyEvents(keysSeen_);
     for (const SeenKeyEvent& k : keysSeen_) keys_.add(t_, k.id, k.value);
     if (!moved_) keys_.dropBefore(t_ - kSearchLeadSec - 1.0);
+
+    // A variable named like the spoilers' lever out for a while, and neither their handle simvar
+    // nor the spoilers moving: they don't come up on the ground (the FSS E-Jets'). They're taken as
+    // automatic, the aircraft's own on landing: replays leave them to it.
+    if (!moved_ && control() == Control::Spoilers && onGround_) {
+        const std::vector<size_t> moved =
+            tracker_.namedMoves(kSpoilerWords, kArmWords, kLeverWords, kSpoilerLeverQuietSec, kSpoilerLeverMoved);
+        if (moved.empty()) {
+            leverSeenAt_ = NAN;
+        } else if (std::isnan(leverSeenAt_)) {
+            leverSeenAt_ = t_;
+        } else if (t_ - leverSeenAt_ >= kSpoilerLeverSec) {
+            std::string names;
+            for (size_t i = 0; i < moved.size() && i < 4; ++i) {
+                const ScanVar& v = tracker_.var(moved[i]);
+                names += std::string(i ? ", " : "") + (v.lvar ? "L:var " : "input event ") + v.name;
+            }
+            logf(0, "control setup: %s moved, but neither the spoilers' handle simvar (%.3g) nor the spoilers (%.3g) did: "
+                 "they don't come up on the ground here; taken as automatic, left to the aircraft in replays",
+                 names.c_str(), h, o);
+            note_ = kSpoilersAutomaticNote;
+            finishStep(ControlState::Automatic, ControlMethod(), false);
+            return;
+        }
+    }
 
     if (!moved_ && (dh > tu.handleStart || dout > tu.outcomeStart)) {
         moved_ = true;
@@ -1885,6 +1974,22 @@ void SetupFlow::startMethod(size_t i) {
     }
     driving_ = true;
     prepareMethod(m);
+    setSeen_.clear();
+    setArg_ = NAN;
+    setArgFrames_ = 0;
+    setSpan_ = 0.0;
+    double lo = INFINITY, hi = -INFINITY;
+    const bool input = m.kind == MethodKind::InputSet || m.kind == MethodKind::InputValue;
+    if (input) {
+        const int ch = methodSourceChannel(c, m.kind, 0);
+        for (const Frame& f : mini_.frames) {
+            if (!std::isfinite(f.v[ch])) continue;
+            lo = std::min(lo, f.v[ch]);
+            hi = std::max(hi, f.v[ch]);
+        }
+        if (hi > lo) setSpan_ = (hi - lo) * std::fabs(m.scale);
+    }
+    traceAt_ = 0.0;
     replayT_ = 0.0;
     hint_ = 0;
     firstApply_ = true;
@@ -1897,10 +2002,30 @@ void SetupFlow::startMethod(size_t i) {
     gearCommand_ = gearFrom_ = gearTo_ = NAN;
     gearCommandAt_ = 0.0;
     replayBack_ = -1;
-    phase_ = Phase::Replay;
-    phaseT_ = 0.0;
-    logf(0, "control setup: replaying the %s with %s (method %zu of %zu)", controlSpec(c).label,
-         describeMethod(c, m).c_str(), i + 1, methods_.size());
+    if (c == Control::Throttle && input && setSpan_ > 0.0 && !shortRerun_ && !askAnyway_ && restAskedFor_ != i) {
+        // Probed first (probeFrame). Not again once the pilot has brought the throttle back for
+        // it: the probe may have been what left it off idle.
+        const double v0 = mini_.frames.front().v[methodSourceChannel(c, m.kind, 0)];
+        double far = v0;
+        for (const Frame& f : mini_.frames) {
+            const double v = f.v[methodSourceChannel(c, m.kind, 0)];
+            if (std::isfinite(v) && std::fabs(v - v0) > std::fabs(far - v0)) far = v;
+        }
+        if (std::isfinite(v0) && far != v0) {
+            probeV_[0] = v0;
+            probeV_[1] = v0 + kProbeShare * (far - v0);
+            probeRead_[0] = probeRead_[1] = probeBefore_ = probeLast_ = NAN;
+            probeStage_ = 0;
+            probeStill_ = 0;
+            probeFresh_ = true;
+            phase_ = Phase::Probe;
+            phaseT_ = 0.0;
+            logf(0, "control setup: trying %s (method %zu of %zu): first what it reads for what it's sent",
+                 describeMethod(c, m).c_str(), i + 1, methods_.size());
+            return;
+        }
+    }
+    beginReplay();
 }
 
 void SetupFlow::prepareMethod(const ControlMethod& m) {
@@ -1939,6 +2064,227 @@ void SetupFlow::prepareMethod(const ControlMethod& m) {
             }
         }
     }
+}
+
+// What an InputSet method sent and what its input event read then, once the argument has held a
+// few frames (the preset may only run at the next update).
+void SetupFlow::noteSet(const Frame& f) {
+    const ControlMethod& m = methods_[method_];
+    if ((m.kind != MethodKind::InputSet && m.kind != MethodKind::InputValue) || !(setSpan_ > 0.0) || setSeen_.size() >= kSetSeenMax) return;
+    const double v = f.v[methodSourceChannel(control(), m.kind, 0)];
+    if (!std::isfinite(v)) return;
+    const double arg = v * m.scale + m.offset;
+    if (!(std::fabs(arg - setArg_) <= kSetSameShare * setSpan_)) {
+        setArg_ = arg;
+        setArgFrames_ = 0;
+        return;
+    }
+    if (++setArgFrames_ < kSetSettleFrames) return;
+    const double read = sim_->readVar({engineVar(m.var, 1), false});
+    if (std::isfinite(read)) setSeen_.push_back({arg, read});
+}
+
+namespace {
+
+// An input event read a * sent + b, sent lo..hi with method `m`: whether that isn't what `m` meant
+// (the value it sent each for), and `fixed` the same event sending what undoes it.
+bool undoSetLine(const ControlMethod& m, double a, double b, double lo, double hi, ControlMethod& fixed) {
+    if (m.scale == 0.0 || !std::isfinite(a) || !std::isfinite(b) || !(std::fabs(a) > 1e-9)) return false;
+    const double meantLo = (lo - m.offset) / m.scale, meantHi = (hi - m.offset) / m.scale;
+    const double off = std::max(std::fabs(a * lo + b - meantLo), std::fabs(a * hi + b - meantHi));
+    if (off <= kSetFitTol * std::fabs(meantHi - meantLo)) return false;  // as meant
+    auto round4 = [](double x) { return std::round(x * 1e4) / 1e4; };
+    fixed = m;
+    fixed.scale = round4(1.0 / a);
+    fixed.offset = round4(-b / a) + 0.0;  // (not -0)
+    return std::isfinite(fixed.scale) && std::isfinite(fixed.offset) && fixed.scale != 0.0;
+}
+
+}  // namespace
+
+// Whether the input event read a straight line of what its _SET was sent (read = a * sent + b), but
+// not what the replay meant (the value it sent it for); then `fixed` sends what undoes that. `why`
+// says why not.
+bool SetupFlow::setMapping(ControlMethod& fixed, double& a, double& b, std::string* why) const {
+    auto no = [why](const char* reason) {
+        if (why) *why = reason;
+        return false;
+    };
+    const ControlMethod& m = methods_[method_];
+    if ((m.kind != MethodKind::InputSet && m.kind != MethodKind::InputValue) || m.scale == 0.0) return no("not an input event");
+    if (setSeen_.size() < 2) return no("it read nothing back");
+    double lo = INFINITY, hi = -INFINITY, sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    for (const auto& p : setSeen_) {
+        lo = std::min(lo, p.first);
+        hi = std::max(hi, p.first);
+        sx += p.first;
+        sy += p.second;
+        sxx += p.first * p.first;
+        sxy += p.first * p.second;
+    }
+    if (!(hi - lo >= kSetMinSpread * setSpan_)) return no("it held near one value");
+    const double n = static_cast<double>(setSeen_.size());
+    const double var = sxx - sx * sx / n;
+    if (!(var > 0.0)) return no("it held near one value");
+    a = (sxy - sx * sy / n) / var;
+    b = (sy - a * sx) / n;
+    const double readSpan = std::fabs(a) * (hi - lo);
+    if (!(readSpan > 1e-9)) return no("what it read didn't follow what it was sent");
+    double worst = 0.0;
+    for (const auto& p : setSeen_) worst = std::max(worst, std::fabs(p.second - (a * p.first + b)));
+    if (worst > kSetFitTol * readSpan) return no("what it read isn't a straight line of what it was sent");
+    if (!undoSetLine(m, a, b, lo, hi, fixed)) return no("it read what it was meant to");
+    return true;
+}
+
+// What an InputSet replay sent and what its event read, at the values it held longest (up to six).
+std::string SetupFlow::setLevels() const {
+    struct Level {
+        double sent, read;
+        size_t n;
+    };
+    std::vector<Level> levels;
+    const double tol = std::max(kSetSameShare * setSpan_, 1e-9);
+    for (const auto& p : setSeen_) {
+        auto it = std::find_if(levels.begin(), levels.end(), [&](const Level& l) { return std::fabs(l.sent - p.first) <= tol; });
+        if (it == levels.end()) {
+            levels.push_back({p.first, p.second, 1});
+        } else {
+            it->read += p.second;
+            ++it->n;
+        }
+    }
+    std::stable_sort(levels.begin(), levels.end(), [](const Level& x, const Level& y) { return x.n > y.n; });
+    if (levels.size() > 6) levels.resize(6);
+    std::sort(levels.begin(), levels.end(), [](const Level& x, const Level& y) { return x.sent < y.sent; });
+    std::string out;
+    char part[80];
+    for (const Level& l : levels) {
+        std::snprintf(part, sizeof(part), "%ssent %.4g read %.4g", out.empty() ? "" : ", ", l.sent, l.read / l.n);
+        out += part;
+    }
+    return out.empty() ? "nothing read back" : out;
+}
+
+// Phase::Probe, the throttle's input event before its replay: sent where the movement starts, then
+// kProbeShare of the way to where it went furthest (well short of a detent like CL or TOGA), each
+// held until what the event reads has held still kSetSettleFrames (kProbeMaxSec at most: the
+// value written directly lands a frame or two later), does it read what it was sent?
+void SetupFlow::probeFrame(const Frame& live) {
+    (void)live;
+    const Control c = control();
+    const ControlMethod& m = methods_[method_];
+    const ScanVar var{engineVar(m.var, 1), false};
+    if (probeFresh_ && probeStage_ == 0) probeBefore_ = sim_->readVar(var);
+    Frame f = mini_.frames.front();
+    f.v[methodSourceChannel(c, m.kind, 0)] = probeV_[probeStage_];
+    sim_->applyControl(c, f, probeFresh_);
+    probeFresh_ = false;
+    const double read = sim_->readVar(var);
+    if (std::fabs(read - probeLast_) <= 1e-9) {
+        ++probeStill_;
+    } else {
+        probeLast_ = read;
+        probeStill_ = 0;
+    }
+    if (probeStill_ < kSetSettleFrames && phaseT_ < kProbeMaxSec) return;
+    probeRead_[probeStage_] = read;
+    if (++probeStage_ < 2) {
+        phaseT_ = 0.0;
+        probeStill_ = 0;
+        probeLast_ = NAN;
+        probeFresh_ = true;
+        return;
+    }
+    probeDone();
+}
+
+// What the probe showed. A straight line of what it was sent, but not as meant: the same event with
+// that undone goes next instead of this one. The same whatever it was sent: its preset doesn't take
+// what it's sent (the FSS E190's EVT_LEVER_THROTTLE_B_SET read 0.5 for 0, 0.25, 0.5 and 1, as if
+// sent 0, and put the levers at half), so the same event's value written directly goes next.
+// Either way this one isn't replayed. Otherwise (as meant, or nothing read back) it is.
+void SetupFlow::probeDone() {
+    const Control c = control();
+    const ControlMethod m = methods_[method_];
+    const double s0 = probeV_[0] * m.scale + m.offset, s1 = probeV_[1] * m.scale + m.offset;
+    const double r0 = probeRead_[0], r1 = probeRead_[1];
+    logf(0, "control setup:   %s read %.4g; sent %.4g it read %.4g, sent %.4g it read %.4g", engineVar(m.var, 1).c_str(),
+         probeBefore_, s0, r0, s1, r1);
+    Frame f = mini_.frames.front();  // where the movement starts, for the replay or the next method
+    f.v[methodSourceChannel(c, m.kind, 0)] = probeV_[0];
+    sim_->applyControl(c, f, true);
+    if (!std::isfinite(r0) || !std::isfinite(r1)) {
+        logf(0, "control setup:   it can't be read back; its replay will show");
+        beginReplay();
+        return;
+    }
+    const double tol = kSetFitTol * std::fabs(probeV_[1] - probeV_[0]);
+    if (!(std::fabs(r1 - r0) > tol)) {
+        size_t direct = methods_.size();
+        for (size_t j = method_ + 1; j < methods_.size() && direct == methods_.size(); ++j) {
+            if (m.kind == MethodKind::InputSet && methods_[j].kind == MethodKind::InputValue && methods_[j].var == m.var) direct = j;
+        }
+        logf(0, "control setup: %s reads the same whatever it's sent: not replaying it%s", describeMethod(c, m).c_str(),
+             direct < methods_.size() ? "; trying its value written directly next" : "");
+        endDrive();
+        if (direct < methods_.size() && direct != method_ + 1) {
+            // (The throttle: no ways back to keep in step, and method_ and before keep their places.)
+            const ControlMethod moved = methods_[direct];
+            methods_.erase(methods_.begin() + static_cast<std::ptrdiff_t>(direct));
+            methods_.insert(methods_.begin() + static_cast<std::ptrdiff_t>(method_ + 1), moved);
+        }
+        attempts_.push_back("failed");
+        nextMethod();
+        return;
+    }
+    const double a = (r1 - r0) / (s1 - s0), b = r0 - a * s0;
+    ControlMethod fixed;
+    if (undoSetLine(m, a, b, std::min(s0, s1), std::max(s0, s1), fixed) &&
+        std::find(methods_.begin(), methods_.end(), fixed) == methods_.end()) {
+        logf(0, "control setup: the input event reads %.4g x what it's sent %s %.4g, not what it's sent: trying %s instead", a,
+             b < 0.0 ? "-" : "+", std::fabs(b), describeMethod(c, fixed).c_str());
+        endDrive();
+        insertMethod(method_ + 1, fixed);
+        attempts_.push_back("failed");
+        nextMethod();
+        return;
+    }
+    beginReplay();
+}
+
+void SetupFlow::beginReplay() {
+    const Control c = control();
+    phase_ = Phase::Replay;
+    phaseT_ = 0.0;
+    firstApply_ = true;
+    logf(0, "control setup: replaying the %s with %s (method %zu of %zu)", controlSpec(c).label,
+         describeMethod(c, methods_[method_]).c_str(), method_ + 1, methods_.size());
+}
+
+void SetupFlow::insertMethod(size_t at, const ControlMethod& m) {
+    methods_.insert(methods_.begin() + static_cast<std::ptrdiff_t>(at), m);
+    for (int* i : {&shortBest_, &pilotBack_, &replayBack_}) {
+        if (*i >= static_cast<int>(at)) ++*i;
+    }
+    for (size_t& i : backTries_) {
+        if (i >= at) ++i;
+    }
+    if (restAskedFor_ != SIZE_MAX && restAskedFor_ >= at) ++restAskedFor_;
+}
+
+// A throttle replay of a variable, every kTraceSec: what it sent, what that read, and the throttle.
+void SetupFlow::traceReplay(const Frame& sent, const Frame& live) {
+    const ControlMethod& m = methods_[method_];
+    if (control() != Control::Throttle || replayT_ < traceAt_) return;
+    if (m.kind != MethodKind::InputSet && m.kind != MethodKind::InputValue && m.kind != MethodKind::LVar) return;
+    traceAt_ = replayT_ + kTraceSec;
+    const double v = sent.v[methodSourceChannel(Control::Throttle, m.kind, 0)];
+    const std::string var = engineVar(m.var, 1);
+    const double read = sim_->readVar({var, m.kind == MethodKind::LVar});
+    logf(0, "control setup:   %.0f s: sent %.4g, %s reads %.4g; the lever simvar %.3g%%, %s %.3g", replayT_,
+         m.kind == MethodKind::LVar ? v : v * m.scale + m.offset, var.c_str(), read, handleSignal(live),
+         jetLike(facts_.engineType) ? "N1" : "RPM", outcomeSignal(live));
 }
 
 // ---------------------------------------------------------------------------- each way
@@ -2200,7 +2546,9 @@ void SetupFlow::replayFrame(double dt, const Frame& live) {
     if (!started_) {
         // First back to where the pilot's movement started (the movement's first frame), held
         // until the control is there.
-        sim_->applyControl(c, drivenFrame(mini_.frames.front(), methods_[method_]), firstApply_);
+        const Frame& start = drivenFrame(mini_.frames.front(), methods_[method_]);
+        sim_->applyControl(c, start, firstApply_);
+        noteSet(start);
         firstApply_ = false;
         // The throttle's also waits for the aircraft to stop (the brakes held meanwhile): the A220
         // was still rolling at 7.5 kt from the pilot's run-up, and the roll check stopped the
@@ -2225,6 +2573,22 @@ void SetupFlow::replayFrame(double dt, const Frame& live) {
             return;
         }
         if (!there && phaseT_ < kRestWaitSec) return;
+        if (!rest && c == Control::Throttle && restAskedFor_ != method_) {
+            // Left off idle by the last method, and this one doesn't bring it back: the pilot does,
+            // so this one is tested from idle (the FSS E190's levers stayed at half after its first
+            // method, and each one after it went 0%). Once per method: one that puts it there itself
+            // replays anyway.
+            logf(1, "control setup: the throttle didn't go back to where you started it within %.0f s with %s (the lever "
+                 "simvar at %.3g%%, %s %.3g); asking you to bring it back to idle",
+                 kRestWaitSec, describeMethod(c, methods_[method_]).c_str(), handleSignal(live),
+                 jetLike(facts_.engineType) ? "N1" : "RPM", outcomeSignal(live));
+            endDrive();
+            restAskedFor_ = method_;
+            restStill_ = 0.0;
+            phase_ = Phase::Rest;
+            phaseT_ = 0.0;
+            return;
+        }
         started_ = true;
         if (!rest) {
             logf(1, "control setup: the %s didn't go back to where you started it within %.0f s; replaying anyway", label,
@@ -2239,7 +2603,10 @@ void SetupFlow::replayFrame(double dt, const Frame& live) {
     replayT_ += dt;
     const double dur = mini_.duration();
     sampleFrames(mini_.frames.data(), mini_.frames.size(), replayT_ < dur ? replayT_ : dur, frame_, &hint_);
-    sim_->applyControl(c, drivenFrame(frame_, methods_[method_]), firstApply_);
+    const Frame& driven = drivenFrame(frame_, methods_[method_]);
+    sim_->applyControl(c, driven, firstApply_);
+    noteSet(driven);
+    traceReplay(driven, live);
     firstApply_ = false;
     track(live);
     if (c == Control::Gear) noteGearCommand(eventTarget(c, frame_), live);
@@ -2270,11 +2637,24 @@ void SetupFlow::replayFrame(double dt, const Frame& live) {
     }
 }
 
+// Phase::Rest: the pilot brings the throttle back to idle; still there for kStableSec, the method
+// starts again from there.
+void SetupFlow::restFrame(double dt, const Frame& live) {
+    const bool still = !onGround_ || live.v[kGroundSpeed] <= kStopKt;
+    restStill_ = atRest(live) && still ? restStill_ + dt : 0.0;
+    if (restStill_ < kStableSec) return;
+    logf(0, "control setup: the throttle is back where you started it after %.0f s; trying %s again from there", phaseT_,
+         describeMethod(control(), methods_[method_]).c_str());
+    startMethod(method_);
+}
+
 void SetupFlow::holdFrame(const Frame& live) {
     const Control c = control();
     const Tuning tu = tuning(c);
     // Keep asserting the movement's end (the control at rest) while things settle.
-    sim_->applyControl(c, drivenFrame(mini_.frames.back(), methods_[method_]), false);
+    const Frame& end = drivenFrame(mini_.frames.back(), methods_[method_]);
+    sim_->applyControl(c, end, false);
+    noteSet(end);
     track(live);
     if (c == Control::Gear) noteGearCommand(eventTarget(c, mini_.frames.back()), live);
     const double v = judgeOutcome_ ? outcomeSignal(live) : handleSignal(live);
@@ -2327,6 +2707,30 @@ void SetupFlow::evaluate(const Frame& live) {
              std::fabs(replayLag_), replayLag_ >= 0.0 ? "later" : "earlier");
     }
     const bool passed = stoppedEarly_ || (reached && returned);
+    // Its input event read something else than the replay sent it for (the FSS E-Jets' throttle:
+    // the 0 it read at idle put it at half, where it stayed): the same event next, sent what puts
+    // it there. Unless this went all the way anyway.
+    ControlMethod fixed;
+    double a = 1.0, b = 0.0;
+    bool converts = false;
+    const MethodKind kind = methods_[method_].kind;
+    if (kind == MethodKind::InputSet || kind == MethodKind::InputValue) {
+        std::string why;
+        converts = setMapping(fixed, a, b, &why);
+        logf(0, "control setup:   what %s%s was sent and what the event read: %s%s%s%s", engineVar(methods_[method_].var, 1).c_str(),
+             kind == MethodKind::InputSet ? "_SET" : "", setLevels().c_str(), why.empty() ? "" : " (", why.c_str(),
+             why.empty() ? "" : ")");
+    }
+    if (converts && !stoppedEarly_ && !shortRerun_ && !askAnyway_ && !(passed && replayPeak_ >= kPassFull * userPeak_) &&
+        std::find(methods_.begin(), methods_.end(), fixed) == methods_.end()) {
+        logf(0, "control setup: %s moved the %s %d%% as far as you did; the input event read %.4g x what it was "
+             "sent %s %.4g, not what the replay meant: trying %s next",
+             desc.c_str(), controlSpec(c).label, pct, a, b < 0.0 ? "-" : "+", std::fabs(b), describeMethod(c, fixed).c_str());
+        insertMethod(method_ + 1, fixed);
+        attempts_.push_back("failed");
+        nextMethod();
+        return;
+    }
     // Part way with a spoiler event that takes a position, and back: where does each value put
     // them? (The A380's SPOILERS_SET and AXIS_SPOILER_SET both went 76%.)
     const bool partWay = !stoppedEarly_ && returned && replayPeak_ > 2.0 * replayStartTol() &&
@@ -3462,6 +3866,8 @@ std::string SetupFlow::prompt() const {
         case Phase::Land:
             return landPut_ || landDownSec_ > 0.0 ? "Putting the aircraft back" : "Waiting for the gear to come down";
         case Phase::Lower: return "Lower the gear";
+        case Phase::Rest: return kRestPrompt;
+        case Phase::Probe: return watchWhat(c);
         case Phase::Retry: return "That didn't register";
         case Phase::Back:
             return backFrom_ == BackFrom::Pilot ? bringBackWhat(c) : watchWhat(c);
@@ -3483,7 +3889,7 @@ void SetupFlow::statusJson(JsonWriter& w) const {
     if (!active()) return;
     static const char* const kPhases[] = {"idle",  "prepare", "takeoff", "user",  "retry",     "replay", "hold", "ask",
                                           "done",  "query",   "positions", "notice", "sweep", "away", "back",
-                                          "hover", "land",    "lower", "calibrate"};
+                                          "hover", "land",    "lower", "calibrate", "rest", "probe"};
     w.kv("phase", kPhases[static_cast<int>(phase_)]);
     const bool done = phase_ == Phase::Done;
     w.kv("step", done ? "" : controlSpec(control()).key);
@@ -3493,8 +3899,9 @@ void SetupFlow::statusJson(JsonWriter& w) const {
     w.kv("prompt", prompt());
     // The pilot's instructions in this step: which one is showing, and whether it's done (the
     // last one, while things settle). The throttle's holds also say how long it's been held.
-    // Away and Lower are one instruction each (the first again; "Lower the gear").
-    const bool single = phase_ == Phase::Away || phase_ == Phase::Lower;
+    // Away, Lower and Rest are one instruction each (the first again; "Lower the gear"; "Bring the
+    // throttle back to idle").
+    const bool single = phase_ == Phase::Away || phase_ == Phase::Lower || phase_ == Phase::Rest;
     const bool pilot = phase_ == Phase::User || phase_ == Phase::Positions || single;
     const bool holding = pilot && !single && control() == Control::Throttle && task_ < kThrottleHolds;
     const bool bringBack = phase_ == Phase::Back && backFrom_ == BackFrom::Pilot;
@@ -3506,6 +3913,7 @@ void SetupFlow::statusJson(JsonWriter& w) const {
         case Phase::Hover: detail = kHoverDetail; break;
         case Phase::Land: detail = kLandDetail; break;
         case Phase::Lower: detail = kLowerDetail; break;
+        case Phase::Rest: detail = kRestDetail; break;
         case Phase::Query: detail = kQueryDetail; break;
         case Phase::Positions: detail = kPositionsDetail; break;
         case Phase::Notice: detail = reverseOnly_ ? kReverseNoticeDetail : kNoticeDetail; break;
@@ -3565,6 +3973,8 @@ void SetupFlow::statusJson(JsonWriter& w) const {
         case Phase::Hover: w.value("skip").value("cancel"); break;
         case Phase::Takeoff: w.value("skip").value("later"); break;
         case Phase::Lower: w.value("cancel"); break;
+        case Phase::Rest: w.value("skip").value("cancel"); break;
+        case Phase::Probe: w.value("cancel"); break;
         case Phase::Retry: w.value("retry").value("skip").value("cancel"); break;
         case Phase::Replay:
         case Phase::Hold:

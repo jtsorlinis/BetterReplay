@@ -126,6 +126,19 @@ struct FakeAircraft : IControlSim {
     bool toggleStuck = false;       // once in reverse, toggles do nothing
     bool axisRecorded = false;      // the key-event handler sees the pilot's axis (thr_axis_N)
     bool hideThrottleVars = false;  // nothing but the simvar moves with the throttle
+    // The FSS E190 instead: the pilot's axis reaches the levers through the input event
+    // EVT_LEVER_THROTTLE_B, which reads the lever 0..1 but takes the axis's -1..1 (the lever goes
+    // to 0.5 * p + 0.5). Written directly it does; its _SET runs as if sent 0 whatever it's sent
+    // (in the sim it read 0.5 for 0, 0.25, 0.5 and 1), unless ejetSetWorks. Nothing else drives it.
+    bool ejetThrottle = false;
+    bool ejetSetWorks = false;
+    bool ejetUnreadable = false;  // or the event can't be read back at all (only the scan sees it)
+    // And its spoilers: on the ground neither they nor their handle simvar move, whatever the
+    // lever (the input event, which still reads it) does.
+    bool spoilersOnlyInAir = false;
+    // Variables named like the spoilers that aren't their lever: an indication (an L:var) that
+    // comes on at 3 s, and an input event that settles at 0.3 s, as the step starts.
+    bool spoilerIndicators = false;
     // The PMDG 777's gear instead: no variable the scan sees is its lever, but each leg has an
     // L:var animating it (0..1000), which moves with the gear and moves nothing else when written.
     bool pmdgGear = false;
@@ -224,7 +237,7 @@ struct FakeAircraft : IControlSim {
         if (spoilerHandle != spoilerHandleWas) spoilerHandleMovedAt = t;
         spoilerHandleWas = spoilerHandle;
         const double lag = spoilerLagSec + (driving && drivenControl == Control::Spoilers ? spoilerReplayLagSec : 0.0);
-        if (t - spoilerHandleMovedAt >= lag) spoilerSurface = approach(spoilerSurface, spoilerHandle, 2.0, dt);
+        if (t - spoilerHandleMovedAt >= lag) spoilerSurface = approach(spoilerSurface, spoilerHandleSimvar(), 2.0, dt);
         if (airbus) {
             for (int e = 0; e < 2; ++e) {
                 const double l = tla(e);
@@ -260,6 +273,8 @@ struct FakeAircraft : IControlSim {
         if (keyNoise) fire(kElevatorAxis, std::round(300.0 * std::sin(7.0 * t)));
     }
 
+    double spoilerHandleSimvar() const { return spoilersOnlyInAir && onGround ? 0.0 : spoilerHandle; }
+
     Frame live() const {
         Frame f;
         for (double& v : f.v) v = 0.0;
@@ -269,7 +284,7 @@ struct FakeAircraft : IControlSim {
         f.v[kOnGround] = onGround ? 1.0 : 0.0;
         f.v[kGroundSpeed] = gs;
         f.v[kAgl] = onGround ? 0.0 : 800.0;
-        f.v[kSpoilersHandle] = spoilerHandle;
+        f.v[kSpoilersHandle] = spoilerHandleSimvar();
         f.v[kSpoilersLeft] = spoilerSurface;
         for (int e = 0; e < 2; ++e) {
             f.v[kThrottle1 + e] = !airbus && holdReverse ? -37.0 : thr[e];  // (the PMDG's simvar in full reverse)
@@ -309,7 +324,8 @@ struct FakeAircraft : IControlSim {
         }
         if (pmdgGear) vars.insert(vars.end(), {{"7X7XleftMLGExt", true}, {"7X7XrightMLGExt", true}, {"7X7XnoseMLGExt", true}});
         if (pmdgLeverVars) vars.insert(vars.end(), {{"7X7XleftMLGExtSnd", true}, {"switch_295_a", true}});
-        return vars;
+        if (ejetThrottle) vars.push_back({"EVT_LEVER_THROTTLE_B", false});
+        if (spoilerIndicators) vars.insert(vars.end(), {{"SPOILER_INDICATION", true}, {"SPOILER_LEVER_DETENT", false}});        return vars;
     }
     std::vector<double> scanValues() const {
         std::vector<double> v = {spoilerHandle * 100.0, ieThrottle(0), ieThrottle(1), gearLever, 1.0, t * 1000.0, 42.0,
@@ -321,7 +337,8 @@ struct FakeAircraft : IControlSim {
         if (airbus && atRequest) v.insert(v.end(), {leverVar(0), leverVar(1)});
         if (pmdgGear) v.insert(v.end(), {legAnim * 1000.0, legAnim * 1000.0, legAnim * 1000.0});
         if (pmdgLeverVars) v.insert(v.end(), {gearPos < 0.999 ? 1.0 : 0.0, gearLever * 100.0});
-        return v;
+        if (ejetThrottle) v.push_back(thr[0] / 100.0);
+        if (spoilerIndicators) v.insert(v.end(), {t >= 3.0 ? 1.0 : 0.0, t >= 0.3 ? 1.0 : 0.0});        return v;
     }
     void scanBegin(std::vector<ScanVar>& vars) override {
         ++scans;
@@ -343,6 +360,7 @@ struct FakeAircraft : IControlSim {
         events.swap(keyQueue);
     }
     double readVar(const ScanVar& var) override {
+        if (ejetUnreadable && var.name == "EVT_LEVER_THROTTLE_B") return NAN;
         const std::vector<ScanVar> vars = scanVars();
         const std::vector<double> values = scanValues();
         for (size_t i = 0; i < vars.size(); ++i) {
@@ -400,6 +418,13 @@ struct FakeAircraft : IControlSim {
         } else if (c == Control::Spoilers && driven == spoilersCurved && driven.kind == MethodKind::KeyEvent) {
             const double v = f.v[kSpoilersHandle];
             if (std::isfinite(v) && v >= 0.0 && v <= 1.0) spoilerHandle = 0.52 * std::pow(v, 0.42);
+        } else if (c == Control::Throttle && ejetThrottle) {
+            const bool set = driven.kind == MethodKind::InputSet, direct = driven.kind == MethodKind::InputValue;
+            if ((set || direct) && driven.var == "EVT_LEVER_THROTTLE_B") {
+                double arg = f.v[kInputThrottle1] * driven.scale + driven.offset;
+                if (set && !ejetSetWorks) arg = 0.0;
+                if (std::isfinite(arg)) thr[0] = thr[1] = 100.0 * std::fmin(1.0, std::fmax(0.0, 0.5 * arg + 0.5));
+            }
         } else if (c == Control::Throttle && driven == throttleWorks && driven.kind == MethodKind::KeyEvent) {
             // Like ControlDriver: the recorded hardware axis, else the lever simvar as a fraction.
             for (int e = 0; e < engines; ++e) {
@@ -915,6 +940,77 @@ TEST(Setup_SpoilersFallBackToTheHardwareAxisEvent) {
     CHECK_EQ(describeMethod(Control::Flaps, ControlMethod{MethodKind::KeyEvent, "", 1.0}), std::string("key event FLAPS_SET"));
 }
 
+namespace {
+
+// The spoilers on the ground and the throttle: no gear here.
+void spoilersOnTheGround(SetupHarness& h) {
+    h.facts.engines = 1;
+    h.aircraft.engines = 1;
+    h.facts.gearRetractable = false;
+}
+
+}  // namespace
+
+// The FSS E190's spoilers stay down on the ground, and so does their handle simvar, whatever the
+// lever does. The lever out without them says so: they're taken as automatic, left to the aircraft
+// in replays (its ground spoilers come up by themselves on landing), and the setup goes on.
+TEST(Setup_SpoilersThatDontComeUpOnTheGroundAreTakenAsAutomatic) {
+    SetupHarness h;
+    spoilersOnTheGround(h);
+    h.aircraft.spoilersOnlyInAir = true;
+    REQUIRE(h.start());
+    CHECK_EQ(h.status().getString("step", ""), std::string("spoilers"));
+    // Deployed at 2 s and held: the lever's input event moves, nothing else does.
+    h.run(6.0, deploySpoilers(h.aircraft, 2.0, 10.0));
+    CHECK(logged("input event AIRLINER_SPOILER_LEVER moved, but neither the spoilers' handle simvar (0) nor the spoilers (0) "
+                 "did: they don't come up on the ground here; taken as automatic, left to the aircraft in replays"));
+    CHECK(logged("control setup: spoilers automatic"));
+    CHECK(h.aircraft.tried.empty());  // nothing replayed
+    CHECK_EQ(h.aircraft.hovers, 0);
+    const ControlProfile& sp = h.flow.profile()[Control::Spoilers];
+    CHECK(sp.state == ControlState::Automatic);
+    CHECK(sp.method.kind == MethodKind::None);
+    CHECK(h.flow.profile().drives(Control::Spoilers));  // playback leaves them to the aircraft
+    {
+        const JsonValue st = h.status();
+        CHECK_EQ(st.getString("step", ""), std::string("throttle"));
+        CHECK(st.getString("note", "").find("taken as automatic") != std::string::npos);
+        const JsonValue* plan = st.get("plan");
+        REQUIRE(plan && plan->array.size() == 2);
+        CHECK_EQ(plan->array[0].getString("control", ""), std::string("spoilers"));
+        CHECK_EQ(plan->array[0].getString("state", ""), std::string("automatic"));
+    }
+    // Kept as such in aircraft.json.
+    ProfileStore store;
+    store.upsert("simobjects/airplanes/e190")[Control::Spoilers] = sp;
+    std::string json;
+    store.toJson(json);
+    CHECK(json.find("\"automatic\"") != std::string::npos);
+    ProfileStore back;
+    std::string err;
+    REQUIRE(back.fromJson(json.data(), json.size(), &err));
+    const AircraftProfile* b = back.find("simobjects/airplanes/e190");
+    REQUIRE(b);
+    CHECK((*b)[Control::Spoilers].state == ControlState::Automatic);
+}
+
+// Spoilers that come up on the ground are set up as before, also with variables named like them
+// that aren't their lever: an indication, or something settling as the step starts.
+TEST(Setup_SpoilersThatComeUpOnTheGroundAreSetUpAsBefore) {
+    for (const bool indicators : {false, true}) {
+        SetupHarness h;
+        h.facts.gearRetractable = false;
+        h.aircraft.spoilerIndicators = indicators;
+        REQUIRE(h.start());
+        CHECK(h.run(40.0, deploySpoilers(h.aircraft, 6.0, 10.0), "ask"));
+        for (const std::string& line : g_setupLog) CHECK(line.find("automatic") == std::string::npos);
+        REQUIRE(!h.aircraft.tried.empty());
+        CHECK(h.aircraft.tried[0] == h.aircraft.spoilersWork);
+        REQUIRE(h.answer("yes"));
+        CHECK(h.flow.profile()[Control::Spoilers].state == ControlState::Ok);
+    }
+}
+
 TEST(Setup_ThrottleUsesOnePatternForBothEnginesAndWaitsForTheSpool) {
     SetupHarness h;
     h.facts.hasSpoilers = false;
@@ -946,6 +1042,143 @@ TEST(Setup_ThrottleUsesOnePatternForBothEnginesAndWaitsForTheSpool) {
     CHECK_NEAR(h.aircraft.thr[0], 0.0, 1.0);
     REQUIRE(h.answer("yes"));
     CHECK(h.flow.profile()[Control::Throttle].method.var == "ENGINE_THROTTLE_#");
+}
+
+namespace {
+
+// A throttle-only setup on the FSS E190's throttle (its input events and lever variables don't
+// show in the live frame's channels: no profile yet).
+void ejetThrottleOnly(SetupHarness& h) {
+    h.facts.hasSpoilers = false;
+    h.facts.gearRetractable = false;
+    h.aircraft.ejetThrottle = true;
+    h.aircraft.hideInputThrottle = true;
+    h.aircraft.hideThrottleVars = true;
+}
+
+}  // namespace
+
+// An input event whose _SET takes the axis's -1..1 for a lever that reads 0..1: sent what it read,
+// idle put the levers at half, where they stayed for every method after it. Probed before its
+// replay (0 read 0.5, 0.25 read 0.625), the same event with that undone goes instead, and the first
+// isn't replayed.
+TEST(Setup_AnInputEventThatTakesAnotherRangeIsTriedNextConverted) {
+    SetupHarness h;
+    ejetThrottleOnly(h);
+    h.aircraft.ejetSetWorks = true;
+    REQUIRE(h.start());
+    ThrottlePilot p{0.0, 50.0, 100.0};
+    REQUIRE(h.run(240.0, followThrottle(h, p), "ask"));
+    const ControlMethod asRead{MethodKind::InputSet, "EVT_LEVER_THROTTLE_B", 1.0};
+    const ControlMethod converted{MethodKind::InputSet, "EVT_LEVER_THROTTLE_B", 2.0, -1.0};
+    REQUIRE(h.aircraft.tried.size() == 2);
+    CHECK(h.aircraft.tried[0] == asRead);
+    CHECK(h.aircraft.tried[1] == converted);
+    CHECK(logged("first what it reads for what it's sent"));
+    CHECK(logged("EVT_LEVER_THROTTLE_B read 0; sent 0 it read 0.5, sent 0.25 it read 0.625"));
+    CHECK(logged("the input event reads 0.5 x what it's sent + 0.5, not what it's sent: trying input event "
+                 "EVT_LEVER_THROTTLE_B (EVT_LEVER_THROTTLE_B_SET, sent 2 x value - 1) instead"));
+    CHECK_EQ(h.replayStarts.size(), size_t(1));  // the first isn't replayed
+    CHECK_EQ(h.asks, 1);
+    CHECK_NEAR(h.aircraft.thr[0], 0.0, 1e-6);
+    REQUIRE(h.answer("yes"));
+    const ControlProfile& tp = h.flow.profile()[Control::Throttle];
+    CHECK(tp.state == ControlState::Ok);
+    CHECK(tp.method == converted);
+    CHECK_EQ(describeMethod(Control::Throttle, converted),
+             std::string("input event EVT_LEVER_THROTTLE_B (EVT_LEVER_THROTTLE_B_SET, sent 2 x value - 1)"));
+    CHECK_EQ(describeMethod(Control::Throttle, asRead), std::string("input event EVT_LEVER_THROTTLE_B (EVT_LEVER_THROTTLE_B_SET)"));
+    // Kept as such in aircraft.json.
+    ProfileStore store;
+    store.upsert("simobjects/airplanes/e190")[Control::Throttle] = tp;
+    std::string json;
+    store.toJson(json);
+    CHECK(json.find("\"offset\"") != std::string::npos);
+    ProfileStore back;
+    std::string err;
+    REQUIRE(back.fromJson(json.data(), json.size(), &err));
+    const AircraftProfile* b = back.find("simobjects/airplanes/e190");
+    REQUIRE(b);
+    CHECK((*b)[Control::Throttle].method == converted);
+}
+
+// The FSS E190 as the sim showed it: its _SET runs as if sent 0, whatever it's sent (it read 0.5 for
+// 0, 0.25, 0.5 and 1, and put the levers at half), but written directly it takes the value, in the
+// axis's -1..1. Probed, the _SET reads the same for both: not replayed, and the value written
+// directly goes next; probed in turn, that one shows the range and goes converted.
+TEST(Setup_AnInputEventWhosePresetIgnoresWhatItsSentIsWrittenDirectly) {
+    SetupHarness h;
+    ejetThrottleOnly(h);
+    REQUIRE(h.start());
+    ThrottlePilot p{0.0, 50.0, 100.0};
+    REQUIRE(h.run(240.0, followThrottle(h, p), "ask"));
+    const ControlMethod set{MethodKind::InputSet, "EVT_LEVER_THROTTLE_B", 1.0};
+    const ControlMethod direct{MethodKind::InputValue, "EVT_LEVER_THROTTLE_B", 1.0};
+    const ControlMethod converted{MethodKind::InputValue, "EVT_LEVER_THROTTLE_B", 2.0, -1.0};
+    REQUIRE(h.aircraft.tried.size() == 3);
+    CHECK(h.aircraft.tried[0] == set);
+    CHECK(h.aircraft.tried[1] == direct);
+    CHECK(h.aircraft.tried[2] == converted);
+    CHECK(logged("sent 0 it read 0.5, sent 0.25 it read 0.5"));
+    CHECK(logged("input event EVT_LEVER_THROTTLE_B (EVT_LEVER_THROTTLE_B_SET) reads the same whatever it's sent: not "
+                 "replaying it; trying its value written directly next"));
+    CHECK(logged("trying input event EVT_LEVER_THROTTLE_B (value written directly, sent 2 x value - 1) instead"));
+    CHECK_EQ(h.replayStarts.size(), size_t(1));
+    CHECK_EQ(h.asks, 1);
+    CHECK_NEAR(h.aircraft.thr[0], 0.0, 1e-6);
+    REQUIRE(h.answer("yes"));
+    const ControlProfile& tp = h.flow.profile()[Control::Throttle];
+    CHECK(tp.state == ControlState::Ok);
+    CHECK(tp.method == converted);
+    CHECK_EQ(describeMethod(Control::Throttle, converted),
+             std::string("input event EVT_LEVER_THROTTLE_B (value written directly, sent 2 x value - 1)"));
+}
+
+// Where nothing shows the conversion (the event can't be read back), its probe and its replay leave
+// the levers at half, and what comes next can't bring them back: the pilot is asked to, and that
+// method is tried from idle (not probed again: the probe may be what left them there). Every
+// method is tried from idle: none replays "anyway".
+TEST(Setup_AThrottleLeftOffIdleIsBroughtBackByThePilot) {
+    SetupHarness h;
+    h.facts.hasSpoilers = false;
+    h.facts.gearRetractable = false;
+    h.aircraft.ejetThrottle = true;
+    h.aircraft.ejetUnreadable = true;
+    h.aircraft.hideInputThrottle = true;
+    h.aircraft.hideThrottleVars = true;
+    REQUIRE(h.start());
+    ThrottlePilot p{0.0, 50.0, 100.0};
+    REQUIRE(h.run(240.0, followThrottle(h, p), "rest"));
+    CHECK(logged("EVT_LEVER_THROTTLE_B read nan; sent 0 it read nan, sent 0.25 it read nan"));
+    CHECK(logged("it can't be read back; its replay will show"));
+    CHECK(logged("the throttle didn't go back to where you started it within 30 s with input event EVT_LEVER_THROTTLE_B"));
+    CHECK_NEAR(h.aircraft.thr[0], 50.0, 1e-6);  // where the probe left it
+    {
+        const JsonValue st = h.status();
+        CHECK_EQ(st.getString("prompt", ""), std::string("Bring the throttle back to idle"));
+        CHECK(st.getString("detail", "").find("left the engines above idle") != std::string::npos);
+        CHECK_EQ(st.getNumber("tasks", 0), 1.0);
+    }
+    CHECK(h.aircraft.brakeCalls > 0);
+    const int brakes = h.aircraft.brakeCalls;
+    h.run(1.0);
+    CHECK(h.aircraft.brakeCalls > brakes);  // held meanwhile
+    CHECK_EQ(h.phase(), std::string("rest"));
+    // The pilot brings it back each time they're asked.
+    int rests = 0;
+    while (rests < 6) {
+        ++rests;
+        h.aircraft.thr[0] = h.aircraft.thr[1] = 0.0;
+        CHECK(h.run(30.0, nullptr, "replay"));
+        if (!h.run(400.0, nullptr, "rest")) break;
+    }
+    CHECK(rests >= 2);
+    CHECK_EQ(h.phase(), std::string("done"));
+    CHECK(logged("the throttle is back where you started it after"));
+    CHECK(logged("trying input event EVT_LEVER_THROTTLE_B (EVT_LEVER_THROTTLE_B_SET) again from there"));
+    CHECK(logged("what EVT_LEVER_THROTTLE_B_SET was sent and what the event read: nothing read back (it read nothing back)"));
+    for (const std::string& line : g_setupLog) CHECK(line.find("replaying anyway") == std::string::npos);
+    CHECK(h.flow.profile()[Control::Throttle].state == ControlState::Failed);
 }
 
 // ---------------------------------------------------------------------------- throttle lever
@@ -1867,6 +2100,77 @@ TEST(Playback_AutothrustStretchesFromTheClip) {
     CHECK(a[1].startT >= 152.0);
 
     CHECK(autothrustStretches(LeverCalibration(), autothrustFlight(0.0, 0.0), 0).empty());
+}
+
+namespace {
+
+// The value of the last point at or before t (NaN before the first).
+double stepped(const std::vector<std::pair<double, double>>& pts, double t) {
+    double v = NAN;
+    for (const auto& p : pts) {
+        if (p.first > t) break;
+        v = p.second;
+    }
+    return v;
+}
+
+// An FSS E190 clip at 30 Hz: the pilot's throttle (the input event, 0..1) and the lever simvar
+// (percent), which heads for 100 x the input (93.9 at most, 2.1 at idle) with a lag, rate
+// limited, or where the autothrottle (`at`, NaN: off) puts it. From `rev` on its reversers are out.
+std::vector<Frame> ejetFlight(const std::vector<std::pair<double, double>>& input,
+                              const std::vector<std::pair<double, double>>& at, double secs, double rev = INFINITY) {
+    std::vector<Frame> frames;
+    const double dt = 1.0 / 30.0;
+    auto target = [&](double t) {
+        const double a = stepped(at, t);
+        if (std::isfinite(a)) return a;
+        const double v = 100.0 * stepped(input, t);
+        return v < 2.1 ? 2.1 : (v > 93.9 ? 93.9 : v);
+    };
+    double lever = target(0.0);
+    for (int i = 0; i <= static_cast<int>(secs * 30.0); ++i) {
+        Frame f;
+        for (double& v : f.v) v = NAN;
+        f.t = i * dt;
+        double rate = (target(f.t) - lever) / 1.5;
+        rate = rate > 15.0 ? 15.0 : (rate < -15.0 ? -15.0 : rate);
+        lever += rate * dt;
+        f.v[kInputThrottle1] = stepped(input, f.t);
+        f.v[kThrottle1] = lever;
+        if (f.t >= rev) f.v[kReverserNozzle1] = 100.0;
+        frames.push_back(f);
+    }
+    return frames;
+}
+
+}  // namespace
+
+// The FSS E190's takeoff: the pilot's throttle to 0.385 with the lever following it, then to 0.69
+// and the autothrottle taking the levers to 87%: one stretch, from where the levers went past
+// the throttle to the end. The pilot alone (full throttle reads 93.9%) has none. An approach with
+// the throttle at idle and the A/T flying the levers, down towards it and up again, is one
+// stretch to the retard; the reversers out end it.
+TEST(Playback_AutothrottleLeverStretchesFromTheClip) {
+    const double nan = NAN;
+    const std::vector<Frame> takeoff = ejetFlight({{0, 0}, {4, 0.385}, {14, 0.6875}}, {{0, nan}, {15, 87.0}}, 70.0);
+    std::vector<AutothrustStretch> a = autothrottleLeverStretches(takeoff, 0);
+    REQUIRE(a.size() == 1);
+    CHECK(a[0].startT > 15.0 && a[0].startT < 18.0);
+    CHECK_NEAR(a[0].endT, 70.0, 0.05);
+    CHECK(autothrottleLeverStretches(takeoff, 1).empty());  // engine 2 wasn't recorded
+
+    CHECK(autothrottleLeverStretches(ejetFlight({{0, 0}, {5, 0.385}, {15, 1.0}, {40, 0.5}, {50, 0.0}}, {{0, nan}}, 70.0), 0)
+              .empty());
+
+    const std::vector<std::pair<double, double>> approach = {{0, 55.0}, {20, 45.0}, {30, 60.0}, {50, 2.1}, {55, nan}};
+    a = autothrottleLeverStretches(ejetFlight({{0, 0}}, approach, 70.0), 0);
+    REQUIRE(a.size() == 1);
+    CHECK_NEAR(a[0].startT, 0.0, 0.05);
+    CHECK(a[0].endT > 50.0 && a[0].endT < 55.0);
+
+    a = autothrottleLeverStretches(ejetFlight({{0, 0}}, approach, 70.0, 30.0), 0);
+    REQUIRE(a.size() == 1);
+    CHECK(a[0].endT < 30.0);
 }
 
 // Following an approach's thrust demand on aircraft whose demand responds faster or slower,

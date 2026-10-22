@@ -51,6 +51,13 @@ const char* const kMaskedInputEvents[] = {
 };
 constexpr size_t kMaskedInputEventCount = sizeof(kMaskedInputEvents) / sizeof(kMaskedInputEvents[0]);
 
+// L:vars that show whether an aircraft's own autothrottle is on (SimBridge::pressAutothrottleDisconnect).
+// The FSS E-Jets: the sim's AUTO_THROTTLE_DISCONNECT goes to the button on their thrust levers,
+// which toggles it, so the two presses other aircraft need left it on, holding climb thrust
+// through a takeoff replay. Read before each press, at most kAtLightPresses a disconnect.
+const char* const kAutothrottleLights[] = {"FSS_EXX_FGC_LT_AT"};
+constexpr int kAtLightPresses = 2;
+
 bool isThrottle(int channel) { return channel >= kThrottle1 && channel <= kThrottle4; }
 
 bool isRotation(int channel) { return channel >= kRotVelBodyX && channel <= kRotVelBodyZ; }
@@ -1134,7 +1141,8 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
                   cp.state == ControlState::Ok ? ("via " + describeMethod(c, cp.method) +
                                                   (drive.perDirection() ? " (" + describeControl(c, drive) + ")" : ""))
                                                      .c_str()
-                                               : "left to the aircraft: the setup found no way to replay it");
+                  : cp.state == ControlState::Automatic ? "left to the aircraft: automatic on it"
+                                                        : "left to the aircraft: the setup found no way to replay it");
         if (c == Control::Throttle && cp.state == ControlState::Ok && cp.lever.valid()) {
             // The lever simvar isn't the lever on this aircraft: replay the lever's own variable.
             if (clipHasLever(cp.lever, clip, numEngines_, &why)) {
@@ -1144,6 +1152,8 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
                 log::info("playback: the throttle levers follow %s: %s (recorded before the lever setup?)",
                           kChannels[kThrottle1].simvar, why.c_str());
             }
+        } else if (c == Control::Throttle && cp.state == ControlState::Ok) {
+            driver_.findAutothrust(clip.frames);  // an input event that reads the pilot's throttle (the FSS E-Jets')
         }
         // The spoilers through where their event puts the handle (the setup's calibration).
         if (c == Control::Spoilers && cp.state == ControlState::Ok && cp.lever.valid()) {
@@ -1161,6 +1171,16 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     atPresses_ = 0;  // (pressed after each jump)
     atAgain_ = false;
     atWatch_.reset();
+    atLight_ = FS_VAR_INVALID_ID;
+    atLightPressed_ = 0;
+    for (const char* name : kAutothrottleLights) {
+        const FsLVarId id = fsVarsGetLVarId(name);
+        if (id == FS_VAR_INVALID_ID) continue;
+        atLight_ = id;
+        atLightName_ = name;
+        log::info("playback: the autothrottle's on/off is L:%s here; its disconnect is pressed while that reads on", name);
+        break;
+    }
     for (int c = 0; c < kChannelCount; ++c) {
         if (owned.test(static_cast<size_t>(c)) && kChannels[c].play == PlayMode::Set) playSkip_.set(static_cast<size_t>(c));
     }
@@ -1789,11 +1809,36 @@ const Frame& SimBridge::leadFrame(int control, const Frame& frame) {
 // binding to it did. Twice, half a second apart: the second press clears the disconnect warning,
 // and with the autothrottle off neither does anything. Aircraft that don't take the sim's event
 // are left as they are. After the second, the throttle goes out again: the levers stay where the
-// autothrottle left them, and the replay only sends them when the clip's move.
+// autothrottle left them, and the replay only sends them when the clip's move. Where the aircraft
+// shows its autothrottle in an L:var (atLight_: the FSS E-Jets, whose disconnect toggles it), the
+// presses go by that instead: one while it reads on, read again 0.7 s later, two at most.
 bool SimBridge::pressAutothrottleDisconnect() {
     if (atPresses_ <= 0) return false;
     const int64_t now = utcNowMs();
     if (now < atNextMs_) return false;
+    if (atLight_ != FS_VAR_INVALID_ID) {
+        // By its light: pressed while it reads on (a toggle: once), read again before the next.
+        double on = NAN;
+        if (fsVarsLVarGet(atLight_, numberUnit_, &on) != FS_VAR_ERROR_NONE) on = NAN;
+        const bool pressing = on >= 0.5 && atLightPressed_ < kAtLightPresses;
+        if (pressing) {
+            ControlDriver::keyEvent(KEY_AUTO_THROTTLE_DISCONNECT, 0);
+            ++atLightPressed_;
+            atNextMs_ = now + 700;
+            return false;
+        }
+        if (on >= 0.5) {
+            log::warn("playback: L:%s still reads on after %d AUTO_THROTTLE_DISCONNECT press(es); the autothrottle may "
+                      "hold the thrust levers against the replay's", atLightName_, atLightPressed_);
+        } else if (!atAgain_ || atLightPressed_ > 0) {
+            log::info("playback: the autothrottle is off (L:%s %s after %d AUTO_THROTTLE_DISCONNECT press(es)); it stays "
+                      "off after the replay",
+                      atLightName_, std::isfinite(on) ? "reads off" : "can't be read", atLightPressed_);
+        }
+        atPresses_ = 0;
+        atLightPressed_ = 0;
+        return true;
+    }
     --atPresses_;
     atNextMs_ = now + 500;
     ControlDriver::keyEvent(KEY_AUTO_THROTTLE_DISCONNECT, 0);

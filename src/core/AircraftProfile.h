@@ -31,8 +31,8 @@ constexpr int kDirections = 2;
 enum class MethodKind : uint8_t {
     None = 0,
     InputSet,    // the input event's "<NAME>_SET" preset (fsVarsBVarCall), the cockpit's own path;
-                 // the argument is value * scale
-    InputValue,  // SimConnect_SetInputEvent with the recorded value
+                 // the argument is value * scale + offset
+    InputValue,  // SimConnect_SetInputEvent with the recorded value * scale + offset
     LVar,        // the aircraft's L:var, set to the recorded value
     SimVar,      // the control's simvars, written every frame
     KeyEvent,    // key events, like hardware bindings send. `var` names the family: empty for
@@ -54,8 +54,14 @@ struct ControlMethod {
     std::string var;
     double scale = 1.0;  // InputSet: 0.01 when the event reads in percent but its preset takes 0..1;
                          // an event by its number: see EventMethod
+    // InputSet and InputValue: added after scaling, where the event takes another range than it
+    // reads (the FSS E-Jets' EVT_LEVER_THROTTLE_B reads 0..1 but takes the axis's -1..1, written
+    // directly: scale 2, offset -1). The setup finds both from what the event reads back.
+    double offset = 0.0;
 
-    bool operator==(const ControlMethod& o) const { return kind == o.kind && var == o.var && scale == o.scale; }
+    bool operator==(const ControlMethod& o) const {
+        return kind == o.kind && var == o.var && scale == o.scale && offset == o.offset;
+    }
 };
 
 // A KeyEvent method with one event by its number ('#' starts its var): the aircraft's own event
@@ -212,6 +218,8 @@ enum class ControlState : uint8_t {
     Failed,       // nothing the setup tried worked: playback leaves it to the aircraft
     Skipped,      // the pilot skipped it: playback drives it as it does without a profile
     Absent,       // the aircraft doesn't have it (fixed gear, no spoilers or flaps)
+    Automatic,    // the aircraft works it itself (spoilers that don't come up on the ground, like the FSS
+                  // E-Jets'): playback leaves it to the aircraft, as for Failed
 };
 
 // The throttle lever's own variable, for aircraft whose lever simvar isn't the lever: on the
@@ -552,6 +560,21 @@ constexpr double kAutothrustSettleSec = 10.0;
 constexpr double kAutothrustRangePct = 8.0;
 constexpr double kAutothrustRetardSec = 3.0;
 constexpr double kAutothrustGapSec = 1.0;  // a gap in the clip's lever this long ends a hold
+
+// A throttle input event that reads the pilot's throttle, on an aircraft whose autothrottle moves
+// the levers themselves: the FSS E-Jets', whose lever simvar is 100 x the input where the two
+// agree (93.9% at the top). In a takeoff its A/T flew the levers sat at 87% with the pilot's
+// throttle at 0.69; replayed through the input with the A/T off, they went to 69%. The stretches
+// of a clip where engine `engine`'s lever was more than kAtLeverGap of its travel away from its
+// input, and held there (not closing on it by kAtLeverCatchUp a second, as the lever following the
+// pilot's throttle does) for kAtLeverHeldSec somewhere: there playback sends the lever's position
+// through the input instead. A stretch runs from where the lever left the input to where it came
+// back within kAtLeverGap, or the clip's reversers came out.
+std::vector<AutothrustStretch> autothrottleLeverStretches(const std::vector<Frame>& frames, int engine);
+constexpr double kAtLeverGap = 0.08;
+constexpr double kAtLeverCatchUp = 0.01;
+constexpr double kAtLeverLookSec = 0.5;  // the lever's movement over this long
+constexpr double kAtLeverHeldSec = 2.0;
 
 // Follows a clip's thrust demand with the throttle axis, by the demand the aircraft shows (its
 // lever simvar) against the clip's at the same moment: a first guess from the demand itself (the

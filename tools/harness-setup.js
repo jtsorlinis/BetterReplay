@@ -59,6 +59,9 @@ window.harnessSetup = (function () {
     takeoff: "Recording is paused until the setup is done, so this takeoff isn't saved.",
     done: "Recording starts again now, with these controls.",
   };
+  // Spoilers that don't come up on the ground (ControlSetup.cpp: kSpoilersAutomaticNote).
+  const AUTOMATIC_NOTE = "The spoilers don't come up on the ground on this aircraft, so they're taken as automatic: " +
+    "replays leave them to the aircraft.";
   // The gear step on the ground: held above the runway, then put back (kHoverDetail and on).
   const HOVER_TEXT = {
     hover: "No takeoff needed: BetterReplay holds the aircraft frozen just above the runway while you raise and lower " +
@@ -83,7 +86,7 @@ window.harnessSetup = (function () {
   // Starts at the gate with the engines off, so the "get ready" page shows first.
   const sim = { onGround: true, onRunway: false, taxiing: false, parkingBrake: false, engines: false, autoPilot: true,
     nothingWorks: false, airbus: true, unclear: false, leverHidden: false, hoverOnGround: false, gearLeftUp: false,
-    partWay: false };
+    partWay: false, spoilersNotOnGround: false };
   const s = { declined: false, snoozed: false, results: null, methods: {}, active: false, plan: [], step: 0, phase: "",
     t: 0, moving: -1, task: 0, taskDone: false, hold: 0, method: 0, attempts: [], note: "", need: "", stoppedEarly: false,
     lever: false, hovering: false, gearUp: false, landThen: "", landPut: false };
@@ -242,6 +245,11 @@ window.harnessSetup = (function () {
     } else if (s.phase === "user") {
       const m = pilotTime();
       if (m < 0) { if (s.t > TIMEOUT_SEC) timeout(); return; }
+      // The FSS E-Jets: their lever moves on the ground but the spoilers don't (kSpoilerLeverSec).
+      if (c === "spoilers" && sim.onGround && sim.spoilersNotOnGround) {
+        if (m >= 1.5) { finish("automatic"); s.note = AUTOMATIC_NOTE; }
+        return;
+      }
       if (follow(TASKS[c], HOLDS[c] || 0, m) >= SETTLE_SEC) { s.note = ""; startMethod(0); }
     } else if (s.phase === "replay" && s.t > REPLAY_SEC) {
       evaluate();
@@ -415,7 +423,8 @@ window.harnessSetup = (function () {
       ["airbus", "Throttle simvar isn't the lever (A320)"], ["unclear", "...and the movement doesn't tell"],
       ["leverHidden", "...and doesn't show the lever's variable"],
       ["hoverOnGround", "Counts as on the ground above the runway"], ["gearLeftUp", "A failed gear method leaves it up"],
-      ["partWay", "The first passing method only goes part way"]];
+      ["partWay", "The first passing method only goes part way"],
+      ["spoilersNotOnGround", "Spoilers don't come up on the ground (FSS E-Jets)"]];
     toggles.forEach((t) => {
       const label = document.createElement("label");
       label.style.cssText = "display:block;margin:4px 0;cursor:pointer;";

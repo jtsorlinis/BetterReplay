@@ -293,6 +293,12 @@ private:
     int64_t atNextMs_ = 0;
     bool atAgain_ = false;
     LeverWatch atWatch_;
+    // Where the aircraft shows whether its autothrottle is on (kAutothrottleLights: the FSS E-Jets',
+    // whose disconnect toggles it, so the two blind presses left it on), the presses go by that:
+    // one while it's on, read again before the next, kAtLightPresses at most (atLightPressed_).
+    FsLVarId atLight_ = FS_VAR_INVALID_ID;
+    const char* atLightName_ = "";
+    int atLightPressed_ = 0;
     bool pressAutothrottleDisconnect();
     void watchLevers(const Frame& frame);
     bool setupMasking_ = false;  // the setup is driving the throttle simvars: hardware masked

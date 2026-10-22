@@ -50,7 +50,7 @@ const ControlSpec kSpecs[kControlCount] = {
 };
 
 const char* const kMethodKeys[] = {"none", "input_set", "input_value", "lvar", "simvar", "key_event"};
-const char* const kStateKeys[] = {"pending", "ok", "failed", "skipped", "absent"};
+const char* const kStateKeys[] = {"pending", "ok", "failed", "skipped", "absent", "automatic"};
 
 template <typename E, size_t N>
 bool parseKey(const char* const (&keys)[N], const std::string& key, E& out) {
@@ -74,7 +74,7 @@ bool AircraftProfile::anyPending() const {
 
 bool AircraftProfile::drives(Control c) const {
     const ControlState s = (*this)[c].state;
-    return s == ControlState::Ok || s == ControlState::Failed;
+    return s == ControlState::Ok || s == ControlState::Failed || s == ControlState::Automatic;
 }
 
 const ControlSpec& controlSpec(Control c) { return kSpecs[static_cast<int>(c)]; }
@@ -460,9 +460,24 @@ WayPicker::Pick WayPicker::step(double target, const Frame& f) {
 std::string describeMethod(Control c, const ControlMethod& m) {
     switch (m.kind) {
         case MethodKind::None: return "nothing";
-        case MethodKind::InputSet:
+        case MethodKind::InputSet: {
+            if (m.offset != 0.0 || (m.scale != 1.0 && m.scale != 0.01)) {
+                char sent[64];
+                std::snprintf(sent, sizeof(sent), ", sent %.4g x value %s %.4g)", m.scale, m.offset < 0.0 ? "-" : "+",
+                              std::fabs(m.offset));
+                return "input event " + m.var + " (" + m.var + "_SET" + sent;
+            }
             return "input event " + m.var + " (" + m.var + "_SET" + (m.scale != 1.0 ? ", as a fraction)" : ")");
-        case MethodKind::InputValue: return "input event " + m.var + " (value written directly)";
+        }
+        case MethodKind::InputValue: {
+            if (m.offset != 0.0 || m.scale != 1.0) {
+                char sent[64];
+                std::snprintf(sent, sizeof(sent), ", sent %.4g x value %s %.4g)", m.scale, m.offset < 0.0 ? "-" : "+",
+                              std::fabs(m.offset));
+                return "input event " + m.var + " (value written directly" + sent;
+            }
+            return "input event " + m.var + " (value written directly)";
+        }
         case MethodKind::LVar: return "L:var " + m.var;
         case MethodKind::SimVar: return "simvars";
         case MethodKind::KeyEvent:
@@ -865,6 +880,49 @@ std::vector<AutothrustStretch> autothrustStretches(const LeverCalibration& cal, 
     return out;
 }
 
+std::vector<AutothrustStretch> autothrottleLeverStretches(const std::vector<Frame>& frames, int engine) {
+    std::vector<AutothrustStretch> out;
+    if (engine < 0 || engine > 3) return out;
+    const int inputCh = kInputThrottle1 + engine;
+    const int leverCh = kThrottle1 + engine;
+    const size_t n = frames.size();
+    // Per frame: the lever away from the input, and whether it's closing on it.
+    std::vector<char> away(n, 0), closing(n, 0);
+    size_t back = 0;  // the last frame kAtLeverLookSec or more before i
+    for (size_t i = 0; i < n; ++i) {
+        while (back + 1 < i && frames[back + 1].t <= frames[i].t - kAtLeverLookSec) ++back;
+        const double input = frames[i].v[inputCh];
+        const double lever = frames[i].v[leverCh] / 100.0;
+        if (!std::isfinite(input) || !std::isfinite(lever) || reversing(frames[i], engine)) continue;
+        const double gap = std::fabs(lever - input);
+        away[i] = gap > kAtLeverGap;
+        const double before = frames[back].v[leverCh] / 100.0;
+        const double dt = frames[i].t - frames[back].t;
+        closing[i] = std::isfinite(before) && dt > 0.0 && (std::fabs(before - input) - gap) / dt >= kAtLeverCatchUp;
+    }
+    size_t i = 0;
+    while (i < n) {
+        if (!away[i]) {
+            ++i;
+            continue;
+        }
+        size_t j = i;
+        double heldFrom = NAN;
+        bool held = false;
+        for (; j < n && away[j]; ++j) {
+            if (closing[j]) {
+                heldFrom = NAN;
+                continue;
+            }
+            if (!std::isfinite(heldFrom)) heldFrom = frames[j].t;
+            held |= frames[j].t - heldFrom >= kAtLeverHeldSec;
+        }
+        if (held) out.push_back({frames[i].t, frames[j - 1].t});
+        i = j;
+    }
+    return out;
+}
+
 double ThrustFollower::step(double clip, double live, double lo, double hi, double dt) {
     if (hi < lo) hi = lo;
     const double target = clip < 0.0 ? 0.0 : (clip > 100.0 ? 100.0 : clip);
@@ -1119,13 +1177,16 @@ void ProfileStore::toJson(std::string& out) const {
             w.kv("method", methodKey(c.method.kind));
             w.kv("var", c.method.var);
             w.kv("scale", c.method.scale);
+            if (c.method.offset != 0.0) w.kv("offset", c.method.offset);
             w.kv("confirmed", c.confirmed);
             // Each way's list, in the order playback tries them ("down": [...], "up": [...]).
             for (int d = 0; d < kDirections; ++d) {
                 if (c.ways[d].empty()) continue;
                 w.key(directionKey(controlAt(i), static_cast<Direction>(d))).beginArray();
                 for (const ControlMethod& m : c.ways[d]) {
-                    w.beginObject().kv("method", methodKey(m.kind)).kv("var", m.var).kv("scale", m.scale).endObject();
+                    w.beginObject().kv("method", methodKey(m.kind)).kv("var", m.var).kv("scale", m.scale);
+                    if (m.offset != 0.0) w.kv("offset", m.offset);
+                    w.endObject();
                 }
                 w.endArray();
             }
@@ -1174,6 +1235,7 @@ bool ProfileStore::fromJson(const char* text, size_t length, std::string* error)
             if (!parseMethodKey(c->getString("method", "none"), cp.method.kind)) cp.method.kind = MethodKind::None;
             cp.method.var = c->getString("var", "");
             cp.method.scale = c->getNumber("scale", 1.0);
+            cp.method.offset = c->getNumber("offset", 0.0);
             cp.confirmed = c->getBool("confirmed", false);
             for (int d = 0; d < kDirections; ++d) {
                 const JsonValue* ways = c->get(directionKey(controlAt(i), static_cast<Direction>(d)));
@@ -1184,6 +1246,7 @@ bool ProfileStore::fromJson(const char* text, size_t length, std::string* error)
                     if (m.kind == MethodKind::None) continue;
                     m.var = way.getString("var", "");
                     m.scale = way.getNumber("scale", 1.0);
+                    m.offset = way.getNumber("offset", 0.0);
                     cp.ways[d].push_back(m);
                 }
             }

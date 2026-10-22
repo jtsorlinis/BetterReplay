@@ -664,7 +664,8 @@ button {
   font-weight: bold;
 }
 
-.br-step.ok .br-step-dot {
+.br-step.ok .br-step-dot,
+.br-step.automatic .br-step-dot {
   border-color: var(--br-green);
   background: var(--br-green);
   color: #06210f;
@@ -1124,7 +1125,8 @@ button {
   font-weight: bold;
 }
 
-.br-result.ok .br-result-state {
+.br-result.ok .br-result-state,
+.br-result.automatic .br-result-state {
   color: var(--br-green);
 }
 

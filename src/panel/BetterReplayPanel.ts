@@ -51,7 +51,7 @@ interface SetupControl {
 }
 interface SetupStep {
     control: string;
-    state: string;  // a finished step's result ("ok", "failed", "skipped"), or "current" / "next"
+    state: string;  // a finished step's result ("ok", "failed", "skipped", "automatic"), or "current" / "next"
 }
 // The control setup (src/core/ControlSetup.h); the step fields are there while it's active.
 interface SetupStatus {
@@ -196,6 +196,8 @@ const SETUP_PHASES: { [phase: string]: string } = {
     hover: "Get ready",
     land: "Watch",
     lower: "Your turn",
+    rest: "Your turn",
+    probe: "Watch",
     retry: "Didn't catch that",
     replay: "Watch",
     hold: "Watch",
@@ -210,7 +212,7 @@ const SETUP_PHASES: { [phase: string]: string } = {
 };
 // Phases where the pilot is doing something: when what they were told changes there, they did it.
 const PILOT_PHASES: { [phase: string]: boolean } = {
-    prepare: true, takeoff: true, user: true, away: true, positions: true, hover: true, lower: true,
+    prepare: true, takeoff: true, user: true, away: true, positions: true, hover: true, lower: true, rest: true,
 };
 const TICK_HOLD_MS = 1100;  // a done instruction stays up, ticked, this long
 const NOTE_MS = 5000;       // a failed command's message stays this long
@@ -226,6 +228,7 @@ const RESULT_LABELS: { [state: string]: string } = {
     failed: "Not replayable",
     skipped: "Skipped",
     pending: "Not set up",
+    automatic: "Automatic",  // left to the aircraft (spoilers that don't come up on the ground)
 };
 // Icons: inline SVG drawn in the button's text colour.
 const ICON_PLAY = '<svg viewBox="0 0 24 24"><path d="M8 5.6v12.8a1 1 0 0 0 1.53.85l10.1-6.4a1 1 0 0 0 0-1.7L9.53 4.75A1 1 0 0 0 8 5.6z" fill="currentColor"/></svg>';
@@ -1107,9 +1110,9 @@ class BetterReplayPanel extends UIElement {
         byId("br-controls-pill").classList.toggle("hidden", !setup);
         byId("br-setup-run").classList.toggle("hidden", !setup);
         if (!setup) return;
-        // Configured: every control the aircraft has replays ("Included" when that's the profile
-        // included with BetterReplay). Partly: some do, some were skipped, didn't pass, or are still
-        // to do (the gear, if it was left for later).
+        // Configured: every control the aircraft has replays, or is automatic on it ("Included" when
+        // that's the profile included with BetterReplay). Partly: some do, some were skipped, didn't
+        // pass, or are still to do (the gear, if it was left for later).
         const profile = setup.have === "partial" || setup.have === "complete";
         let present = 0;
         let ok = 0;
@@ -1118,7 +1121,7 @@ class BetterReplayPanel extends UIElement {
             const c = setup.controls[i];
             if (c.state === "absent") continue;
             ++present;
-            if (c.state === "ok") ++ok;
+            if (c.state === "ok" || c.state === "automatic") ++ok;
             lines.push((CONTROL_LABELS[c.control] || c.control) + ": " +
                 (c.state === "ok" ? c.method : RESULT_LABELS[c.state] || c.state));
         }

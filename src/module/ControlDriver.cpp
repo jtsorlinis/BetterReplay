@@ -20,6 +20,11 @@ const int kReverseOffKeys[4] = {KEY_SET_THROTTLE1_REVERSE_THRUST_OFF, KEY_SET_TH
                                 KEY_SET_THROTTLE3_REVERSE_THRUST_OFF, KEY_SET_THROTTLE4_REVERSE_THRUST_OFF};
 constexpr int kEngageRetryFrames = 30;
 constexpr int kLeverGapFrames = 30;  // a clip without its lever value this long: from the simvar
+// Throttle input events that read the pilot's throttle as a fraction of the levers' travel, on
+// aircraft whose autothrottle moves the levers themselves: the FSS E-Jets'. Where the clip's
+// autothrottle held the levers away from the pilot's throttle (autothrottleLeverStretches), the
+// levers' position is sent through the input instead. No other aircraft's throttle is touched.
+const char* const kLeverInputs[] = {"EVT_LEVER_THROTTLE_B"};
 
 double clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -241,18 +246,27 @@ void ControlDriver::setSpoilerCalibration(const LeverCalibration& cal) {
 void ControlDriver::findAutothrust(const std::vector<Frame>& clipFrames) {
     Slot& s = slots_[static_cast<int>(Control::Throttle)];
     clearAutothrust();
-    if (!s.active || !s.useLever) return;
+    bool leverInput = false;
+    for (const char* name : kLeverInputs) {
+        leverInput |= (s.method.kind == MethodKind::InputSet || s.method.kind == MethodKind::InputValue) &&
+                      upper(s.method.var) == name;
+    }
+    if (!s.active || (!s.useLever && !leverInput)) return;
     size_t stretches = 0;
     double seconds = 0.0;
     for (int e = 0; e < s.count; ++e) {
-        s.autothrust[e] = autothrustStretches(s.lever, clipFrames, e);
+        s.autothrust[e] = leverInput ? autothrottleLeverStretches(clipFrames, e) : autothrustStretches(s.lever, clipFrames, e);
         if (e > 0) continue;
         for (const AutothrustStretch& a : s.autothrust[e]) {
             ++stretches;
             seconds += a.endT - a.startT;
         }
     }
-    if (stretches > 0) {
+    if (stretches > 0 && leverInput) {
+        log::info("controls: the clip's autothrottle held the thrust levers away from the pilot's throttle in %zu "
+                  "stretch(es) (%.0f s, the first at %.1f s): the levers' position goes through %s there",
+                  stretches, seconds, s.autothrust[0].front().startT, s.method.var.c_str());
+    } else if (stretches > 0) {
         log::info("controls: autothrust in %zu stretch(es) of the clip (%.0f s): the throttle follows its thrust demand "
                   "there, the levers no further forward than the clip's",
                   stretches, seconds);
@@ -338,6 +352,15 @@ bool ControlDriver::inAutothrust(const Slot& s, int e, double t) {
         if (t >= a.startT && t <= a.endT) return true;
     }
     return false;
+}
+
+double ControlDriver::inputValue(Control c, Slot& s, const Frame& f, int e) {
+    const double v = f.v[methodSourceChannel(c, s.method.kind, e)];
+    if (c != Control::Throttle || !inAutothrust(s, e, f.t)) return v;
+    const double lever = f.v[kThrottle1 + e];
+    if (!std::isfinite(lever)) return v;
+    ++s.atLeverFrames;
+    return clamp(lever / 100.0, 0.0, 1.0);
 }
 
 void ControlDriver::setReverseBy(ReverseBy by) {
@@ -450,11 +473,11 @@ void ControlDriver::applySlot(Control c, Slot& s, const Frame& f, bool force) {
     switch (m.kind) {
         case MethodKind::InputSet:
             for (int e = 0; e < s.count; ++e) {
-                const double v = f.v[methodSourceChannel(c, m.kind, e)];
+                const double v = inputValue(c, s, f, e);
                 if (!std::isfinite(v) || !due(s, e, v, force)) continue;
                 FsVarParamVariant param;
                 param.type = FsVarParamTypeDouble;
-                param.doubleValue = v * m.scale;
+                param.doubleValue = v * m.scale + m.offset;
                 FsVarParamArray params;
                 params.size = 1;
                 params.array = &param;
@@ -467,9 +490,10 @@ void ControlDriver::applySlot(Control c, Slot& s, const Frame& f, bool force) {
             break;
         case MethodKind::InputValue:
             for (int e = 0; e < s.count; ++e) {
-                double v = f.v[methodSourceChannel(c, m.kind, e)];
+                const double v = inputValue(c, s, f, e);
                 if (!std::isfinite(v) || !due(s, e, v, force)) continue;
-                const HRESULT hr = SimConnect_SetInputEvent(ctx_.h, s.hash[e], sizeof(double), &v);
+                double arg = v * m.scale + m.offset;
+                const HRESULT hr = SimConnect_SetInputEvent(ctx_.h, s.hash[e], sizeof(double), &arg);
                 if (FAILED(hr) && s.errors++ < 5) log::warn("controls: SetInputEvent %s failed", engineVar(m.var, e + 1).c_str());
             }
             break;
@@ -888,6 +912,10 @@ void ControlDriver::end(Control c) {
     if (s.useLever) log::info("controls: %d engine frame(s) placed from L:var %s", s.leverFrames, s.lever.var.c_str());
     if (s.followFrames > 0) {
         log::info("controls: %d engine frame(s) followed the clip's thrust demand (autothrust)", s.followFrames);
+    }
+    if (s.atLeverFrames > 0) {
+        log::info("controls: %d engine frame(s) sent the clip's thrust levers, where its autothrottle held them",
+                  s.atLeverFrames);
     }
     if (s.gapFrames > 0) {
         log::info("controls: %d engine frame(s) from the throttle simvar, where the clip has no %s value", s.gapFrames,

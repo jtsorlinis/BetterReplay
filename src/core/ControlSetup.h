@@ -10,6 +10,21 @@
 // they did when the pilot moved them? A method that passes is put to the pilot ("did the engines
 // spool up and back down?"); a "no" tries the next. The result is the aircraft's ControlProfile.
 //
+// An input event's _SET preset may take another range than the event reads: the FSS E-Jets'
+// throttle reads 0..1 but takes the hardware axis's -1..1, so sent the 0 it read at idle it went to
+// half, and stayed there for every method after it. Before the throttle's replay with an input
+// event the setup sends it where the movement starts and a quarter of the way up, reading it back
+// (Phase::Probe); while such a method replays it reads it back too. If what it read is a straight
+// line of what it was sent, but not as meant, the same event is tried next with that undone
+// (ControlMethod::scale and offset). If it reads the same whatever its _SET is sent (the E190's,
+// which runs as if sent 0), the event's value written directly goes next. A throttle method that
+// leaves the engines off idle so that the next can't bring them back: the pilot is asked to
+// (Phase::Rest), so the next is tested from idle.
+//
+// Where the spoilers don't come up on the ground (the FSS E-Jets'), a variable named like their lever
+// moves on the ground without them: they're taken as automatic, and replays leave them to the
+// aircraft (ControlState::Automatic). Aircraft whose spoilers come up on the ground never see this.
+//
 // The gear needs no takeoff. On the runway the setup holds the aircraft frozen a little above
 // where it stands (IControlSim::beginHover), checks the sim counts it as airborne there, and
 // teaches the gear as in flight. When the step ends, however it ends, the gear has to be down
@@ -40,6 +55,7 @@
 #include <cstddef>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "AircraftProfile.h"
@@ -148,6 +164,12 @@ public:
     // It changed during the scan and isn't noise.
     bool changed(size_t index) const;
     double firstChange(size_t index) const;  // time of its first change, NaN if none
+    // The variables named with one of `words` and none of `unless` (an L:var with one of
+    // `lvarWords` too; null-terminated lists) that first changed at `after` or later, aren't noise,
+    // and have moved: their last value at least `share` of their range (1, or 100 where it reads
+    // more than 1.5) from their first. Furthest first.
+    std::vector<size_t> namedMoves(const char* const* words, const char* const* unless, const char* const* lvarWords,
+                                   double after, double share) const;
 
     // How the handle (the control's simvar) behaved while the pilot's hand was still, between
     // from and to. A lever-like variable (one of `candidates` that took many values) holding
@@ -323,10 +345,12 @@ private:
     // step on the ground, lifting the aircraft above the runway; Land: waiting for its gear to be
     // down, putting it back and waiting for the sim to show it there; Lower: the pilot is asked to
     // lower the gear. Calibrate: a spoiler key event that took them only part way is stepped through
-    // its range, to replay through where each value puts them.
+    // its range, to replay through where each value puts them. Rest: the pilot is asked to bring the
+    // throttle back to idle, where the last method left it off idle and this one can't. Probe: the
+    // throttle's input event, before its replay, sent two values and read back.
     enum class Phase {
         Idle, Prepare, Takeoff, User, Retry, Replay, Hold, Ask, Done, Query, Positions, Notice, Sweep, Away, Back,
-        Hover, Land, Lower, Calibrate
+        Hover, Land, Lower, Calibrate, Rest, Probe
     };
     enum class LeverVerdict { Steady, Creeps, Unclear };  // the lever simvar while the hand was still
 
@@ -364,6 +388,39 @@ private:
     std::string enginePattern(const std::string& name, bool lvar) const;
     void startMethod(size_t i);
     void prepareMethod(const ControlMethod& m);  // fills in the channels it reads in mini_
+    // An input event method's replay (its _SET, or its value written directly): what it was sent
+    // and what the event read then (noteSet). Where they show an event that takes another range than
+    // it reads (setMapping: read = a * sent + b), the method undoing that is tried next (insertMethod
+    // keeps the indices into methods_ in step). The throttle's is probed before its replay
+    // (Phase::Probe: probeFrame, probeDone), sent where the movement starts (probeV_[0]) and
+    // kProbeShare of the way to where it went furthest ([1]), each held until what it reads has held
+    // still kSetSettleFrames: where that shows the conversion, or that it reads the same whatever
+    // it's sent, its replay is skipped. Each throttle replay of a variable logs what it sent and read
+    // every kTraceSec (traceAt_).
+    void noteSet(const Frame& f);
+    bool setMapping(ControlMethod& fixed, double& a, double& b, std::string* why) const;
+    std::string setLevels() const;  // what it read at each value it held, for the log
+    void probeFrame(const Frame& live);
+    void probeDone();
+    void beginReplay();  // the method's replay proper, from its wait for the control to be at rest
+    int probeStage_ = 0;
+    double probeV_[2] = {NAN, NAN};
+    double probeRead_[2] = {NAN, NAN};
+    double probeBefore_ = NAN, probeLast_ = NAN;
+    int probeStill_ = 0;
+    bool probeFresh_ = false;
+    void insertMethod(size_t at, const ControlMethod& m);
+    std::vector<std::pair<double, double>> setSeen_;  // (sent, read)
+    double setArg_ = NAN;   // what's being sent, and for how many frames
+    int setArgFrames_ = 0;
+    double setSpan_ = 0.0;  // how far apart what the method sends gets in the movement
+    double traceAt_ = 0.0;
+    void traceReplay(const Frame& sent, const Frame& live);
+    // Phase::Rest, once per method (restAskedFor_): until the throttle has been back where the
+    // pilot started it, and the aircraft still, for kStableSec (restStill_); then the method again.
+    void restFrame(double dt, const Frame& live);
+    size_t restAskedFor_ = SIZE_MAX;
+    double restStill_ = 0.0;
     // Each way on its own (not the throttle). Away: the pilot moves the control away once more;
     // Back: the way back replayed from there, or from where method_'s replay left it, with each
     // method in turn until one brings it back.
@@ -422,6 +479,10 @@ private:
     void afterLand();
     void enterTakeoff();
     bool gearDown(const Frame& live) const;  // at least as far down as where the aircraft stood
+    // The spoilers where they don't come up on the ground (the FSS E-Jets'): when a variable named
+    // like their lever has been out kSpoilerLeverSec without them (from leverSeenAt_), they're taken
+    // as automatic (ControlState::Automatic), and replays leave them to the aircraft.
+    double leverSeenAt_ = NAN;
     void clearStep();  // the step's movement, methods and scan
     void stop(const std::string& why);
     void endScan();
