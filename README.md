@@ -34,7 +34,7 @@ Any aircraft can be taught with the control setup. **Included** means BetterRepl
 | iniBuilds A340                 | ❌       |                                                  |
 | iniBuilds A350                 | ✅       | Engine whine in passenger views near the engines |
 | iniBuilds A380                 | ✅       | Engine whine in external views from some angles  |
-| Fenix A320                     | ❌       |                                                  |
+| Fenix A320 Family              | ❌       |                                                  |
 | Synaptic A220                  | ✅       |                                                  |
 | FlightSim Studio E-Jets        | ❌       |                                                  |
 | PMDG 737                       | ✅       |                                                  |
