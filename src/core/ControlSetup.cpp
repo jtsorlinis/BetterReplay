@@ -1169,8 +1169,10 @@ void SetupFlow::userFrame(double dt, const Frame& live) {
     // Until the pilot moves the throttle, engines still spooling down are settling: they started
     // where they come to (the A220's idle, not the 29% N1 it was still coming down from).
     if (!moved_ && control() == Control::Throttle && o < outcomeRest_) outcomeRest_ = o;
-    const double dh = fromRest(h, handleRest_);
-    const double dout = fromRest(o, outcomeRest_);
+    // The movement goes the way the instruction moves the control (outFrom); back is where it
+    // started, from either side.
+    const double dh = outFrom(h, handleRest_);
+    const double dout = outFrom(o, outcomeRest_);
 
     if (t_ + 1e-9 >= nextCapture_) {
         capture_.push_back(live);
@@ -1247,8 +1249,8 @@ void SetupFlow::userFrame(double dt, const Frame& live) {
         stableSince_ = t_;
     }
     const bool enough = handlePeak_ >= tu.handleNeed || outcomePeak_ >= tu.outcomeNeed;
-    const bool handleBack = dh <= std::max(tu.handleStart, 0.1 * handlePeak_);
-    const bool back = handleBack && dout <= std::max(tu.outcomeStart, 0.1 * outcomePeak_);
+    const bool handleBack = fromRest(h, handleRest_) <= std::max(tu.handleStart, 0.1 * handlePeak_);
+    const bool back = handleBack && fromRest(o, outcomeRest_) <= std::max(tu.outcomeStart, 0.1 * outcomePeak_);
     const bool stable = t_ - stableSince_ >= kStableSec;
 
     // Which instruction the pilot is on. The first is done once the control has gone far enough
@@ -1434,7 +1436,7 @@ void SetupFlow::analyze() {
     clipMovedAt_ = NAN;
     for (const Frame& f : mini_.frames) {
         const double v = judgeOutcome_ ? outcomeSignal(f) : handleSignal(f);
-        if (fromRest(v, judgeOutcome_ ? outcomeRest_ : handleRest_) > replayStartTol()) {
+        if (outFrom(v, judgeOutcome_ ? outcomeRest_ : handleRest_) > replayStartTol()) {
             clipMovedAt_ = f.t;
             break;
         }
@@ -2307,7 +2309,7 @@ void SetupFlow::awayFrame(const Frame& live) {
     const Tuning tu = tuning(c);
     const char* label = controlSpec(c).label;
     const double v = judgeOutcome_ ? outcomeSignal(live) : handleSignal(live);
-    const double d = fromRest(v, judgeOutcome_ ? outcomeRest_ : handleRest_);
+    const double d = outFrom(v, judgeOutcome_ ? outcomeRest_ : handleRest_);
     if (movedFrom(v, replayAnchor_, 0.5 * (judgeOutcome_ ? tu.outcomeStart : tu.handleStart))) {
         replayAnchor_ = v;
         replayStable_ = phaseT_;
@@ -2411,18 +2413,19 @@ void SetupFlow::backFrame(double dt, const Frame& live) {
     }
     const bool settled = phaseT_ >= 1.0 && phaseT_ - replayStable_ >= kStableSec && !legsMidway(live);
     const bool there = atRest(live);
+    const bool past = pastRest(live);
     if (there && settled) {
-        endBack(true, "");
+        endBack(true, "", false);
     } else if (!backMoved_ && phaseT_ >= giveUpSec(methods_[backTries_[backAt_]])) {
-        endBack(false, "it didn't move");
+        endBack(false, "it didn't move", past);
     } else if (backMoved_ && settled) {
-        endBack(false, "it stopped short");
+        endBack(false, past ? "it went past where you started it" : "it stopped short", past);
     } else if (phaseT_ >= tu.holdMaxSec) {
-        endBack(there, "it hadn't got there");
+        endBack(there, "it hadn't got there", past);
     }
 }
 
-void SetupFlow::endBack(bool ok, const char* why) {
+void SetupFlow::endBack(bool ok, const char* why, bool past) {
     const Control c = control();
     const char* label = controlSpec(c).label;
     endDrive();
@@ -2433,6 +2436,22 @@ void SetupFlow::endBack(bool ok, const char* why) {
     if (!ok) {
         logf(0, "control setup: %s didn't bring the %s back from where %s left it (%s)", desc.c_str(), label, who, why);
         if (backFrom_ == BackFrom::Pilot) attempts_.push_back("failed");
+        if (past) {
+            // Brought back from the other side isn't the way back: the A320neo V2's
+            // HANDLING_FLAPS_SET put its flaps up from notch 2 to 0, past 1+F, and FLAPS_SET, tried
+            // next, counted as bringing them back by lowering them from 0.
+            if (backFrom_ == BackFrom::Pilot) {
+                logf(0, "control setup: the %s went past where you started it: the way back is only tried from where the "
+                     "replays leave it", label);
+                startReplays();
+            } else {
+                logf(0, "control setup: the %s went past where you started it: %s moved it away, but the way back isn't "
+                     "tried from there", label, describeMethod(c, methods_[method_]).c_str());
+                attempts_.push_back("failed");
+                nextMethod();
+            }
+            return;
+        }
         ++backAt_;
         tryBack();
         return;
@@ -2505,9 +2524,28 @@ double SetupFlow::fromRest(double v, double rest) const {
     return absDiff(v, rest);
 }
 
+// How far `v` has gone from `rest` the way the first instruction moves the control: the spoilers
+// and flaps out, the throttle up, the gear up. A replay that takes it the other way hasn't moved
+// it: from 1+F the A320neo V2's HANDLING_FLAPS_SET put its flaps up to 0 whatever it was sent,
+// 0.917 the other way from the pilot's 0.273 to notch 2, and counted as moving them 336% as far.
+double SetupFlow::outFrom(double v, double rest) const {
+    if (!std::isfinite(v) || !std::isfinite(rest)) return 0.0;
+    return std::max(0.0, control() == Control::Gear ? rest - v : v - rest);
+}
+
 bool SetupFlow::atRest(const Frame& live) const {
     const double v = judgeOutcome_ ? outcomeSignal(live) : handleSignal(live);
     return std::isfinite(v) && fromRest(v, judgeOutcome_ ? outcomeRest_ : handleRest_) <= restTol();
+}
+
+// Gone the other way from where the pilot's movement started the control, further than counts as
+// back there (the A320's flaps up from 1+F to 0). Not the spoilers or throttle: for them that's back.
+bool SetupFlow::pastRest(const Frame& live) const {
+    const Control c = control();
+    if (c == Control::Spoilers || c == Control::Throttle) return false;
+    const double v = judgeOutcome_ ? outcomeSignal(live) : handleSignal(live);
+    const double rest = judgeOutcome_ ? outcomeRest_ : handleRest_;
+    return std::isfinite(v) && fromRest(v, rest) > restTol() && outFrom(v, rest) <= 0.0;
 }
 
 // Only from where the pilot started the control: a replay that starts elsewhere (the last method
@@ -2516,7 +2554,7 @@ void SetupFlow::track(const Frame& live) {
     if (!seenRest_) seenRest_ = atRest(live);
     if (!seenRest_) return;
     const double v = judgeOutcome_ ? outcomeSignal(live) : handleSignal(live);
-    const double d = fromRest(v, judgeOutcome_ ? outcomeRest_ : handleRest_);
+    const double d = outFrom(v, judgeOutcome_ ? outcomeRest_ : handleRest_);
     if (d > replayPeak_) replayPeak_ = d;
     if (std::isnan(replayMovedAt_) && phase_ == Phase::Replay && d > replayStartTol()) replayMovedAt_ = replayT_;
 }
@@ -2698,6 +2736,7 @@ void SetupFlow::evaluate(const Frame& live) {
     const double rest = judgeOutcome_ ? outcomeRest_ : handleRest_;
     const bool reached = replayPeak_ >= kPassPeak * userPeak_;
     const bool returned = fromRest(end, rest) <= restTol();
+    const bool past = pastRest(live);
     const int pct = userPeak_ > 0.0 ? static_cast<int>(std::lround(100.0 * replayPeak_ / userPeak_)) : 0;
     const std::string desc = describeMethod(c, methods_[method_]);
     // How much later than in the pilot's movement it moved (ControlProfile::leadSec).
@@ -2744,10 +2783,10 @@ void SetupFlow::evaluate(const Frame& live) {
         calPct_ = pct;
         if (beginCalibrate()) return;
     }
-    judge(passed, reached, returned, pct);
+    judge(passed, reached, returned, pct, past);
 }
 
-void SetupFlow::judge(bool passed, bool reached, bool returned, int pct) {
+void SetupFlow::judge(bool passed, bool reached, bool returned, int pct, bool past) {
     const Control c = control();
     const std::string desc = describeMethod(c, methods_[method_]);
     if (passed) {
@@ -2775,11 +2814,14 @@ void SetupFlow::judge(bool passed, bool reached, bool returned, int pct) {
         phaseT_ = 0.0;
         return;
     }
-    logf(0, "control setup: %s moved the %s %d%% as far as you did%s", desc.c_str(), controlSpec(c).label, pct,
-         reached && !returned ? ", but didn't bring it back" : "");
-    if (reached && !returned && c != Control::Throttle && methods_.size() > 1) {
+    const char* how = past ? (reached ? ", but took it back past where you started it"
+                                      : "; it went the other way, past where you started it")
+                           : reached && !returned ? ", but didn't bring it back" : "";
+    logf(0, "control setup: %s moved the %s %d%% as far as you did%s", desc.c_str(), controlSpec(c).label, pct, how);
+    if (reached && !returned && !past && c != Control::Throttle && methods_.size() > 1) {
         // It goes one way: the way back from there with the others (the PMDG 777's lever event
-        // raised its gear but didn't lower it; then the gear key events did).
+        // raised its gear but didn't lower it; then the gear key events did). Not from past where
+        // the pilot started it: bringing it back from there isn't the way back.
         startBack(BackFrom::Replay);
         return;
     }
@@ -2886,13 +2928,13 @@ void SetupFlow::finishCalibrate() {
     if (!cal.valid() || !(hi >= handleRest_ + kPassFull * handlePeak_)) {
         logf(0, "control setup: %s doesn't take the %s as far as you did at any value; not calibrating it", event,
              controlSpec(c).label);
-        judge(calPassed_, calReached_, true, calPct_);
+        judge(calPassed_, calReached_, true, calPct_, false);
         return;
     }
     const double at = invertLever(cal.forward, want);
     if (std::fabs(at - want) < kCalSameTol) {
         logf(0, "control setup: %s puts the handle where it's sent; calibrating it wouldn't change its replay", event);
-        judge(calPassed_, calReached_, true, calPct_);
+        judge(calPassed_, calReached_, true, calPct_, false);
         return;
     }
     spoilerCal_ = cal;

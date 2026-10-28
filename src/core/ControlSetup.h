@@ -430,7 +430,7 @@ private:
     void startBack(BackFrom from);
     void tryBack();
     void backFrame(double dt, const Frame& live);
-    void endBack(bool ok, const char* why);
+    void endBack(bool ok, const char* why, bool past);  // past: as pastRest, where it stopped
     void startReplays();  // the whole movement, method by method
     void replayFrame(double dt, const Frame& live);
     void holdFrame(const Frame& live);
@@ -448,7 +448,9 @@ private:
     // of its replay has played; -1 when neither (on its way back to rest, settling, asking).
     double attemptLeft() const;
     double fromRest(double v, double rest) const;  // how far from where the pilot started it
+    double outFrom(double v, double rest) const;   // and the way the instruction moves it
     bool atRest(const Frame& live) const;
+    bool pastRest(const Frame& live) const;  // the other way from there, further than counts as back
     bool legsMidway(const Frame& live) const;  // the gear's legs going in turn, between them
     bool legMoved_[3] = {};                    // which legs moved in the pilot's movement
     // The gear's replay, for the log: each command (0 up, 1 down) and where the gear went until the next.
@@ -463,7 +465,8 @@ private:
     bool brakeParked_ = false;   // the parking brake was set when they were first held
     bool brakesLogged_ = false;  // in this step
     void evaluate(const Frame& live);
-    void judge(bool passed, bool reached, bool returned, int pct);  // evaluate's verdict, acted on
+    // evaluate's verdict, acted on; `past`: the replay left the control past where the pilot started it
+    void judge(bool passed, bool reached, bool returned, int pct, bool past);
     void nextMethod();
     void finishStep(ControlState state, const ControlMethod& method, bool confirmed);
     // The gear step on the ground. LandThen: what follows putting the aircraft back: the next
