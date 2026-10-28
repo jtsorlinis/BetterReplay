@@ -1645,8 +1645,14 @@ bool SimBridge::flapsArrived(const Frame& target) {
     const bool atIndex = !std::isfinite(wantIdx) || !std::isfinite(haveIdx) || std::fabs(haveIdx - wantIdx) < 0.5;
     const int64_t still = now - flapsMovedMs_;
     if (atIndex && still >= kFlapsStillMs) {
-        log::info("playback: the flaps stopped at %.2f with the handle at %.0f after %.1f s (the clip: %.2f)", have,
-                  haveIdx, secs, want);
+        if (known && std::fabs(have - want) > kFlapsFarOff) {
+            log::warn("playback: the flaps stopped at %.2f with the handle at %.0f after %.1f s, far from the clip's %.2f: "
+                      "the aircraft didn't follow the lever; the replay plays with its flaps off the clip's",
+                      have, haveIdx, secs, want);
+        } else {
+            log::info("playback: the flaps stopped at %.2f with the handle at %.0f after %.1f s (the clip: %.2f)", have,
+                      haveIdx, secs, want);
+        }
         return true;
     }
     if (still >= kFlapsStuckMs || now - flapsArriveStartMs_ >= kFlapsArriveMaxMs) {

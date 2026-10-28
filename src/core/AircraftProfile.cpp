@@ -347,6 +347,23 @@ bool FlapNotches::at(double target) const {
     return !std::isfinite(lever_) || !std::isfinite(target) || std::fabs(lever_ - target) < 0.5;
 }
 
+double FlapSteps::step(double target, double handle, bool force) {
+    if (since_ < (1 << 20)) ++since_;
+    if (!std::isfinite(target)) return NAN;
+    const double t = std::round(target);
+    if (!force && t == lever_) return NAN;
+    double from = std::isfinite(lever_) ? lever_ : t;
+    if (!midway_ && std::isfinite(handle)) from = std::round(handle);
+    const double next = std::fabs(t - from) > 1.5 ? from + (t > from ? 1.0 : -1.0) : t;
+    const bool moves = !(next == lever_);
+    if (moves && since_ < FlapNotches::kFrames) return NAN;
+    if (moves) since_ = 0;
+    lever_ = next;
+    goal_ = t;
+    midway_ = next != t;
+    return next;
+}
+
 int EventStepper::step(double target, double live, double size, int waitFrames, bool force) {
     if (since_ < (1 << 20)) ++since_;
     if (!std::isfinite(target) || !std::isfinite(live) || !(size > 0.0)) return 0;

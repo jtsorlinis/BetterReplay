@@ -3700,6 +3700,61 @@ TEST(Playback_FlapNotchesKeepTheLeverOrGoByTheHandle) {
     CHECK_EQ(b.lever(), 3.0);
 }
 
+TEST(Playback_FlapsSetGoesADetentAtATime) {
+    // The A320neo V2 at the gate after a landing, flaps FULL (handle 4), playing a takeoff with them
+    // at 1+F: FLAPS_SET straight to 1 put the handle at 1 and left the flaps at FULL. The lever now
+    // goes through 3 and 2 first, kFrames apart, as a hand takes it.
+    FlapSteps s;
+    double handle = 4.0;
+    std::vector<std::pair<int, double>> sent;
+    for (int i = 0; i < 100; ++i) {
+        const double d = s.step(1.0, handle, i == 0);
+        if (std::isnan(d)) continue;
+        sent.push_back({i, d});
+        handle = d;  // FLAPS_SET shows on the handle at once
+        if (d != 1.0) CHECK(s.goingTo(1.0));
+    }
+    REQUIRE(sent.size() == 3u);
+    CHECK_EQ(sent[0].first, 0);
+    CHECK_EQ(sent[0].second, 3.0);
+    CHECK_EQ(sent[1].second, 2.0);
+    CHECK_EQ(sent[2].second, 1.0);
+    CHECK_EQ(sent[1].first - sent[0].first, FlapNotches::kFrames);
+    CHECK_EQ(sent[2].first - sent[1].first, FlapNotches::kFrames);
+    CHECK(!s.goingTo(1.0));
+    // One detent away goes at once, as before: the clip's 1 to 0 after takeoff.
+    CHECK_EQ(s.step(0.0, 1.0, false), 0.0);
+    CHECK(!s.midway());
+}
+
+TEST(Playback_FlapsSetSendsLikeAKeyEvent) {
+    // Sent when the clip's detent changes, or forced; the first frame sends it even where the handle
+    // already is, as dueOnChange did.
+    FlapSteps s;
+    CHECK_EQ(s.step(2.0, 2.0, false), 2.0);
+    for (int i = 0; i < 20; ++i) CHECK(std::isnan(s.step(2.0, 2.0, false)));
+    CHECK_EQ(s.step(2.0, 2.0, true), 2.0);
+    // A detent the clip moves to before the last has had kFrames waits for them.
+    CHECK_EQ(s.step(3.0, 2.0, false), 3.0);
+    CHECK(std::isnan(s.step(4.0, 3.0, false)));
+    for (int i = 2; i < FlapNotches::kFrames; ++i) CHECK(std::isnan(s.step(4.0, 3.0, false)));
+    CHECK_EQ(s.step(4.0, 3.0, false), 4.0);
+    // Not on its way, the lever goes from the handle, not the last detent sent: another way (the
+    // A350's FLAPS_INCR) may have moved it since. From 2, 1 is one detent, though this way last sent 4.
+    FlapSteps other;
+    CHECK_EQ(other.step(4.0, 4.0, false), 4.0);
+    for (int i = 0; i < FlapNotches::kFrames; ++i) other.step(4.0, 2.0, false);
+    CHECK_EQ(other.step(1.0, 2.0, false), 1.0);
+    // On its way, it goes on from the detents sent, whatever the handle shows (one that trails the
+    // lever, say), and turns back where the clip does.
+    FlapSteps on;
+    CHECK_EQ(on.step(0.0, 4.0, true), 3.0);
+    for (int i = 1; i < FlapNotches::kFrames; ++i) CHECK(std::isnan(on.step(0.0, 4.0, false)));
+    CHECK_EQ(on.step(0.0, 4.0, false), 2.0);
+    for (int i = 1; i < FlapNotches::kFrames; ++i) on.step(4.0, 4.0, false);
+    CHECK_EQ(on.step(4.0, 4.0, false), 3.0);
+}
+
 TEST(Setup_InTheAirOnlyTheGear) {
     SetupHarness h;
     h.aircraft.onGround = false;

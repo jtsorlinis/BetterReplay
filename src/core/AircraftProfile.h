@@ -149,6 +149,28 @@ private:
     int since_ = 1 << 20;  // frames since it
 };
 
+// The flap lever driven with FLAPS_SET or AXIS_FLAPS_SET, which put it in any detent at once: a
+// detent at a time toward the clip's, FlapNotches::kFrames apart, as a hand takes the lever through
+// each. The A320neo V2 picks CONF 1 or 1+F by the detent its lever came from: sent from FULL
+// straight to 1, its flaps stayed at FULL. A detent is sent like any key event, when the clip's
+// differs from the last one sent (or `force`). The way there starts from the aircraft's handle and
+// goes on from the detents sent until it gets there.
+class FlapSteps {
+public:
+    // One frame, with the clip's detent and the aircraft's handle index: the detent to send now,
+    // NaN for none.
+    double step(double target, double handle, bool force);
+    // Still on its way to `target`, a detent at a time.
+    bool goingTo(double target) const { return midway_ && goal_ == std::round(target); }
+    bool midway() const { return midway_; }
+
+private:
+    double lever_ = NAN;   // the last detent sent
+    double goal_ = NAN;    // the clip's detent then
+    bool midway_ = false;  // short of it
+    int since_ = 1 << 20;  // frames since the lever was last sent to another detent
+};
+
 // Steps a control toward the clip's value with an EventMethod toggle or steps, as a pilot clicking
 // would (FlapNotches does the same with FLAPS_INCR/DECR): one event when the
 // aircraft's value is half a step or more off the clip's, the next once the aircraft shows it (or

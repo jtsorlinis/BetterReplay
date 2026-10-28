@@ -459,12 +459,17 @@ void ControlDriver::forgetReverse() {
 
 bool ControlDriver::flapsSentTo(const Frame& f) const {
     const int ci = static_cast<int>(Control::Flaps);
+    const double target = std::round(f.v[kFlapsHandleIndex]);
     const auto notched = [](const Slot& s) {
         return s.method.kind == MethodKind::KeyEvent && s.method.var == kKeyFlapsNotches;
     };
     bool notches = slots_[ci].active && notched(slots_[ci]);
-    for (const Slot& s : extra_[ci]) notches |= notched(s);
-    return !notches || notches_.at(std::round(f.v[kFlapsHandleIndex]));
+    bool stepping = slots_[ci].active && slots_[ci].flapSteps.goingTo(target);
+    for (const Slot& s : extra_[ci]) {
+        notches |= notched(s);
+        stepping |= s.flapSteps.goingTo(target);
+    }
+    return !stepping && (!notches || notches_.at(target));
 }
 
 namespace {
@@ -938,14 +943,20 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
             // index 4), so the A380's 2 of 4 is half the range: as 2 of 3 it went to 3.
             const int positions = ctx_.flapPositions ? *ctx_.flapPositions : 0;
             if (positions < 2) break;
-            const double fraction = clamp(std::round(idx), 0.0, static_cast<double>(positions)) / positions;
-            if (s.method.var == kKeyFlapsAxis) {
-                const double value = std::round(fraction * 32766.0 - 16383.0);
-                if (dueOnChange(s, 0, value, force, 1.0)) keyEvent(KEY_AXIS_FLAPS_SET, static_cast<int32_t>(value));
-                break;
+            const double target = clamp(std::round(idx), 0.0, static_cast<double>(positions));
+            const double handle = ctx_.live ? ctx_.live->v[kFlapsHandleIndex] : NAN;
+            const bool wasMidway = s.flapSteps.midway();
+            const double detent = s.flapSteps.step(target, handle, force);
+            if (!std::isfinite(detent)) break;
+            const bool axis = s.method.var == kKeyFlapsAxis;
+            if (wasMidway || s.flapSteps.midway()) {
+                log::info("controls: flaps a detent at a time (%s): the lever to %.0f (the handle at %.0f, the clip %.0f)",
+                          axis ? "AXIS_FLAPS_SET" : "FLAPS_SET", detent, handle, target);
             }
-            const double value = std::round(fraction * 16383.0);
-            if (dueOnChange(s, 0, value, force, 1.0)) keyEvent(KEY_FLAPS_SET, static_cast<int32_t>(value));
+            const double fraction = detent / positions;
+            const double value = axis ? std::round(fraction * 32766.0 - 16383.0) : std::round(fraction * 16383.0);
+            dueOnChange(s, 0, value, true, 0.0);  // recorded and counted
+            keyEvent(axis ? KEY_AXIS_FLAPS_SET : KEY_FLAPS_SET, static_cast<int32_t>(value));
             break;
         }
         case Control::Spoilers: {

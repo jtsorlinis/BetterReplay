@@ -104,7 +104,8 @@ public:
     // we toggled, so end() mustn't toggle it.
     void forgetReverse();  // and the flap lever (FlapNotches)
     // Whether the flap lever has been sent where `f` has it: with FLAPS_INCR/DECR, a notch at a
-    // time, once the notches sent have taken it there; any other way at once.
+    // time, once the notches sent have taken it there; with FLAPS_SET or AXIS_FLAPS_SET, a detent
+    // at a time (FlapSteps), once the last one is sent; any other way at once.
     bool flapsSentTo(const Frame& f) const;
     // Drives the control from the frame's channels (methodSourceChannel). Values are sent when
     // they change, and every few frames anyway; `force` sends them now.
@@ -151,6 +152,7 @@ private:
         DWORD eventClient[2] = {};     // and its client event IDs where it's the aircraft's own (0: a sim key event)
         EventStepper stepper;          // a toggle or steps
         GearCommandFollower gearLive;  // the gear's command from its legs, for a toggle or steps
+        FlapSteps flapSteps;           // FLAPS_SET / AXIS_FLAPS_SET: a detent at a time
         double sent[4] = {NAN, NAN, NAN, NAN};
         int since[4] = {};
         int64_t lastingFromMs[4] = {};  // dueWhenLasting: since when the value has been off what was sent

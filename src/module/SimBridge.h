@@ -468,7 +468,10 @@ private:
     // are within kFlapsThereTol of the clip's, or have held still for kFlapsStillMs with the
     // handle at the clip's index (its setting can differ: CONF 1 for 1+F), or haven't moved for
     // kFlapsStuckMs; kFlapsArriveMaxMs at most. The PMDG 777's flaps take about ten seconds a detent.
+    // Stopped more than kFlapsFarOff from the clip's is a warning: further than CONF 1 is from 1+F
+    // (0.25 on the A320neo V2), as when its flaps stayed at FULL with the lever sent to 1.
     static constexpr double kFlapsThereTol = 0.02;
+    static constexpr double kFlapsFarOff = 0.3;
     static constexpr double kFlapsMovedTol = 0.005;
     static constexpr int64_t kFlapsStillMs = 3000;
     static constexpr int64_t kFlapsStuckMs = 15000;
