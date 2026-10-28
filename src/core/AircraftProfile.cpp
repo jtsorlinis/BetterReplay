@@ -173,6 +173,25 @@ std::vector<ControlMethod> ownGearWays(const std::string& aircraftKey) {
 
 namespace {
 
+// Autothrottle lights, by the aircraft's profile key: the E-Jets' is the E190's family, so the
+// E170, E175 and E195 have it too (kFamilyAliases).
+struct AutothrottleLight {
+    const char* key;
+    const char* lvar;
+};
+const AutothrottleLight kAutothrottleLights[] = {{"simobjects/airplanes/e190", "FSS_EXX_FGC_LT_AT"}};
+
+}  // namespace
+
+const char* autothrottleLight(const std::string& aircraftKey) {
+    for (const AutothrottleLight& a : kAutothrottleLights) {
+        if (aircraftKey == a.key) return a.lvar;
+    }
+    return nullptr;
+}
+
+namespace {
+
 // "#<id>" at s[i], then "(<param>)" or "(<param>,<release>)" when `withParam`; advances i.
 bool readEvent(const std::string& s, size_t& i, bool withParam, uint32_t& id, int32_t& param, bool& click,
                int32_t& release) {

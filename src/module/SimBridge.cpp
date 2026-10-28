@@ -51,11 +51,10 @@ const char* const kMaskedInputEvents[] = {
 };
 constexpr size_t kMaskedInputEventCount = sizeof(kMaskedInputEvents) / sizeof(kMaskedInputEvents[0]);
 
-// L:vars that show whether an aircraft's own autothrottle is on (SimBridge::pressAutothrottleDisconnect).
-// The FSS E-Jets: the sim's AUTO_THROTTLE_DISCONNECT goes to the button on their thrust levers,
-// which toggles it, so the two presses other aircraft need left it on, holding climb thrust
-// through a takeoff replay. Read before each press, at most kAtLightPresses a disconnect.
-const char* const kAutothrottleLights[] = {"FSS_EXX_FGC_LT_AT"};
+// Where the aircraft shows whether its own autothrottle is on (autothrottleLight: the FSS E-Jets',
+// whose AUTO_THROTTLE_DISCONNECT goes to the button on their thrust levers, which toggles it, so
+// the two presses other aircraft need left it on, holding climb thrust through a takeoff replay),
+// that's read before each press, at most kAtLightPresses a disconnect.
 constexpr int kAtLightPresses = 2;
 
 bool isThrottle(int channel) { return channel >= kThrottle1 && channel <= kThrottle4; }
@@ -1173,13 +1172,18 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     atWatch_.reset();
     atLight_ = FS_VAR_INVALID_ID;
     atLightPressed_ = 0;
-    for (const char* name : kAutothrottleLights) {
+    // By the aircraft: the L:var being there doesn't tell, once an E190 has been loaded this session.
+    if (const char* name = autothrottleLight(engine_.aircraftKey())) {
         const FsLVarId id = fsVarsGetLVarId(name);
-        if (id == FS_VAR_INVALID_ID) continue;
-        atLight_ = id;
-        atLightName_ = name;
-        log::info("playback: the autothrottle's on/off is L:%s here; its disconnect is pressed while that reads on", name);
-        break;
+        if (id != FS_VAR_INVALID_ID) {
+            atLight_ = id;
+            atLightName_ = name;
+            log::info("playback: the autothrottle's on/off is L:%s here; its disconnect is pressed while that reads on",
+                      name);
+        } else {
+            log::warn("playback: no L:%s (the autothrottle's on/off) on this aircraft yet; its disconnect is pressed twice",
+                      name);
+        }
     }
     for (int c = 0; c < kChannelCount; ++c) {
         if (owned.test(static_cast<size_t>(c)) && kChannels[c].play == PlayMode::Set) playSkip_.set(static_cast<size_t>(c));

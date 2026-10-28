@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "AircraftProfile.h"
 #include "ClipFormat.h"
 #include "Engine.h"
 #include "Json.h"
@@ -1114,4 +1115,20 @@ TEST(EnginePlayback_DeletingThePlayingClipStopsIt) {
     REQUIRE(h.engine.deleteClip(h.clipFile, err));
     CHECK(!h.engine.playbackActive());
     CHECK(h.sim.lastRestore);
+}
+
+TEST(Playback_AutothrottleLightOnlyOnItsAircraft) {
+    // The E-Jets' light by their family's key, whichever E-Jet or livery folder; not on the A320neo
+    // V2 loaded after one in the same sim session (its L:var still registered), nor on any other.
+    const std::string light = "FSS_EXX_FGC_LT_AT";
+    for (const char* path : {"simobjects/airplanes/e190", "simobjects/airplanes/e195", "simobjects/airplanes/e175",
+                             "simobjects/airplanes/e195-azul"}) {
+        const char* name = autothrottleLight(aircraftFamily(path));
+        REQUIRE(name != nullptr);
+        CHECK_EQ(std::string(name), light);
+    }
+    CHECK(autothrottleLight(aircraftFamily("simobjects/airplanes/microsoft-a320neo")) == nullptr);
+    CHECK(autothrottleLight(aircraftFamily("simobjects/airplanes/pmdg 777-300er")) == nullptr);
+    CHECK(autothrottleLight("title:FSS Embraer E190 Alliance Airlines") == nullptr);
+    CHECK(autothrottleLight("") == nullptr);
 }

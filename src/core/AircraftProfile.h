@@ -112,6 +112,13 @@ std::string keyEventName(uint32_t id);
 // profile's key (aircraftFamily). The setup tries them when it didn't see the lever's own event
 // fire as the pilot moved it; which works which way, it finds by trying.
 std::vector<ControlMethod> ownGearWays(const std::string& aircraftKey);
+// The L:var that shows whether the aircraft's own autothrottle is on, for an aircraft whose
+// AUTO_THROTTLE_DISCONNECT toggles it (the FSS E-Jets': FSS_EXX_FGC_LT_AT), so a replay presses it
+// by that (SimBridge::pressAutothrottleDisconnect). Null for other aircraft. `aircraftKey` is the
+// profile's key (aircraftFamily). By the key, not by whether the L:var is there: an L:var stays
+// registered for the rest of the sim session once an aircraft has made it, so an A320 loaded after
+// an E190 has this one too.
+const char* autothrottleLight(const std::string& aircraftKey);
 
 // The flap lever driven with FLAPS_INCR/DECR (kKeyFlapsNotches), like a hardware flap switch: a
 // notch at a time toward the target handle index, going by where the notches sent left the lever.
