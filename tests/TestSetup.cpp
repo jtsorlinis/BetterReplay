@@ -3848,6 +3848,10 @@ TEST(Profile_VariantsShareOneKey) {
     CHECK_EQ(aircraftFamily("simobjects/airplanes/pmdg 777-300er/presets/pmdg/pmdg 777-300er/config"), pmdg777);
     CHECK_EQ(aircraftFamily("simobjects/airplanes/pmdg 777-200lr"), pmdg777);
     CHECK_EQ(aircraftFamily("simobjects/airplanes/pmdg 777f/presets/pmdg/pmdg 777f/config"), pmdg777);
+    const std::string a320 = "simobjects/airplanes/microsoft-a320neo";
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/microsoft-a321/presets/inibuilds/a21n/config"), a320);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/microsoft-a321"), a320);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/microsoft-a321neo"), std::string("simobjects/airplanes/microsoft-a321neo"));
     CHECK_EQ(aircraftFamily("simobjects/airplanes/e1950"), std::string("simobjects/airplanes/e1950"));
     CHECK_EQ(aircraftFamily("simobjects/airplanes/fsltl_e190"), std::string("simobjects/airplanes/fsltl_e190"));
     // Different aircraft stay apart; a dash that isn't a variant number stays.

@@ -224,7 +224,7 @@ The same lines are written to `betterreplay.log` in the work folder: `%APPDATA%\
 
 ## 12. Control setup
 
-Use an aircraft without a profile; the A320neo V2 is the interesting one. Start at the gate.
+Use an aircraft without a profile, so not one the README lists as included: the default A330, say. The A320neo V2, the interesting one here, is included now; **Redo** on its aircraft card runs the setup over its included profile. Start at the gate.
 
 - [ ] Open the panel. **Expect** the whole panel to show *Get ready: Set up replay controls for this aircraft*, with a checklist: *Parking brake set*, *On a runway*, *Engines running*. Start the engines, taxi onto the runway and set the parking brake; each item should tick as it becomes true.
   - If *Parking brake set* doesn't tick with the brake set, the aircraft's brake isn't the `BRAKE PARKING POSITION` simvar: note the aircraft. **Later**, then **Set up** on the aircraft card, starts the setup anyway.

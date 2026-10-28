@@ -1099,13 +1099,16 @@ std::string withoutVariant(const std::string& folder) {
 // Variants in folders the dash rule doesn't join, by the folder's start (alone, or followed by a
 // dash: a livery folder of its own, "e195-azul"). The FSS E195 is the E190 to the replay: the same
 // fss.wasm, behaviour files and flap detents; their E170 and E175 are taken to be too (folders
-// named like the E190's, not seen yet). The PMDG 777F flies with the other 777s' controls.
+// named like the E190's, not seen yet). The PMDG 777F flies with the other 777s' controls. The
+// default A321LR is iniBuilds' A320neo V2 stretched (the same EFB, panels and LEAP-1A engines; its
+// configs are encrypted, so taken to be the same, not seen yet).
 struct FamilyAlias {
     const char* folder;
     const char* family;
 };
 const FamilyAlias kFamilyAliases[] = {
-    {"e170", "e190"}, {"e175", "e190"}, {"e190", "e190"}, {"e195", "e190"}, {"pmdg 777f", "pmdg 777"}};
+    {"e170", "e190"}, {"e175", "e190"}, {"e190", "e190"}, {"e195", "e190"}, {"pmdg 777f", "pmdg 777"},
+    {"microsoft-a321", "microsoft-a320neo"}};
 
 std::string familyFolder(const std::string& folder) {
     for (const FamilyAlias& a : kFamilyAliases) {
