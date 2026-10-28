@@ -801,6 +801,57 @@ ReverseToggle::Step ReverseToggle::step(bool clipReverse, bool liveReverse, doub
     return out;
 }
 
+LeverReverseHold::Step LeverReverseHold::step(bool clipOut, bool liveLever, double leverVar) {
+    Step out;
+    below_ = liveLever ? below_ + 1 : 0;
+    if (clipOut) {
+        if (!holding_) {
+            out.started = true;
+            shown_ = false;
+            held_ = 0;
+            start_ = leverVar;
+            target_ = std::isfinite(leverVar) ? leverVar : kIdle;
+        }
+        holding_ = true;
+        out.holding = true;
+        wait_ = 0;
+        ++held_;
+        if (way_ == Way::Decrease && held_ > kCheckFrames && std::isfinite(start_) && std::isfinite(leverVar) &&
+            start_ > 2.0 * kStep && !(leverVar < start_ - 2.0 * kStep)) {
+            way_ = Way::Write;
+            out.switched = true;
+            target_ = leverVar;
+        }
+        if (way_ == Way::Decrease) {
+            out.decrease = true;
+        } else {
+            target_ = target_ - kStep > 0.0 ? target_ - kStep : 0.0;
+            out.write = target_;
+        }
+        if (below_ >= kShownFrames && !shown_) shown_ = out.shown = true;
+        return out;
+    }
+    if (holding_) {
+        holding_ = false;
+        out.letGo = true;
+        out.noReverse = !shown_;
+        out.write = kIdle;                          // as the input puts it, or the lever stays down
+        wait_ = shown_ || liveLever ? kCutFrames : 0;  // never in reverse: nothing to take it out of
+        since_ = 0;
+        return out;
+    }
+    if (wait_ > 0) {
+        ++since_;
+        if (!liveLever) {
+            wait_ = 0;
+            out.out = true;
+        } else if (--wait_ == 0) {
+            out.cut = true;
+        }
+    }
+    return out;
+}
+
 const char* reverseByKey(ReverseBy r) {
     switch (r) {
         case ReverseBy::None: return "none";

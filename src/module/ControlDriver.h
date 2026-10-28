@@ -79,7 +79,9 @@ public:
     // key-event throttle: "hold" holds THROTTLE_DECR while the clip's reversers are out; "events"
     // also puts the reverser in when the clip reversed without the reverse flag; "toggle" toggles
     // reverse at idle when the clip's reversers come out and again when they go in (ReverseToggle).
-    // After begin().
+    // After begin(). The throttle input events in kLeverInputs (the FSS E-Jets') take "hold" by
+    // themselves, without the setup's sweep: their aircraft's own decrease input event, not
+    // THROTTLE_DECR (LeverReverseHold).
     void setReverseBy(ReverseBy by);
     // One THROTTLE_DECR, as a held "decrease throttle" key sends every frame, and one
     // THROTTLE_REVERSE_THRUST_TOGGLE (the setup's tests).
@@ -162,6 +164,10 @@ private:
         ReverseBy reverseBy = ReverseBy::Unknown;
         bool holding = false;     // THROTTLE_DECR held for reverse
         int holdFrames = 0;
+        LeverReverseHold leverHold;  // "hold" on a throttle input event (the FSS E-Jets')
+        FsBVarId revDecrease = FS_VAR_INVALID_ID;  // and its aircraft's decrease and cut presets
+        FsBVarId revCut = FS_VAR_INVALID_ID;
+        FsLVarId revLever = FS_VAR_INVALID_ID;     // and the lever variable the decrease moves
         bool engaged[4] = {};     // the reverser put in by us (the clip reversed without its flag)
         int engageWait[4] = {};   // frames until it's put in again if the aircraft hasn't taken it
         bool leverReversed[4] = {};  // the clip's lever has shown reverse since its reversers came out
@@ -175,6 +181,9 @@ private:
     };
     bool beginSlot(Control c, Slot& s, const ControlMethod& m, std::string& why);
     void applySlot(Control c, Slot& s, const Frame& f, bool force);
+    // Reverse on a throttle input event with "hold" (LeverReverseHold): true while the aircraft's
+    // decrease is held, and the input isn't sent; letting go sets force.
+    bool holdLeverReverse(Slot& s, const Frame& f, bool& force);
     // Whether clip time t is in one of engine e's autothrust stretches.
     static bool inAutothrust(const Slot& s, int e, double t);
     // An input event's value for engine e: the clip's, or in an autothrottle stretch the clip's

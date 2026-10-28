@@ -1,0 +1,36 @@
+{
+  "key": "simobjects/airplanes/e190",
+  "title": "FSS Embraer E190 Alliance Airlines",
+  "updatedUtcMs": 1792667069211,
+  "controls": {
+    "spoilers": {
+      "state": "automatic",
+      "method": "none",
+      "var": "",
+      "scale": 1,
+      "confirmed": false
+    },
+    "flaps": {
+      "state": "ok",
+      "method": "key_event",
+      "var": "",
+      "scale": 1,
+      "confirmed": true
+    },
+    "throttle": {
+      "state": "ok",
+      "method": "input_value",
+      "var": "EVT_LEVER_THROTTLE_B",
+      "scale": 2,
+      "offset": -1,
+      "confirmed": true
+    },
+    "gear": {
+      "state": "ok",
+      "method": "key_event",
+      "var": "",
+      "scale": 1,
+      "confirmed": true
+    }
+  }
+}

@@ -24,7 +24,16 @@ constexpr int kLeverGapFrames = 30;  // a clip without its lever value this long
 // aircraft whose autothrottle moves the levers themselves: the FSS E-Jets'. Where the clip's
 // autothrottle held the levers away from the pilot's throttle (autothrottleLeverStretches), the
 // levers' position is sent through the input instead. No other aircraft's throttle is touched.
-const char* const kLeverInputs[] = {"EVT_LEVER_THROTTLE_B"};
+// The input takes no reverse: the aircraft's own "decrease throttle" and "throttle cut" input
+// events, and the lever variable the decrease moves, replay it (LeverReverseHold).
+struct LeverInput {
+    const char* input;
+    const char* decrease;  // its preset: the lever variable LeverReverseHold::kStep lower
+    const char* cut;       // its preset: the levers to idle
+    const char* lever;     // L:var, LeverReverseHold::kIdle at idle, below 0.17 reverse
+};
+const LeverInput kLeverInputs[] = {
+    {"EVT_LEVER_THROTTLE_B", "EVT_LEVER_THROTTLE_DEC", "EVT_LEVER_THROTTLE_B_CUT", "FSS_EXX_LEVER_THROTTLE_B_MOUSE_INP"}};
 
 double clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -32,6 +41,27 @@ std::string upper(const std::string& s) {
     std::string out = s;
     for (char& ch : out) ch = static_cast<char>(ch >= 'a' && ch <= 'z' ? ch - 32 : ch);
     return out;
+}
+
+const LeverInput* leverInputOf(const ControlMethod& m) {
+    if (m.kind != MethodKind::InputSet && m.kind != MethodKind::InputValue) return nullptr;
+    for (const LeverInput& li : kLeverInputs) {
+        if (upper(m.var) == li.input) return &li;
+    }
+    return nullptr;
+}
+
+bool isLeverInput(const ControlMethod& m) { return leverInputOf(m) != nullptr; }
+
+// An input event's preset, called as a binding does (its parameter unused).
+bool callPreset(FsBVarId id) {
+    FsVarParamVariant param;
+    param.type = FsVarParamTypeDouble;
+    param.doubleValue = 0.0;
+    FsVarParamArray params;
+    params.size = 1;
+    params.array = &param;
+    return fsVarsBVarCall(id, params) == FS_VAR_ERROR_NONE;
 }
 
 }  // namespace
@@ -225,6 +255,19 @@ bool ControlDriver::beginSlot(Control c, Slot& s, const ControlMethod& m, std::s
     s.active = true;
     for (int i = 0; i < 4; ++i) s.since[i] = kResendFrames;
     log::info("controls: driving the %s with %s", spec.label, describeMethod(c, m).c_str());
+    if (const LeverInput* li = c == Control::Throttle ? leverInputOf(m) : nullptr) {
+        s.revDecrease = fsVarsGetBVarId((std::string(li->decrease) + "_SET").c_str(), true);
+        s.revCut = fsVarsGetBVarId((std::string(li->cut) + "_SET").c_str(), true);
+        s.revLever = fsVarsGetLVarId(li->lever);
+        if (s.revDecrease == FS_VAR_INVALID_ID) {
+            log::warn("controls: the aircraft has no %s_SET preset; reverse thrust isn't replayed", li->decrease);
+        } else {
+            s.reverseBy = ReverseBy::Hold;  // LeverReverseHold
+            log::info("controls: reverse thrust by holding %s while the clip's levers are below idle (%s takes no "
+                      "reverse; L:%s %s)",
+                      li->decrease, m.var.c_str(), li->lever, s.revLever == FS_VAR_INVALID_ID ? "not found" : "watched");
+        }
+    }
     return true;
 }
 
@@ -246,11 +289,7 @@ void ControlDriver::setSpoilerCalibration(const LeverCalibration& cal) {
 void ControlDriver::findAutothrust(const std::vector<Frame>& clipFrames) {
     Slot& s = slots_[static_cast<int>(Control::Throttle)];
     clearAutothrust();
-    bool leverInput = false;
-    for (const char* name : kLeverInputs) {
-        leverInput |= (s.method.kind == MethodKind::InputSet || s.method.kind == MethodKind::InputValue) &&
-                      upper(s.method.var) == name;
-    }
+    const bool leverInput = isLeverInput(s.method);
     if (!s.active || (!s.useLever && !leverInput)) return;
     size_t stretches = 0;
     double seconds = 0.0;
@@ -468,8 +507,75 @@ void ControlDriver::apply(Control c, const Frame& f, bool force) {
     applySlot(c, s, f, force || pick.fresh);
 }
 
+bool ControlDriver::holdLeverReverse(Slot& s, const Frame& f, bool& force) {
+    const int engines = ctx_.engines ? (*ctx_.engines < 1 ? 1 : (*ctx_.engines > 4 ? 4 : *ctx_.engines)) : 4;
+    // By the lever simvars: the clip's reversers stow after its levers have come out.
+    bool clipOut = false, liveLever = false;
+    double liveThr = NAN;
+    for (int e = 0; e < engines; ++e) {
+        clipOut |= f.v[kThrottle1 + e] < -1.0;
+        if (!ctx_.live) continue;
+        const double t = ctx_.live->v[kThrottle1 + e];
+        liveLever |= t < -1.0;
+        if (std::isfinite(t) && !(t >= liveThr)) liveThr = t;
+    }
+    double lever = NAN;
+    if (s.revLever != FS_VAR_INVALID_ID && fsVarsLVarGet(s.revLever, number_, &lever) != FS_VAR_ERROR_NONE) lever = NAN;
+    const LeverReverseHold::Step st = s.leverHold.step(clipOut, liveLever, lever);
+    const LeverInput* li = leverInputOf(s.method);
+    const char* dec = li ? li->decrease : "";
+    if (st.started) {
+        log::info("controls: holding %s (the clip's levers are below idle; L:%s %.3f); %s not sent meanwhile", dec,
+                  li ? li->lever : "", lever, s.method.var.c_str());
+    }
+    if (st.switched) {
+        log::info("controls: %s didn't move L:%s in %d frames (%.3f, from %.3f); writing it instead", dec, li ? li->lever : "",
+                  LeverReverseHold::kCheckFrames, lever, s.leverHold.startVar());
+    }
+    if (st.shown) {
+        log::info("controls: the aircraft's levers are in reverse after %d frame(s) (%.1f%%; L:%s %.3f)", s.leverHold.held(),
+                  liveThr, li ? li->lever : "", lever);
+    }
+    if (st.holding && s.leverHold.held() == 60) {
+        log::info("controls: 60 frames into the hold: the levers at %.1f%%, L:%s %.3f", liveThr, li ? li->lever : "", lever);
+    }
+    if (st.decrease) {
+        if (!callPreset(s.revDecrease) && s.errors++ < 5) log::warn("controls: %s_SET failed", dec);
+        ++s.holdFrames;
+    }
+    if (std::isfinite(st.write) && s.revLever != FS_VAR_INVALID_ID) {
+        fsVarsLVarSet(s.revLever, number_, st.write);
+        if (st.holding) ++s.holdFrames;
+    }
+    if (st.holding) return true;
+    if (st.letGo) {
+        force = true;
+        if (st.noReverse) {
+            log::warn("controls: the aircraft's levers showed no reverse in %d frame(s) of the hold (%.1f%%; L:%s %.3f)",
+                      s.leverHold.held(), liveThr, li ? li->lever : "", lever);
+        }
+        log::info("controls: let go (the clip's levers are out of reverse); L:%s back to idle, %s as the clip has it",
+                  li ? li->lever : "", s.method.var.c_str());
+    }
+    if (st.out) {
+        log::info("controls: the levers are out of reverse %d frame(s) after letting go", s.leverHold.sinceLetGo());
+    }
+    if (st.cut) {
+        if (s.revCut != FS_VAR_INVALID_ID) callPreset(s.revCut);
+        log::info("controls: the levers still in reverse %d frames after letting go (%.1f%%); %s", LeverReverseHold::kCutFrames,
+                  liveThr, li ? li->cut : "");
+    }
+    return false;
+}
+
 void ControlDriver::applySlot(Control c, Slot& s, const Frame& f, bool force) {
     const ControlMethod& m = s.method;
+    // The FSS E-Jets' reverse (reverseBy "hold" on a throttle input event): the input not sent
+    // while the aircraft's decrease is held.
+    if (c == Control::Throttle && s.reverseBy == ReverseBy::Hold && m.kind != MethodKind::KeyEvent &&
+        holdLeverReverse(s, f, force)) {
+        return;
+    }
     switch (m.kind) {
         case MethodKind::InputSet:
             for (int e = 0; e < s.count; ++e) {
@@ -921,7 +1027,20 @@ void ControlDriver::end(Control c) {
         log::info("controls: %d engine frame(s) from the throttle simvar, where the clip has no %s value", s.gapFrames,
                   s.lever.var.c_str());
     }
-    if (s.holdFrames > 0) log::info("controls: THROTTLE_DECR held for reverse in %d frame(s)", s.holdFrames);
+    if (const LeverInput* li = s.reverseBy == ReverseBy::Hold ? leverInputOf(s.method) : nullptr) {
+        if (s.holdFrames > 0) {
+            log::info("controls: reverse held in %d frame(s) (%s)", s.holdFrames,
+                      s.leverHold.way() == LeverReverseHold::Way::Decrease ? li->decrease : "L:var written");
+        }
+        if (s.leverHold.pending()) {
+            // The E-Jets' levers stay in reverse once let go: back to idle.
+            if (s.revLever != FS_VAR_INVALID_ID) fsVarsLVarSet(s.revLever, number_, LeverReverseHold::kIdle);
+            if (s.revCut != FS_VAR_INVALID_ID) callPreset(s.revCut);
+            log::info("controls: %s: the replay ended with the levers in reverse", li->cut);
+        }
+    } else if (s.holdFrames > 0) {
+        log::info("controls: THROTTLE_DECR held for reverse in %d frame(s)", s.holdFrames);
+    }
     for (int e = 0; e < 4; ++e) {
         if (s.engaged[e]) keyEvent(kReverseOffKeys[e], 0);  // the reverser we put in
     }

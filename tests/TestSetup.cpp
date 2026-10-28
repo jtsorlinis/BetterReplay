@@ -2017,6 +2017,139 @@ TEST(Playback_ToggleReverseSeekAndGiveUp) {
 
 namespace {
 
+// The FSS E-Jets' thrust levers (their Throttle.xml): one variable, 0.3 at idle, 0.17 to 0 reverse
+// (0 full), up to 1 forward. Their decrease input event takes it 0.01 lower (not where
+// takesDecrease is off); writing it puts it there (not where takesWrites is off); the throttle input
+// event puts it where the pilot's throttle is (idle up), or only a value that differs from the last
+// one (onlyChanges); their throttle cut puts it at idle. The lever simvar: -40% at full reverse,
+// or idle throughout where the levers don't follow the variable (ignoresLever).
+struct EJetLever {
+    double lever = 0.3;
+    bool takesDecrease = true;
+    bool takesWrites = true;
+    bool onlyChanges = false;
+    bool ignoresLever = false;
+    double lastInput = NAN;
+    int cuts = 0;
+    void decrease() {
+        if (takesDecrease) lever = std::fmax(0.0, lever - 0.01);
+    }
+    void write(double v) {
+        if (takesWrites) lever = v;
+    }
+    void input(double v) {
+        if (!(onlyChanges && v == lastInput)) lever = 0.3 + 0.7 * v;
+        lastInput = v;
+    }
+    void cut() {
+        lever = 0.3;
+        ++cuts;
+    }
+    double thr() const {
+        if (ignoresLever) return 0.0;
+        if (lever < 0.17) return (lever - 0.17) / 0.17 * 40.0;
+        return lever < 0.3 ? 0.0 : (lever - 0.3) / 0.7 * 93.9;
+    }
+};
+
+// Plays a landing's reverse through LeverReverseHold as ControlDriver does (the input every frame
+// but in the hold), 60 Hz: idle, full reverse while clipOut, then idle with the pilot's throttle
+// at 0 throughout, as in the clip.
+struct LeverHoldPlayback {
+    LeverReverseHold h;
+    EJetLever ac;
+    int shownAt = -1, outAt = -1, letGoAt = -1, switchedAt = -1, frame = 0;
+    bool noReverse = false;
+    void play(double seconds, bool clipOut) {
+        for (int i = 0; i < static_cast<int>(seconds * 60.0); ++i, ++frame) {
+            const LeverReverseHold::Step st = h.step(clipOut, ac.thr() < -1.0, ac.lever);
+            if (st.shown) shownAt = frame;
+            if (st.letGo) letGoAt = frame;
+            if (st.out) outAt = frame;
+            if (st.switched) switchedAt = frame;
+            noReverse |= st.noReverse;
+            if (st.decrease) ac.decrease();
+            if (std::isfinite(st.write)) ac.write(st.write);
+            if (!st.holding) ac.input(0.0);
+            if (st.cut) ac.cut();
+        }
+    }
+};
+
+}  // namespace
+
+// The E-Jets' reverse is replayed by holding their own decrease: full reverse within a second, and
+// out again at idle when the clip's levers come out. Where the decrease doesn't move their lever
+// variable, it's written instead. Levers left in reverse after letting go (the variable can't be
+// written, and the input takes only a change) get the throttle cut once; levers that don't
+// follow the variable are told, with nothing to take them out of.
+TEST(Playback_EJetReverseByHoldingDecrease) {
+    {
+        LeverHoldPlayback p;
+        p.play(2.0, false);
+        CHECK(!p.h.pending());
+        p.play(10.0, true);
+        CHECK(p.h.pending());
+        CHECK_NEAR(p.ac.thr(), -40.0, 0.01);  // full reverse
+        CHECK(p.shownAt >= 120 && p.shownAt < 120 + 30);
+        CHECK_EQ(p.switchedAt, -1);
+        CHECK(p.h.way() == LeverReverseHold::Way::Decrease);
+        p.play(2.0, false);
+        CHECK_EQ(p.letGoAt, 720);
+        CHECK(p.outAt > p.letGoAt && p.outAt <= p.letGoAt + 2);
+        CHECK_EQ(p.ac.cuts, 0);
+        CHECK(!p.noReverse);
+        CHECK(!p.h.pending());
+        CHECK_NEAR(p.ac.thr(), 0.0, 1e-9);
+    }
+    {
+        LeverHoldPlayback p;
+        p.ac.takesDecrease = false;
+        p.play(2.0, false);
+        p.play(10.0, true);
+        CHECK_EQ(p.switchedAt, 120 + LeverReverseHold::kCheckFrames);
+        CHECK(p.h.way() == LeverReverseHold::Way::Write);
+        CHECK_NEAR(p.ac.thr(), -40.0, 0.01);
+        CHECK(p.shownAt > p.switchedAt && p.shownAt < p.switchedAt + 30);
+        p.play(2.0, false);
+        CHECK(p.outAt > p.letGoAt && p.outAt <= p.letGoAt + 2);
+        CHECK_EQ(p.ac.cuts, 0);
+        CHECK_NEAR(p.ac.thr(), 0.0, 1e-9);
+        p.play(5.0, true);  // a second reverse: written at once
+        CHECK_NEAR(p.ac.thr(), -40.0, 0.01);
+    }
+    {
+        LeverHoldPlayback p;
+        p.ac.takesWrites = false;
+        p.ac.onlyChanges = true;
+        p.play(2.0, false);
+        p.play(10.0, true);
+        p.play(0.4, false);
+        CHECK(p.h.pending());  // still in reverse after letting go
+        CHECK(p.ac.thr() < -1.0);
+        p.play(2.0, false);
+        CHECK_EQ(p.ac.cuts, 1);
+        CHECK_EQ(p.outAt, -1);
+        CHECK(!p.h.pending());
+        CHECK_NEAR(p.ac.thr(), 0.0, 1e-9);
+        p.play(5.0, false);
+        CHECK_EQ(p.ac.cuts, 1);  // once
+    }
+    {
+        LeverHoldPlayback p;
+        p.ac.ignoresLever = true;
+        p.play(2.0, false);
+        p.play(5.0, true);
+        p.play(2.0, false);
+        CHECK(p.noReverse);
+        CHECK_EQ(p.shownAt, -1);
+        CHECK_EQ(p.ac.cuts, 0);
+        CHECK(!p.h.pending());
+    }
+}
+
+namespace {
+
 // An A350-like lever: CL and FLX detents, the lever variable 0..100.
 LeverCalibration airbusLever() {
     LeverCalibration cal;

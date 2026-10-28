@@ -36,7 +36,8 @@ Any aircraft can be taught with the control setup. **Included** means BetterRepl
 | iniBuilds A380                 | ✅       | Engine whine in external views from some angles  |
 | Fenix A320 Family              | ❌       |                                                  |
 | Synaptic A220                  | ✅       |                                                  |
-| FlightSim Studio E-Jets        | ❌       |                                                  |
+| FlightSim Studio E190          | ✅       | In-flight speedbrakes don't replay               |
+| FlightSim Studio E195          | ❌       |                                                  |
 | PMDG 737                       | ✅       |                                                  |
 | PMDG 777                       | ✅       | Throttle can change at accel altitude after T/O  |
 
@@ -71,6 +72,7 @@ The newest 10 takeoff and landing clips of each aircraft are kept, and older one
 - **PMDG 777:** in a takeoff replay the autothrottle can engage itself at acceleration altitude. BetterReplay disconnects it again, but a moment late, so the change from MCT to CLB isn't smooth.
 - **iniBuilds A350:** in the cabin, the engine whine keeps playing, distorted, after the thrust comes back from takeoff to climb. In the flight itself it stops there.
 - **iniBuilds A380:** in external views, from certain angles, the engine whine plays incorrectly (possibly related to a350 issue above)
+- **FlightSim Studio E190:** speedbrakes used in flight don't replay. None of the ways BetterReplay tried moved its spoilers, so replays leave them to the aircraft.
 - **iniBuilds A380, and probably other fly-by-wire aircraft:** the ailerons, elevator and rudder don't follow the clip, because the aircraft's own fly-by-wire keeps moving them. On the A380 the elevator stays at full nose-up.
 
 The details are under [Known gaps](DEVELOPMENT.md#known-gaps).

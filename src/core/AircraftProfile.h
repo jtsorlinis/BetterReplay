@@ -538,6 +538,61 @@ private:
     int corrections_ = 0;
 };
 
+// Reverse thrust in a replay on the FSS E-Jets (kLeverInputs in ControlDriver.cpp). Their throttle
+// input event reads the pilot's throttle from idle up, and takes no reverse. A "decrease throttle"
+// binding goes to their own input event (EVT_LEVER_THROTTLE_DEC), which takes their lever variable
+// (kIdle at idle, below 0.17 reverse, 0 full) kStep lower each time; the sim's THROTTLE_DECR sent
+// from the module doesn't reach it (a replay holding it left the levers at idle). A new value from
+// the throttle input takes them back out, as the pilot's throttle moving a little did at the end
+// of a landing's reverse. So while the clip's levers are below idle (its lever simvar: the
+// reversers stow after them), the aircraft's decrease every frame, all or nothing like a held
+// button, and the input isn't sent meanwhile. If the lever variable hasn't gone down kCheckFrames
+// in, it's written instead, kStep lower a frame. When the clip's levers come out, the lever
+// variable back to idle and the input as the clip has it; levers still in reverse kCutFrames on,
+// the aircraft's throttle cut (idle), once.
+class LeverReverseHold {
+public:
+    enum class Way : uint8_t { Decrease, Write };
+    struct Step {
+        bool holding = false;    // in the hold: the input not sent
+        bool decrease = false;   // the aircraft's decrease now
+        double write = NAN;      // the lever variable written to this now
+        bool started = false;    // the hold began this frame
+        bool switched = false;   // the decrease didn't move the lever variable: written from now on
+        bool shown = false;      // the aircraft's levers show reverse, the first time in this hold
+        bool letGo = false;      // the hold ended: the input as the clip has it now
+        bool noReverse = false;  // and the aircraft's levers never showed reverse in it
+        bool out = false;        // the aircraft's levers out of reverse after letting go
+        bool cut = false;        // the throttle cut now: still in reverse kCutFrames after letting go
+    };
+    // One frame. clipOut: the clip's lever simvar below idle (any engine); liveLever: the
+    // aircraft's; leverVar: the lever variable (NaN where it can't be read: the decrease then).
+    Step step(bool clipOut, bool liveLever, double leverVar);
+    // Holding, or let go with the levers still in reverse: ending the replay now would leave them there.
+    bool pending() const { return holding_ || wait_ > 0; }
+    Way way() const { return way_; }
+    int held() const { return held_; }         // frames in this hold (the last)
+    int sinceLetGo() const { return since_; }  // frames since letting go
+    double startVar() const { return start_; }  // the lever variable when this hold began
+
+    static constexpr double kIdle = 0.3;
+    static constexpr double kStep = 0.01;
+    static constexpr int kCheckFrames = 10;
+    static constexpr int kShownFrames = 5;  // below idle this long in a row: in reverse
+    static constexpr int kCutFrames = 30;
+
+private:
+    Way way_ = Way::Decrease;
+    bool holding_ = false;
+    bool shown_ = false;
+    int held_ = 0;
+    int below_ = 0;  // frames in a row the aircraft's levers are below idle
+    double start_ = NAN;
+    double target_ = NAN;  // Way::Write: where the lever variable goes next
+    int wait_ = 0;  // frames left before the throttle cut, while the levers are still in reverse
+    int since_ = 0;
+};
+
 // Autothrust on an aircraft whose levers stay put under it (an Airbus): the lever sits in its
 // detent while the thrust demand (its lever simvar, see LeverCalibration) goes where the
 // autothrust puts it. Replayed from the lever, the engines give the detent's own thrust (climb
