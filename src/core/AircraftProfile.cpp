@@ -1060,6 +1060,25 @@ std::string withoutVariant(const std::string& folder) {
     return folder;
 }
 
+// Variants in folders the dash rule doesn't join, by the folder's start (alone, or followed by a
+// dash: a livery folder of its own, "e195-azul"). The FSS E195 is the E190 to the replay: the same
+// fss.wasm, behaviour files and flap detents; their E170 and E175 are taken to be too (folders
+// named like the E190's, not seen yet). The PMDG 777F flies with the other 777s' controls.
+struct FamilyAlias {
+    const char* folder;
+    const char* family;
+};
+const FamilyAlias kFamilyAliases[] = {
+    {"e170", "e190"}, {"e175", "e190"}, {"e190", "e190"}, {"e195", "e190"}, {"pmdg 777f", "pmdg 777"}};
+
+std::string familyFolder(const std::string& folder) {
+    for (const FamilyAlias& a : kFamilyAliases) {
+        const size_t n = std::strlen(a.folder);
+        if (folder.compare(0, n, a.folder) == 0 && (folder.size() == n || folder[n] == '-')) return a.family;
+    }
+    return folder;
+}
+
 }  // namespace
 
 std::string aircraftFamily(const std::string& path) {
@@ -1073,7 +1092,7 @@ std::string aircraftFamily(const std::string& path) {
     const std::string folder = path.substr(category + 1, folderEnd == std::string::npos ? std::string::npos
                                                                                          : folderEnd - category - 1);
     if (folder.empty()) return path;
-    return path.substr(0, category + 1) + withoutVariant(folder);
+    return path.substr(0, category + 1) + familyFolder(withoutVariant(folder));
 }
 
 namespace {

@@ -295,7 +295,9 @@ constexpr double kMaxLeadSec = 10.0;
 // aircraft's folder under SimObjects, so its presets (the PMDG's BW, SSW and BCF, the A350's
 // -900ULR) share it, without the model's variant number: a dash and 3 or 4 digits after the
 // model's own digits, so the PMDG 737-600/-700/-800/-900 are "simobjects/airplanes/pmdg 737" and
-// an A350-900 and -1000 are both "a350". Anything else (a "title:" key) is returned as it is.
+// an A350-900 and -1000 are both "a350". A few the dash rule doesn't join go by kFamilyAliases
+// (AircraftProfile.cpp): the FSS E170, E175 and E195 (and E-Jet livery folders) under "e190", the
+// PMDG 777F under "pmdg 777". Anything else (a "title:" key) is returned as it is.
 std::string aircraftFamily(const std::string& path);
 bool isTitleKey(const std::string& key);  // "title:<aircraft title>": the aircraft's path isn't known
 

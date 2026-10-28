@@ -3714,6 +3714,20 @@ TEST(Profile_VariantsShareOneKey) {
     CHECK_EQ(aircraftFamily("simobjects/airplanes/a350/presets/inibuilds/a350-900_default_cabin/config"), a350);
     CHECK_EQ(aircraftFamily("simobjects/airplanes/a350/presets/inibuilds/a350-900ulr/config"), a350);
     CHECK_EQ(aircraftFamily("simobjects/airplanes/a350-1000/presets/inibuilds/a350-1000/config"), a350);
+    // Families the dash rule doesn't join: the FSS E-Jets (and a livery folder of their own), the 777F.
+    const std::string ejet = "simobjects/airplanes/e190";
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/e190"), ejet);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/e195"), ejet);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/e190-alliance"), ejet);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/e195-azul"), ejet);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/e170"), ejet);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/e175/presets/fss/e175/config"), ejet);
+    const std::string pmdg777 = "simobjects/airplanes/pmdg 777";
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/pmdg 777-300er/presets/pmdg/pmdg 777-300er/config"), pmdg777);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/pmdg 777-200lr"), pmdg777);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/pmdg 777f/presets/pmdg/pmdg 777f/config"), pmdg777);
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/e1950"), std::string("simobjects/airplanes/e1950"));
+    CHECK_EQ(aircraftFamily("simobjects/airplanes/fsltl_e190"), std::string("simobjects/airplanes/fsltl_e190"));
     // Different aircraft stay apart; a dash that isn't a variant number stays.
     CHECK_EQ(aircraftFamily("simobjects/airplanes/microsoft-a320neo/presets/inibuilds/a20n/config"),
              std::string("simobjects/airplanes/microsoft-a320neo"));
