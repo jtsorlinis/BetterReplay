@@ -23,13 +23,13 @@ The other big reason was getting the animations right. Other replay tools didn't
 
 ## Aircraft
 
-Any aircraft can be taught with the control setup. **Included** means BetterReplay comes with the aircraft's control profile, so it replays right away without the setup.
+Any aircraft can be taught with the control setup. **Included** means BetterReplay comes with the aircraft's control profile, so it replays right away without the setup. The known issues are in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 | Aircraft                                | Included | Known issues                |
 | --------------------------------------- | -------- | --------------------------- |
 | iniBuilds A320neo V2 / A321LR (default) | ✅       |                             |
 | iniBuilds A330 (default)                | ✅       |                             |
-| Working Title 787-10 (default)          | ❌       |                             |
+| Working Title 787-10 (default)          | ✅       |                             |
 | Working Title 747-8 (default)           | ❌       |                             |
 | iniBuilds A340                          | ❌       |                             |
 | iniBuilds A350                          | ✅       | Occasional sound distortion |
@@ -65,14 +65,6 @@ The newest 10 takeoff and landing clips of each aircraft are kept, and older one
 
 - **No toolbar icon:** enable it in the toolbar's settings. If it's still missing, the package was built without its panel (see [Build and install](DEVELOPMENT.md#build-and-install)); clips are still saved.
 - **Something went wrong:** the log is `betterreplay.log` in the folder above, and `betterreplay.prev.log` is the previous sim session's. Include it when you report a problem.
-
-## Known issues
-
-- **iniBuilds A350:** in the cabin, the engine whine keeps playing, distorted, after the thrust comes back from takeoff to climb. In the flight itself it stops there.
-- **iniBuilds A380:** in external views, from certain angles, the engine whine plays incorrectly (possibly related to a350 issue above)
-- **iniBuilds A380, and probably other fly-by-wire aircraft:** the ailerons, elevator and rudder don't follow the clip, because the aircraft's own fly-by-wire keeps moving them. On the A380 the elevator stays at full nose-up.
-
-The details are under [Known gaps](DEVELOPMENT.md#known-gaps).
 
 ## Planned
 
