@@ -42,7 +42,7 @@ Any aircraft can be taught with the control setup. **Included** means BetterRepl
 
 ## Install
 
-1. Download `betterreplay-recorder-<version>.zip` from the latest [release](https://github.com/jtsorlinis/BetterReplay/releases). To build it yourself, see [Build and install](DEVELOPMENT.md#build-and-install).
+1. Download `betterreplay-recorder-<version>.zip` from the latest [release](https://github.com/jtsorlinis/BetterReplay/releases). To build it yourself, see [Building from source](#building-from-source).
 2. Extract it into your Community folder, so you have `Community\betterreplay-recorder`. On Steam that's `%APPDATA%\Microsoft Flight Simulator 2024\Packages\Community` unless you moved it. To update, delete the old `betterreplay-recorder` folder first.
 3. Start the sim. If the BetterReplay icon isn't on the toolbar, enable it in the toolbar's settings.
 
@@ -63,7 +63,7 @@ The newest 10 takeoff and landing clips of each aircraft are kept, and older one
 
 ## Troubleshooting
 
-- **No toolbar icon:** enable it in the toolbar's settings. If it's still missing, the package was built without its panel (see [Build and install](DEVELOPMENT.md#build-and-install)); clips are still saved.
+- **No toolbar icon:** enable it in the toolbar's settings. If it's still missing, the package was built without its panel (see [Building from source](#building-from-source)); clips are still saved.
 - **Something went wrong:** the log is `betterreplay.log` in the folder above, and `betterreplay.prev.log` is the previous sim session's. Include it when you report a problem.
 
 ## Planned
@@ -72,9 +72,9 @@ The newest 10 takeoff and landing clips of each aircraft are kept, and older one
 - **Manual recording:** start and stop a clip yourself, so a whole flight can be recorded (_Save last 10 minutes_ only keeps the last 10 minutes).
 - **Weather and time of day** from the clip.
 
-## Development
+## Building from source
 
-Building from source, how it works, configuration and known gaps are in [DEVELOPMENT.md](DEVELOPMENT.md). [MANUAL_TEST.md](MANUAL_TEST.md) is the in-sim test checklist.
+You need the MSFS 2024 SDK, Visual Studio 2022 (or its Build Tools) with the C++ workload, and Node.js 22.13 or later. The first time, close the sim and run `.\build.ps1 -Package`: that also compiles the toolbar panel, starting the sim in package-builder mode to do it. After that, `.\build.ps1 -Install` builds BetterReplay and copies it into your Community folder.
 
 ## License
 
