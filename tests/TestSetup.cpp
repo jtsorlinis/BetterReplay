@@ -98,6 +98,9 @@ struct FakeAircraft : IControlSim {
     double demandCreepPct = 0.0;  // and it keeps creeping up this much a second while off idle
     bool hideLeverVars = false;   // the INI_ L:vars don't move (the lever can't be found from them)
     bool atRequest = false;       // and an autothrust request that reads the same as the lever (the A350)
+    // Or the A330's: the EPR the lever asks for, named like the lever (INI_ENGINE1_TLA_EPR) and
+    // holding with it on the ground, ahead of the lever's own INI_3D_THROTTLE_LEVER_POSITION_1_ANIMATION.
+    bool tlaEpr = false;
     // The A380 instead (its simvar held at halfway but never at full): the input events read the
     // lever, 0..100 (as the A350's ENGINE_THROTTLE_1 does), not the demand; and at full the demand
     // stops within a few percent of halfway's (demandCapPct), or keeps hunting (demandHuntPct each way).
@@ -325,6 +328,12 @@ struct FakeAircraft : IControlSim {
                 vars.insert(vars.end(), {{"INI_AUTOTHROTTLE_ENGINE1_AT_REQUEST", true},
                                          {"INI_AUTOTHROTTLE_ENGINE2_AT_REQUEST", true}});
             }
+            if (tlaEpr) {
+                vars.insert(vars.end(), {{"INI_ENGINE1_TLA_EPR", true},
+                                         {"INI_ENGINE2_TLA_EPR", true},
+                                         {"INI_3D_THROTTLE_LEVER_POSITION_1_ANIMATION", true},
+                                         {"INI_3D_THROTTLE_LEVER_POSITION_2_ANIMATION", true}});
+            }
         }
         if (pmdgGear) vars.insert(vars.end(), {{"7X7XleftMLGExt", true}, {"7X7XrightMLGExt", true}, {"7X7XnoseMLGExt", true}});
         if (pmdgLeverVars) vars.insert(vars.end(), {{"7X7XleftMLGExtSnd", true}, {"switch_295_a", true}});
@@ -340,6 +349,7 @@ struct FakeAircraft : IControlSim {
         if (airbus && hideLeverVars) v.insert(v.end(), {0.0, 0.0, 0.0, 0.0, 0.0});
         else if (airbus) v.insert(v.end(), {leverVar(0), leverVar(1), tla(0) >= 44.9 ? 1.0 : 0.0, out[0], out[1]});
         if (airbus && atRequest) v.insert(v.end(), {leverVar(0), leverVar(1)});
+        if (airbus && tlaEpr) v.insert(v.end(), {1.015 + tla(0) * 0.013, 1.015 + tla(1) * 0.013, tla(0), tla(1)});
         if (pmdgGear) v.insert(v.end(), {legAnim * 1000.0, legAnim * 1000.0, legAnim * 1000.0});
         if (pmdgLeverVars) v.insert(v.end(), {gearPos < 0.999 ? 1.0 : 0.0, gearLever * 100.0});
         if (ejetThrottle) v.push_back(thr[0] / 100.0);
@@ -1426,6 +1436,32 @@ TEST(Setup_ThrottleHoldsTickWhileTheThrustDemandCreeps) {
     CHECK(inOrder(h.prompts, {"Move the throttle to about halfway and hold it", "Now to full and hold it", "Back to idle"}));
     REQUIRE(h.run(120.0, nullptr, "done"));
     CHECK_EQ(h.flow.profile()[Control::Throttle].lever.var, std::string("INI_ENG#_THROTTLE_POS"));
+}
+
+// The A330's EPR for the lever holds exactly as still as the lever on the ground, and is named like
+// it (TLA), but in flight it moves with altitude: the lever's own variable wins.
+TEST(Setup_ThrottleLeverNotTheEprItAsksFor) {
+    SetupHarness h;
+    throttleOnly(h);
+    h.aircraft.airbus = true;
+    h.aircraft.tlaEpr = true;
+    REQUIRE(h.start());
+    ThrottlePilot p = throttlePilot(h);
+    confirmKeyEvents(h, p);
+    CHECK_EQ(h.phase(), std::string("sweep"));  // started by itself (the parking brake set)
+    REQUIRE(h.run(120.0, nullptr, "done"));
+    const ControlProfile& tp = h.flow.profile()[Control::Throttle];
+    CHECK_EQ(tp.lever.var, std::string("INI_3D_THROTTLE_LEVER_POSITION_#_ANIMATION"));
+    REQUIRE(tp.lever.valid());
+    double a = NAN;
+    CHECK(leverAxis(tp.lever, 25.0, 0.0, false, a));  // CL
+    CHECK_NEAR(a, 0.5, 0.03);
+    // Here they tie on their movement; on the A330 the EPR was 0.01 ahead of the lever's variables
+    // (1.26 to 1.25 with their names), so it's the name that has to put it behind them.
+    const double epr = leverNameScore("INI_ENGINE1_TLA_EPR");
+    CHECK(epr < leverNameScore("INI_3D_THROTTLE_LEVER_POSITION_1_ANIMATION") - 0.05);
+    CHECK(epr < leverNameScore("INI_AUTOTHRUST_TLA:1") - 0.05);
+    CHECK_EQ(epr, leverNameScore("INI_ENGINE1_TLA_N1"));
 }
 
 TEST(Setup_ThrottleLeverAxisWithItsOwnReverseZone) {

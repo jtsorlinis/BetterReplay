@@ -274,6 +274,10 @@ bool clipWays(Control c, const ControlProfile& cp, const Clip& clip, int engines
               std::string* why);
 // Whether a clip recorded the throttle lever's variable (lv_thr_N) that the calibration is for.
 bool clipHasLever(const LeverCalibration& cal, const Clip& clip, int engines, std::string* why);
+// What a throttle L:var's name adds to its score as the lever's own variable, among those that held
+// as still as each other: named like the lever (LEVER, TLA) 0.1, like what the autothrust asks for
+// or the thrust it makes (REQUEST, COMMAND, TARGET, DEMAND, _N1, EPR) 0.1 less.
+double leverNameScore(const std::string& name);
 
 class SetupFlow {
 public:

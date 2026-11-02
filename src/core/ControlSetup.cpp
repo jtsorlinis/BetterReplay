@@ -204,8 +204,11 @@ const char* const kGearWords[] = {"GEAR", nullptr};
 // the autothrust asks for or the thrust it makes: the A350's INI_AUTOTHROTTLE_ENGINE1_AT_REQUEST
 // holds with the lever on the ground, but in reverse it reads part throttle (and in flight it's
 // the autothrust's); its INI_ENGINE1_TLA_N1 is an N1, its INI_3D_THROTTLE_LEVER_POSITION_1 the lever.
+// The A330's INI_ENGINE1_TLA_EPR is the EPR the lever asks for, which changes with altitude: in CL
+// all the way down an approach it went from 1.423 to 1.415, so the replay saw the lever move and
+// found autothrust only in the last 114 s (climb thrust before that).
 const char* const kLeverPositionWords[] = {"LEVER", "TLA", nullptr};
-const char* const kLeverDemandWords[] = {"REQUEST", "COMMAND", "CMD", "TARGET", "TGT", "DEMAND", "_N1", nullptr};
+const char* const kLeverDemandWords[] = {"REQUEST", "COMMAND", "CMD", "TARGET", "TGT", "DEMAND", "_N1", "EPR", nullptr};
 
 const char* const* wordsFor(Control c) {
     switch (c) {
@@ -3152,6 +3155,10 @@ std::string SetupFlow::leverPattern(const std::string& name) const {
     return name;
 }
 
+double leverNameScore(const std::string& name) {
+    return (hasWord(name, kLeverPositionWords) ? 0.1 : 0.0) - (hasWord(name, kLeverDemandWords) ? 0.1 : 0.0);
+}
+
 // The lever's own variable, from the pilot's holds (the throttle's movement, or Positions): an
 // L:var that moved with the throttle, held a value at idle and at each position, and was still
 // for the longest (the thrust demand keeps creeping after each move). Sets lever_.
@@ -3167,8 +3174,7 @@ bool SetupFlow::findLever() {
     for (const auto& f : found) {
         const CandidateTracker::Holds hd = tracker_.holds(f.index, from, t_, kLeverPositionSec, kLeverStillFraction);
         const std::string& name = tracker_.var(f.index).name;
-        const double score = f.score + (hasWord(name, kLeverPositionWords) ? 0.1 : 0.0) -
-                             (hasWord(name, kLeverDemandWords) ? 0.1 : 0.0);
+        const double score = f.score + leverNameScore(name);
         logf(0, "control setup:   L:var %s held %d position(s), still %.1f s of %.1f, %d values (score %.2f)", name.c_str(),
              hd.levels, hd.stillSec, t_ - from, hd.values, score);
         // Flags and detent indexes hold still too, but don't say where between detents the lever is.
