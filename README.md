@@ -28,7 +28,7 @@ Any aircraft can be taught with the control setup. **Included** means BetterRepl
 | Aircraft                                | Included | Known issues                |
 | --------------------------------------- | -------- | --------------------------- |
 | iniBuilds A320neo V2 / A321LR (default) | ✅       |                             |
-| iniBuilds A330 (default)                | ❌       |                             |
+| iniBuilds A330 (default)                | ✅       |                             |
 | Working Title 787-10 (default)          | ❌       |                             |
 | Working Title 747-8 (default)           | ❌       |                             |
 | iniBuilds A340                          | ❌       |                             |
