@@ -31,7 +31,7 @@ Any aircraft can be taught with the control setup. **Included** means BetterRepl
 | iniBuilds A330 (default)                | ✅       |                             |
 | Working Title 787-10 (default)          | ✅       |                             |
 | Working Title 747-8 (default)           | ✅       |                             |
-| iniBuilds A340                          | ❌       |                             |
+| iniBuilds A340                          | ✅       |                             |
 | iniBuilds A350                          | ✅       | Occasional sound distortion |
 | iniBuilds A380                          | ✅       | Occasional sound distortion |
 | Fenix A320 Family                       | ❌       | I dont own this             |
