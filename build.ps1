@@ -241,7 +241,7 @@ function Write-Manifest([string]$Dir, [long]$TotalSize) {
         content_type = 'MISC'
         title = 'BetterReplay'
         manufacturer = ''
-        creator = 'BetterReplay'
+        creator = 'Jason Tsorlinis'
         package_version = $PackageVersion
         minimum_game_version = '1.0.0'
         release_notes = [ordered]@{ neutral = [ordered]@{ LastUpdate = ''; OlderHistory = '' } }

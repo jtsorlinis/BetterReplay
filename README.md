@@ -25,25 +25,25 @@ The other big reason was getting the animations right. Other replay tools didn't
 
 Any aircraft can be taught with the control setup. **Included** means BetterReplay comes with the aircraft's control profile, so it replays right away without the setup. The known issues are in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
-| Aircraft                                | Included | Known issues                |
-| --------------------------------------- | -------- | --------------------------- |
-| iniBuilds A320neo V2 / A321LR (default) | ✅       |                             |
-| iniBuilds A330 (default)                | ✅       |                             |
-| Working Title 787-10 (default)          | ✅       |                             |
-| Working Title 747-8 (default)           | ✅       |                             |
-| iniBuilds A340                          | ✅       |                             |
-| iniBuilds A350                          | ✅       | Occasional sound distortion |
-| iniBuilds A380                          | ✅       | Occasional sound distortion |
-| Fenix A320 Family                       | ❌       | I dont own this             |
-| Synaptic A220                           | ✅       |                             |
-| FlightSim Studio E-Jets                 | ✅       |                             |
-| PMDG 737                                | ✅       |                             |
-| PMDG 777                                | ✅       |                             |
+| Aircraft                                | Included | Additional info                |
+| --------------------------------------- | -------- | ------------------------------ |
+| iniBuilds A320neo V2 / A321LR (default) | ✅       |                                |
+| iniBuilds A330 (default)                | ✅       |                                |
+| Working Title 787-10 (default)          | ✅       |                                |
+| Working Title 747-8 (default)           | ✅       |                                |
+| iniBuilds A340                          | ✅       |                                |
+| iniBuilds A350                          | ✅       |                                |
+| iniBuilds A380                          | ✅       |                                |
+| Fenix A320 Family                       | ❌       | Not included as I don't own it |
+| Synaptic A220                           | ✅       |                                |
+| FlightSim Studio E-Jets                 | ✅       |                                |
+| PMDG 737                                | ✅       |                                |
+| PMDG 777                                | ✅       |                                |
 
 ## Install
 
 1. Download `betterreplay-recorder-<version>.zip` from the latest [release](https://github.com/jtsorlinis/BetterReplay/releases). To build it yourself, see [Building from source](#building-from-source).
-2. Extract it into your Community folder, so you have `Community\betterreplay-recorder`. On Steam that's `%APPDATA%\Microsoft Flight Simulator 2024\Packages\Community` unless you moved it. To update, delete the old `betterreplay-recorder` folder first.
+2. Extract it into your Community folder, so you have `Community\betterreplay-recorder`. Unless you moved it, that's `%APPDATA%\Microsoft Flight Simulator 2024\Packages\Community` on Steam, or `%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\Packages\Community` for the Microsoft Store version. To update, delete the old `betterreplay-recorder` folder first.
 3. Start the sim. If the BetterReplay icon isn't on the toolbar, enable it in the toolbar's settings.
 
 ## Recording
@@ -57,14 +57,15 @@ Nothing is detected for the first 10 seconds of a flight, so spawning on a runwa
 
 ## Where clips are kept
 
-`%APPDATA%\Microsoft Flight Simulator 2024\WASM\MSFS2024\betterreplay-recorder\work\` (Steam)
+- **Steam:** `%APPDATA%\Microsoft Flight Simulator 2024\WASM\MSFS2024\betterreplay-recorder\work\`
+- **Microsoft Store:** `%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalState\WASM\MSFS2024\betterreplay-recorder\work\`
 
 The newest 10 takeoff and landing clips of each aircraft are kept, and older ones are deleted automatically. "Save last 10 minutes" clips (about 5.5 MB each) are never deleted automatically.
 
 ## Troubleshooting
 
 - **No toolbar icon:** enable it in the toolbar's settings. If it's still missing, the package was built without its panel (see [Building from source](#building-from-source)); clips are still saved.
-- **Something went wrong:** the log is `betterreplay.log` in the folder above, and `betterreplay.prev.log` is the previous sim session's. Include it when you report a problem.
+- **Something went wrong:** the log is `betterreplay.log` in the clips folder above, and `betterreplay.prev.log` is the previous sim session's. Include it when you report a problem.
 
 ## Planned
 

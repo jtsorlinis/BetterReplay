@@ -8,7 +8,7 @@
         <ContentType>MISC</ContentType>
         <Title>BetterReplay</Title>
         <Manufacturer>BetterReplay</Manufacturer>
-        <Creator>BetterReplay</Creator>
+        <Creator>Jason Tsorlinis</Creator>
     </ItemSettings>
     <PackageOrderHint>MISC</PackageOrderHint>
     <Flags>
