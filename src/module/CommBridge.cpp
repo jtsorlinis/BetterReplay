@@ -33,10 +33,10 @@ void CommBridge::send(const char* event, const std::string& json) {
     }
 }
 
-void CommBridge::reply(int id, const std::string& op, bool ok, const std::string& error) {
+void CommBridge::reply(int id, const std::string& op, bool ok, const std::string& error, const std::string& confirm) {
     out_.clear();
     JsonWriter w(out_);
-    w.beginObject().kv("id", id).kv("op", op).kv("ok", ok).kv("error", error).endObject();
+    w.beginObject().kv("id", id).kv("op", op).kv("ok", ok).kv("error", error).kv("confirm", confirm).endObject();
     send(kReplyEvent, out_);
 }
 
@@ -66,12 +66,14 @@ void CommBridge::onCommand(const char* buf, unsigned int size) {
     }
 
     bool ok = true;
+    std::string confirm;
     if (op == "saveLast") {
         ok = engine_.saveLast(utcNowMs(), err);
     } else if (op == "delete") {
         ok = engine_.deleteClip(cmd.getString("file", ""), err);
     } else if (op == "play") {
-        ok = engine_.play(cmd.getString("file", ""), err);
+        // anyway: the pilot said play it although an engine is off (the panel's warning).
+        ok = engine_.play(cmd.getString("file", ""), err, cmd.getBool("anyway", false), &confirm);
     } else if (op == "pause") {
         ok = engine_.pausePlayback(err);
     } else if (op == "resume") {
@@ -101,8 +103,8 @@ void CommBridge::onCommand(const char* buf, unsigned int size) {
         ok = false;
         err = "unknown command: " + op;
     }
-    if (!ok) log::warn("command %s failed: %s", op.c_str(), err.c_str());
-    reply(id, op, ok, err);
+    if (!ok && confirm.empty()) log::warn("command %s failed: %s", op.c_str(), err.c_str());
+    reply(id, op, ok, err, confirm);
 }
 
 }  // namespace br

@@ -65,6 +65,7 @@ The newest 10 takeoff and landing clips of each aircraft are kept, and older one
 ## Troubleshooting
 
 - **No toolbar icon:** enable it in the toolbar's settings. If it's still missing, the package was built without its panel (see [Building from source](#building-from-source)); clips are still saved.
+- **Play says the engines aren't running:** a replay moves the thrust levers but can't start the engines, so an engine that's off stays off all through it, with no thrust or sound. Start them first for the replay to look right, or play it anyway.
 - **Something went wrong:** the log is `betterreplay.log` in the clips folder above, and `betterreplay.prev.log` is the previous sim session's. Include it when you report a problem.
 
 ## Planned

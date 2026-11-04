@@ -109,7 +109,9 @@ const commBusMock = `
       aircraft: state.aircraft, clipsRev: state.rev, clipCount: clips.length, lastSaved: '', error: '',
       play: Object.assign({}, state.play), setup: window.harnessSetup.status() };
   }
-  function reply(id, op, ok, error) { emit('BetterReplay.Reply', { id: id, op: op, ok: ok, error: error || '' }); }
+  function reply(id, op, ok, error, confirm) {
+    emit('BetterReplay.Reply', { id: id, op: op, ok: ok, error: error || '', confirm: confirm || '' });
+  }
   function handle(cmd) {
     window.harness.log.push(cmd);
     const setupReply = window.harnessSetup.command(cmd, state.play.active);
@@ -140,6 +142,11 @@ const commBusMock = `
         if (!state.aircraftKnown) return reply(cmd.id, cmd.op, false, "the aircraft isn't identified yet");
         if (!playable(clips[i])) {
           return reply(cmd.id, cmd.op, false, 'recorded in the ' + clips[i].aircraft + ': switch to that aircraft to replay it');
+        }
+        // Like Engine::play: with the strip's "Engines running" unticked (every clip has them
+        // running), asks first, unless the pilot said play anyway.
+        if (!state.play.active && !window.harnessSetup.sim.engines && !cmd.anyway) {
+          return reply(cmd.id, cmd.op, false, "the engines aren't running", 'engines');
         }
         state.restoreLeft = 0;
         const left = { gear: window.harness.gearSec, flaps: window.harness.flapsSec, engines: window.harness.enginesSec };

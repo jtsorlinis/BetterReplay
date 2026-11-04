@@ -62,6 +62,10 @@ double enginePower(const Frame& f, int engineType) {
     return p;
 }
 
+// An engine running, at idle or above: a turbine by N1 (about 20% at idle), a piston or an electric
+// motor by RPM (a turbine's reads about 9000 at idle, so it counts too). Not reported: not running.
+bool engineTurning(const Frame& f, int e) { return f.v[kEngineN1_1 + e] >= 10.0 || f.v[kEngineRpm1 + e] >= 300.0; }
+
 // Within `limit` of zero, or not reported.
 bool retracted(double v, double limit) { return !std::isfinite(v) || v < limit; }
 
@@ -617,7 +621,8 @@ bool Engine::deleteClip(const std::string& file, std::string& error) {
 
 // ---------------------------------------------------------------------------- playback
 
-bool Engine::play(const std::string& file, std::string& error) {
+bool Engine::play(const std::string& file, std::string& error, bool anyway, std::string* confirm) {
+    if (confirm) confirm->clear();
     if (!out_) {
         error = "playback unavailable";
         return false;
@@ -660,6 +665,17 @@ bool Engine::play(const std::string& file, std::string& error) {
              clip.meta.aircraftPath.c_str(), aircraft_.c_str(), aircraftPath_.c_str());
         return false;
     }
+    // (Switching clips mid-replay, the engines are the replay's, running already.)
+    std::string off;
+    if (!playbackActive_ && !enginesRunningFor(clip, &off)) {
+        if (!anyway) {
+            logf(0, "playback of %s: %s, asking first", file.c_str(), off.c_str());
+            error = off;
+            if (confirm) *confirm = "engines";
+            return false;
+        }
+        logf(0, "playback of %s although %s: played anyway", file.c_str(), off.c_str());
+    }
 
     const bool switching = playbackActive_;
     playback_.load(std::move(clip), file);
@@ -676,6 +692,37 @@ bool Engine::play(const std::string& file, std::string& error) {
          playback_.duration(), playback_.clip().frames.size(), playback_.present().count(),
          static_cast<int>(kChannelCount), switching ? "" : "; aircraft snapshot taken");
     return true;
+}
+
+bool Engine::enginesRunningFor(const Clip& clip, std::string* offText) const {
+    bool used[4] = {};
+    for (const Frame& f : clip.frames) {
+        for (int e = 0; e < 4; ++e) used[e] = used[e] || engineTurning(f, e);
+    }
+    int usedCount = 0;
+    std::vector<int> off;
+    for (int e = 0; e < 4; ++e) {
+        if (!used[e]) continue;
+        ++usedCount;
+        if (!engineTurning(lastRaw_, e)) off.push_back(e + 1);
+    }
+    if (off.empty()) return true;
+    if (!offText) return false;
+    const bool allOff = static_cast<int>(off.size()) == usedCount;
+    if (allOff && usedCount > 1) {
+        *offText = "the engines aren't running";
+    } else if (allOff && facts_.engines <= 1) {
+        *offText = "the engine isn't running";
+    } else {
+        // Some of them (single-engine taxi), or the one of several the clip had running: which.
+        std::string which;
+        for (size_t i = 0; i < off.size(); ++i) {
+            if (i > 0) which += i + 1 == off.size() ? " and " : ", ";
+            which += std::to_string(off[i]);
+        }
+        *offText = off.size() == 1 ? "engine " + which + " isn't running" : "engines " + which + " aren't running";
+    }
+    return false;
 }
 
 bool Engine::recordedOnThisAircraft(const std::string& title, const std::string& path, std::string* error) const {

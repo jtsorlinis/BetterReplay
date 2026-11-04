@@ -171,8 +171,10 @@ public:
     bool deleteClip(const std::string& file, std::string& error);
 
     // Playback. play() snapshots the aircraft, freezes it and starts from the beginning;
-    // playing another clip while one is active keeps the original snapshot.
-    bool play(const std::string& file, std::string& error);
+    // playing another clip while one is active keeps the original snapshot. With an engine off
+    // that runs in the clip it doesn't start: `confirm` is set to "engines" and `error` says which
+    // are off, for the panel to ask; `anyway` (the pilot's answer) plays it all the same.
+    bool play(const std::string& file, std::string& error, bool anyway = false, std::string* confirm = nullptr);
     bool pausePlayback(std::string& error);
     bool resumePlayback(std::string& error);
     bool seek(double t, std::string& error);
@@ -241,6 +243,10 @@ private:
     // that shares its control profile; otherwise `error` asks to switch to it. Clips from before
     // the path was recorded go by `title`. Play and the clip list's "playable" both ask this.
     bool recordedOnThisAircraft(const std::string& title, const std::string& path, std::string* error) const;
+    // Every engine the clip has running, in any of its frames, running here too. The replay moves
+    // the thrust levers but can't start an engine: one that's off stays off through it, no thrust,
+    // no sound, and from cold and dark the cockpit stays dark. Otherwise `off` says which aren't.
+    bool enginesRunningFor(const Clip& clip, std::string* off) const;
     void playbackFrame(double dt);
     void endPlayback(bool restore, const char* why);
     bool saveRange(EventType type, double startT, double endT, const DetectedEvent* ev, int64_t utcNowMs,

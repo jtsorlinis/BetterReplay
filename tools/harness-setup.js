@@ -461,7 +461,7 @@ window.harnessSetup = (function () {
     });
     const help = document.createElement("div");
     help.style.cssText = "margin-top:8px;color:#8a9cab;font-size:12px;line-height:1.35;";
-    help.textContent = "With no profile the panel waits for: parking brake set, on a runway, engines running. The " +
+    help.textContent = "Play with the engines off asks first. With no profile the panel waits for: parking brake set, on a runway, engines running. The " +
       "throttle step needs the parking brake too; the gear is done held above the runway (after takeoff if it counts as " +
       "on the ground there). Spoilers fail twice before an L:var passes, flaps pass first time.";
     box.appendChild(help);

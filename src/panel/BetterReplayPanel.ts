@@ -128,6 +128,7 @@ interface Reply {
     op: string;
     ok: boolean;
     error: string;
+    confirm?: string;  // not done until the pilot says so: "engines" (Play with an engine off)
 }
 type Command = { [key: string]: string | number | boolean };
 // A command that failed: shown on the screen it was given from ("main", "clips" or "player"),
@@ -507,6 +508,8 @@ class BetterReplayPanel extends UIElement {
     declare confirmTimer: number;
     declare note: Note | null;  // a command that failed, shown where it was given
     declare noteTimer: number;
+    declare warnFile: string;  // the clip Play warned about (an engine off), "" when not warning
+    declare warnText: string;  // which engines are off
     declare commandFiles: { [id: number]: string };  // replies still to come for clip commands
     declare saveState: string;  // the save button: "", "saving", "saved" or "failed"
     declare saveTimer: number;
@@ -545,6 +548,8 @@ class BetterReplayPanel extends UIElement {
         this.confirmTimer = 0;
         this.note = null;
         this.noteTimer = 0;
+        this.warnFile = "";
+        this.warnText = "";
         this.commandFiles = {};
         this.saveState = "";
         this.saveTimer = 0;
@@ -687,6 +692,8 @@ class BetterReplayPanel extends UIElement {
         // its own outcome.
         if (r.op === "saveLast") {
             this.setSaveState(r.ok ? "saved" : "failed", r.error);
+        } else if (!r.ok && r.op === "play" && r.confirm === "engines") {
+            this.showWarn(file, r.error);
         } else if (!r.ok) {
             this.showNote(capitalize(r.error || "that didn't work"), file);
         }
@@ -753,6 +760,13 @@ class BetterReplayPanel extends UIElement {
         // Set up / Redo: the same offer as a new aircraft, checklist first (setupRequest).
         byId("br-setup-run").addEventListener("click", () => this.send({ op: "setupRequest" }));
 
+        byId("br-warn-play").addEventListener("click", () => {
+            const file = this.warnFile;
+            this.showWarn("", "");
+            if (file) this.send({ op: "play", file: file, anyway: true });
+        });
+        byId("br-warn-cancel").addEventListener("click", () => this.showWarn("", ""));
+
         const list = byId("br-list");
         list.addEventListener("click", (e: Event) => {
             const button = findWithAttr(e.target, "data-act", list);
@@ -792,6 +806,7 @@ class BetterReplayPanel extends UIElement {
     // One screen at a time: the player while a clip plays, else the main screen or the clips.
     renderView(): void {
         const view = this.status && this.status.play.active ? "player" : this.view;
+        if (view === "player" && this.warnFile) this.showWarn("", "");  // a replay started after all
         const root = byId("br-root");
         root.classList.toggle("view-main", view === "main");
         root.classList.toggle("view-clips", view === "clips");
@@ -831,6 +846,25 @@ class BetterReplayPanel extends UIElement {
             if (this.clips[i].file === file) return this.clips[i];
         }
         return null;
+    }
+
+    // Play's warning that an engine the clip has running is off here (`text` says which): "Play
+    // anyway" sends it again with `anyway`, Cancel goes back. An empty `file` takes it down.
+    showWarn(file: string, text: string): void {
+        this.warnFile = file;
+        this.warnText = text;
+        this.renderWarn();
+    }
+
+    renderWarn(): void {
+        const on = !!this.warnFile;
+        byId("br-root").classList.toggle("warn-mode", on);
+        byId("br-warn").classList.toggle("hidden", !on);
+        if (!on) return;
+        let clip: ClipInfo | null = null;
+        for (let i = 0; i < this.clips.length; ++i) if (this.clips[i].file === this.warnFile) clip = this.clips[i];
+        updateText(byId("br-warn-clip"), clip ? eventLabel(clip.event) + " · " + clipTitle(clip) : "");
+        updateText(byId("br-warn-prompt"), capitalize(this.warnText || "the engines aren't running"));
     }
 
     // A command that failed says so where it was given, for a few seconds: on its clip's row, in

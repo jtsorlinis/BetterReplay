@@ -536,7 +536,15 @@ button {
 /* While the setup is offered or running it takes the whole panel. */
 .br-root.setup-mode .br-main,
 .br-root.setup-mode .br-clips,
-.br-root.setup-mode .br-player {
+.br-root.setup-mode .br-player,
+.br-root.setup-mode .br-warn {
+  display: none !important;
+}
+
+/* Play's engines-off warning takes it the same way (the setup, if offered, comes first). */
+.br-root.warn-mode .br-main,
+.br-root.warn-mode .br-clips,
+.br-root.warn-mode .br-player {
   display: none !important;
 }
 

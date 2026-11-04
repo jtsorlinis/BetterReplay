@@ -659,6 +659,77 @@ TEST(EnginePlayback_RejectsBadRequests) {
     CHECK(!h.engine.playbackActive());
 }
 
+namespace {
+
+// The test clip as a twin's with both engines at idle and above (N1 on a jet, RPM on a piston).
+void giveClipEngines(PlaybackHarness& h) {
+    Clip clip = makeClip(3.0);
+    for (Frame& f : clip.frames) {
+        f.v[kEngineN1_1] = f.v[kEngineN1_2] = 21.0;
+        f.v[kEngineRpm1] = f.v[kEngineRpm2] = 8900.0;
+    }
+    std::vector<uint8_t> bytes;
+    writeClip(clip.meta, VectorFrameSource(clip.frames), bytes);
+    h.storage.files[h.clipFile] = bytes;
+}
+
+}  // namespace
+
+TEST(EnginePlayback_AsksFirstWithTheClipsEnginesOff) {
+    PlaybackHarness h;
+    giveClipEngines(h);
+    std::string err;
+    std::string confirm;
+
+    // Cold and dark (liveFrame: every engine at 0).
+    CHECK(!h.engine.play(h.clipFile, err, false, &confirm));
+    CHECK_EQ(confirm, std::string("engines"));
+    CHECK_EQ(err, std::string("the engines aren't running"));
+    CHECK(!h.engine.playbackActive());
+    CHECK_EQ(h.sim.begins, 0);
+
+    // Single-engine taxi: engine 1 running, 2 not.
+    FrameInput in = liveFrame(h.simTime += 1.0 / 60.0, -33.0);
+    in.raw.v[kEngineN1_1] = 20.5;
+    in.raw.v[kEngineRpm1] = 8800.0;
+    h.engine.onFrame(in, 1792247525000 + std::llround(h.simTime * 1000.0));
+    CHECK(!h.engine.play(h.clipFile, err, false, &confirm));
+    CHECK_EQ(confirm, std::string("engines"));
+    CHECK_EQ(err, std::string("engine 2 isn't running"));
+
+    // A piston twin, by RPM alone: both at idle.
+    in = liveFrame(h.simTime += 1.0 / 60.0, -33.0);
+    in.raw.v[kEngineRpm1] = in.raw.v[kEngineRpm2] = 650.0;
+    h.engine.onFrame(in, 1792247525000 + std::llround(h.simTime * 1000.0));
+    REQUIRE(h.engine.play(h.clipFile, err, false, &confirm));
+    CHECK_EQ(confirm, std::string());
+    CHECK_EQ(h.sim.begins, 1);
+
+    // Switching clips mid-replay isn't asked (the engines are the replay's).
+    h.frames(30, -33.0);
+    REQUIRE(h.engine.play(h.clipFile, err, false, &confirm));
+    CHECK_EQ(h.sim.begins, 2);
+}
+
+TEST(EnginePlayback_PlaysAnywayWithTheEnginesOffWhenTold) {
+    PlaybackHarness h;
+    giveClipEngines(h);
+    std::string err;
+    std::string confirm;
+    REQUIRE(h.engine.play(h.clipFile, err, true, &confirm));
+    CHECK_EQ(confirm, std::string());
+    CHECK(h.engine.playbackActive());
+    CHECK_EQ(h.sim.begins, 1);
+}
+
+TEST(EnginePlayback_ClipWithoutEnginesPlaysColdAndDark) {
+    // The test clip has no engine running (a glider, or a clip from before N1 and RPM were
+    // recorded): nothing to start.
+    PlaybackHarness h;
+    std::string err;
+    REQUIRE(h.engine.play(h.clipFile, err));
+}
+
 TEST(EnginePlayback_OnlyOnTheAircraftItWasRecordedOn) {
     PlaybackHarness h;
     const std::string a350900 = "simobjects/airplanes/a350/presets/inibuilds/a350-900_default_cabin/config";

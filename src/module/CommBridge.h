@@ -26,7 +26,8 @@ private:
     static void onCommandThunk(const char* buf, unsigned int size, void* ctx);
     void onCommand(const char* buf, unsigned int size);
     void send(const char* event, const std::string& json);
-    void reply(int id, const std::string& op, bool ok, const std::string& error);
+    // `confirm`: what the panel should ask the pilot before trying again ("engines"), or "".
+    void reply(int id, const std::string& op, bool ok, const std::string& error, const std::string& confirm);
 
     Engine& engine_;
     bool open_ = false;

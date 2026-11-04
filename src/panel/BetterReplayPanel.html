@@ -93,6 +93,28 @@
           <div class="br-setup-minor hidden" id="br-setup-minor"></div>
         </section>
 
+        <!-- Play with an engine off that runs in the clip: the replay can't start it, so it asks
+             first (.warn-mode), in the setup's look. -->
+        <section class="br-setup br-warn phase-wait hidden" id="br-warn">
+          <div class="br-setup-head">
+            <span class="br-setup-kicker">Replay</span>
+            <span class="br-setup-aircraft" id="br-warn-clip"></span>
+          </div>
+          <div class="br-setup-body">
+            <div class="br-setup-inner">
+              <div class="br-phase">Engines off</div>
+              <div class="br-setup-prompt"><span id="br-warn-prompt"></span></div>
+              <div class="br-setup-detail">The replay moves the thrust levers but can't start an engine. One that's off
+                stays off all through it, with no thrust or sound, and a cold and dark cockpit stays dark. Start the
+                engines first for the replay to look right.</div>
+            </div>
+          </div>
+          <div class="br-setup-btns">
+            <button type="button" class="br-btn br-big br-primary" id="br-warn-play">Play anyway</button>
+            <button type="button" class="br-btn br-big br-secondary" id="br-warn-cancel">Cancel</button>
+          </div>
+        </section>
+
         <!-- clips: the library -->
         <section class="br-clips" id="br-clips">
           <div class="br-clips-head">
