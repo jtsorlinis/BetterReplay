@@ -9,7 +9,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.1.0";
+constexpr const char* kVersion = "0.1.1";
 
 void engineLog(void*, int level, const char* msg) {
     if (level >= 2) {
