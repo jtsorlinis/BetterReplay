@@ -212,6 +212,11 @@ public:
     // replays try it first (in an included profile, for the rest of the session). False if the
     // profile has no such list or it's first already.
     bool promoteWay(Control c, Direction d, const ControlMethod& m);
+    // A replay found the aircraft keeping a control surface to itself (its fly-by-wire), and
+    // steered it by the stick (StickSurface bit): kept in the aircraft's profile, logged and saved,
+    // so later replays steer it from the start (in an included profile, for the rest of the
+    // session). False if the aircraft has no profile or the profile has it already.
+    bool learnStickSurface(unsigned surface);
 
     // ---- status
     bool recording() const { return suspendReason_ == nullptr; }

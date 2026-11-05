@@ -14,6 +14,7 @@
 
 #include "ControlDriver.h"
 #include "Engine.h"
+#include "StickLoop.h"
 
 namespace br {
 
@@ -186,6 +187,15 @@ private:
     void traceOpen();
     void traceRow(const Frame& frame, bool jumped);
     void traceClose();
+    // For the stick loop's columns: the A380's sidestick and pedals, its fly-by-wire's orders and
+    // the surfaces it draws (NaN elsewhere), and the sim's yoke and sideslip, looked up as each
+    // trace opens.
+    static constexpr int kTraceLVarCount = 10;
+    FsLVarId traceLVar_[kTraceLVarCount] = {};
+    FsAVarId traceYokeY_ = FS_VAR_INVALID_ID;
+    FsAVarId traceBeta_ = FS_VAR_INVALID_ID;
+    FsUnitId tracePositionUnit_ = FS_INVALID_UNIT;
+    FsUnitId traceDegreesUnit_ = FS_INVALID_UNIT;
     std::string workDir_;
     FILE* trace_ = nullptr;
     std::string traceName_;
@@ -203,6 +213,55 @@ private:
     // Set channels the aircraft keeps overriding (flaps, spoilers, surfaces) are dropped for the
     // rest of the playback, so the two don't fight (visible flicker).
     void yieldChannel(int channel, int overriddenPct);
+    // A surface the aircraft keeps moving itself (its fly-by-wire) is steered to the clip's by the
+    // stick or pedals instead, AXIS_ELEVATOR_SET / AXIS_AILERONS_SET / AXIS_RUDDER_SET sent as a
+    // joystick would (StickLoop), from the frame it's left to the aircraft. The aircraft's profile
+    // keeps it (AircraftProfile::stickSurfaces), so later replays steer it from the start. Each is
+    // centred when the replay ends.
+    static constexpr int kStickResendFrames = 15;
+    static constexpr double kStickNearDeg = 2.0;  // for the summary: within this of the clip
+    enum StickAxisId { kStickPitch, kStickRoll, kStickYaw, kStickAxisCount };
+    struct StickAxis {
+        const char* name;    // "elevator"
+        const char* event;   // "AXIS_ELEVATOR_SET"
+        int channel;         // the surface it steers to the clip's
+        int also;            // another surface it moves (the right aileron), or -1
+        int keyEvent;        // KEY_AXIS_ELEVATOR_SET, sent
+        int keyEventOther;   // KEY_ELEVATOR_SET: the hardware's other event, for the warning
+        StickLoop loop;
+        size_t hint[3] = {};  // the clip sampled ahead (driveStick)
+        bool learned = false;  // this aircraft: steer it by the stick
+        bool on = false;       // this playback does
+        bool sentAny = false;
+        int32_t sent = 0;
+        int sinceSend = 0;
+        uint64_t dataFrame = 0;  // the data frame the loop last stepped on
+        int frames = 0;
+        int near = 0;
+        double errSum = 0.0;
+        double errMax = 0.0;
+        double stickMax = 0.0;
+        int hardware = 0;  // events from the joystick meanwhile
+    };
+    StickAxis stick_[kStickAxisCount] = {
+        {"elevator", "AXIS_ELEVATOR_SET", kElevator, -1, KEY_AXIS_ELEVATOR_SET, KEY_ELEVATOR_SET,
+         StickLoop(StickLoopConfig::elevator())},
+        {"ailerons", "AXIS_AILERONS_SET", kAileronLeft, kAileronRight, KEY_AXIS_AILERONS_SET, KEY_AILERON_SET,
+         StickLoop(StickLoopConfig::ailerons())},
+        {"rudder", "AXIS_RUDDER_SET", kRudder, -1, KEY_AXIS_RUDDER_SET, KEY_RUDDER_SET,
+         StickLoop(StickLoopConfig::rudder())},
+    };
+    Frame stickAhead_;  // scratch: the clip sampled ahead
+    // The sideslip the aircraft reads, for the rudder's hold (INCIDENCE BETA, looked up once).
+    FsAVarId stickBeta_ = FS_VAR_INVALID_ID;
+    FsUnitId stickDegrees_ = FS_INVALID_UNIT;
+    bool stickBetaResolved_ = false;
+    double liveBeta();
+    int stickAxisFor(int channel) const;  // the axis that steers this surface, or -1
+    void startStick(int axis, bool learned);
+    void driveStick(int axis, const Frame& frame, bool jumped);
+    void sendStick(int axis, double stick, bool force);
+    void endStick(int axis);
     void rebuildPlaybackDefinition();
     void onInputEvents(const SIMCONNECT_RECV_ENUMERATE_INPUT_EVENTS* list, DWORD size);
     void finishInputEvents();  // the list is complete (or the aircraft has none): resolve what uses it

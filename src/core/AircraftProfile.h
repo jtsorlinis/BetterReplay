@@ -398,11 +398,19 @@ private:
     std::string key_;
 };
 
+// Control surfaces an aircraft's fly-by-wire keeps moving itself in replays, which playback steers
+// to the clip's by the stick instead (StickLoop): learned the first time it takes one back, so
+// later replays steer it from the start ("stickSurfaces" in aircraft.json).
+enum StickSurface : unsigned { kStickElevator = 1u, kStickAilerons = 2u, kStickRudder = 4u };
+constexpr int kStickSurfaceCount = 3;
+const char* stickSurfaceKey(int i);  // "elevator", "ailerons", "rudder" (bit 1 << i)
+
 struct AircraftProfile {
     std::string key;    // identifies the aircraft: aircraftFamily() of its path
     std::string title;  // for people reading aircraft.json
     int64_t updatedUtcMs = 0;
     bool declined = false;  // "never for this aircraft": the setup isn't offered again
+    unsigned stickSurfaces = 0;  // StickSurface bits
     ControlProfile controls[kControlCount];
 
     ControlProfile& operator[](Control c) { return controls[static_cast<int>(c)]; }

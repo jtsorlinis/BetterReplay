@@ -417,11 +417,40 @@ TEST(Engine_IncludedProfileWhereTheAircraftHasNone) {
     CHECK(e.profileIncluded());
     CHECK(storage.files.count("aircraft.json") == 0);
 
-    // Another aircraft has none.
+    // So does a surface its fly-by-wire keeps, steered by the stick.
+    CHECK(e.learnStickSurface(kStickElevator));
+    CHECK_EQ(e.currentProfile()->stickSurfaces, static_cast<unsigned>(kStickElevator));
+    CHECK(storage.files.count("aircraft.json") == 0);
+
+    // Another aircraft has none, so there's nowhere to keep one.
     e.setAircraftKey("simobjects/airplanes/a350/presets/airbus/config");
     CHECK(e.currentProfile() == nullptr);
     CHECK(!e.profileIncluded());
     CHECK(!statusIncluded(e));
+    CHECK(!e.learnStickSurface(kStickElevator));
+    CHECK(storage.files.count("aircraft.json") == 0);
+}
+
+TEST(Engine_StickSurfacesAreKeptInTheAircraftsProfile) {
+    MemoryStorage storage;
+    writeProfiles(storage.files["aircraft.json"], "simobjects/airplanes/pmdg 737", kKeyFlapsAxis);
+    Engine e(storage);
+    e.setLogger(&testLog, nullptr);
+    e.init();
+    e.setAircraftKey(kPmdg800);
+    REQUIRE(e.currentProfile() != nullptr);
+    CHECK(!e.profileIncluded());
+    CHECK_EQ(e.currentProfile()->stickSurfaces, 0u);
+    CHECK(e.learnStickSurface(kStickRudder));
+    CHECK(e.learnStickSurface(kStickElevator));
+    CHECK(!e.learnStickSurface(kStickElevator));  // kept already
+    CHECK_EQ(e.currentProfile()->stickSurfaces, static_cast<unsigned>(kStickElevator | kStickRudder));
+
+    Engine again(storage);
+    again.init();
+    again.setAircraftKey(kPmdg800);
+    REQUIRE(again.currentProfile() != nullptr);
+    CHECK_EQ(again.currentProfile()->stickSurfaces, static_cast<unsigned>(kStickElevator | kStickRudder));
 }
 
 TEST(Engine_OwnProfileComesBeforeTheIncludedOne) {

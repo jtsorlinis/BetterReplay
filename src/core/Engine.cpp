@@ -975,6 +975,26 @@ bool Engine::promoteWay(Control c, Direction d, const ControlMethod& m) {
     return true;
 }
 
+bool Engine::learnStickSurface(unsigned surface) {
+    const AircraftProfile* current = currentProfile();
+    if (!current || (current->stickSurfaces & surface) == surface) return false;
+    const bool included = profileIncluded();
+    AircraftProfile& p = included ? included_.upsert(aircraftKey_) : profiles_.upsert(aircraftKey_);
+    p.stickSurfaces |= surface;
+    std::string names;
+    for (int i = 0; i < kStickSurfaceCount; ++i) {
+        if (p.stickSurfaces & (1u << i)) names += std::string(names.empty() ? "" : ", ") + stickSurfaceKey(i);
+    }
+    logf(0, "control profile: the surfaces steered by the stick in replays from the start%s: %s",
+         included ? " in this session" : "", names.c_str());
+    if (!included) {
+        p.updatedUtcMs = lastUtcMs_;
+        saveProfiles();
+    }
+    if (out_) out_->applyProfile(currentProfile());
+    return true;
+}
+
 void Engine::storeSetupProfile() {
     if (aircraftKey_.empty()) return;
     AircraftProfile& p = profiles_.upsert(aircraftKey_);

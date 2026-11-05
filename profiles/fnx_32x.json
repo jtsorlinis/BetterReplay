@@ -2,6 +2,7 @@
   "key": "simobjects/airplanes/fnx_32x",
   "title": "FenixA320 CFM SL",
   "updatedUtcMs": 1793866157480,
+  "stickSurfaces": ["elevator", "ailerons", "rudder"],
   "controls": {
     "spoilers": {
       "state": "ok",

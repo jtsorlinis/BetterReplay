@@ -4,7 +4,7 @@ An auto replay recorder for MSFS 2024: a WASM module (C++) that records the flig
 
 ## Layout
 
-- `src/core/`: plain C++17, no SDK. The channel table (`Channels.cpp`, one row per recorded simvar), ring buffer, event detector, clip format and index, playback controller, control setup and aircraft profiles; `Engine` ties them together. Built natively for the tests and into the module.
+- `src/core/`: plain C++17, no SDK. The channel table (`Channels.cpp`, one row per recorded simvar), ring buffer, event detector, clip format and index, playback controller, control setup and aircraft profiles, and `StickLoop` (steers a fly-by-wire's surfaces by the stick; its fitted A380 figures are in its header); `Engine` ties them together. Built natively for the tests and into the module.
 - `src/module/`: the SDK adapter. `SimBridge` (SimConnect, per-frame playback), `ControlDriver` (gear, flaps, spoilers, throttle by the profile's methods), `CommBridge` (the panel's JSON commands over CommBus), `FileStore`, `Log`, and the entry points in `Module.cpp`.
 - `src/panel/`: the toolbar panel. The TypeScript is stripped to JavaScript at build time.
 - `package/`: the package and panel definitions; `package/spb/` caches the compiled panel `.spb`.

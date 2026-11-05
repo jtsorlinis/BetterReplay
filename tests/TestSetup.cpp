@@ -4271,6 +4271,21 @@ TEST(Profile_IdentityIgnoresStaleState) {
     CHECK_EQ(id.key(), a380);
 }
 
+TEST(Profile_StickSurfacesRoundTrip) {
+    ProfileStore store;
+    store.upsert("simobjects/airplanes/inibuilds-a380").stickSurfaces = kStickElevator | kStickRudder;
+    store.upsert("c172");
+    std::string json;
+    store.toJson(json);
+    CHECK(json.find("\"stickSurfaces\":[\"elevator\",\"rudder\"]") != std::string::npos);
+    CHECK_EQ(json.find("\"stickSurfaces\""), json.rfind("\"stickSurfaces\""));  // only where there are some
+    ProfileStore back;
+    REQUIRE(back.fromJson(json.data(), json.size(), nullptr));
+    CHECK_EQ(back.find("simobjects/airplanes/inibuilds-a380")->stickSurfaces,
+             static_cast<unsigned>(kStickElevator | kStickRudder));
+    CHECK_EQ(back.find("c172")->stickSurfaces, 0u);
+}
+
 TEST(Profile_JsonRoundTrip) {
     ProfileStore store;
     store.upsert("c172").declined = true;

@@ -323,6 +323,18 @@ void SimBridge::onKeyEvent(FsEventId id, const FsVarParamArray* params) {
         if (keysSeen_.size() < kMaxKeysSeen) keysSeen_.push_back({static_cast<uint32_t>(id), v});
         else ++keysDropped_;
     }
+    // The joystick (or pedals) moving a surface the stick loop steers: the two fight.
+    for (StickAxis& a : stick_) {
+        if (!a.on || ControlDriver::sending() || (static_cast<int>(id) != a.keyEvent && static_cast<int>(id) != a.keyEventOther)) {
+            continue;
+        }
+        const int32_t raw = params && params->size > 0 && params->array ? static_cast<int32_t>(params->array[0].intValue) : 0;
+        if (raw != a.sent && a.hardware++ == 0) {
+            log::warn("playback: the joystick's %s moved (key event %d, value %ld) while the replay steers it; "
+                      "leave it alone while a clip plays",
+                      a.name, id, static_cast<long>(raw));
+        }
+    }
     // While playback or the control setup drives the throttle, these are our own events.
     if (playing_ || driver_.active(Control::Throttle)) return;
     struct Mapping {
@@ -830,7 +842,149 @@ void SimBridge::yieldChannel(int channel, int overriddenPct) {
               kChannels[channel].key, kChannels[channel].simvar, overriddenPct, kOverrideWindowFrames);
     playSkip_.set(static_cast<size_t>(channel));
     ++yieldedCount_;
+    // Steered by the stick from here: the other surface it moves (the right aileron) isn't written either.
+    const int axis = stickAxisFor(channel);
+    if (axis >= 0 && !stick_[axis].on) {
+        const int also = stick_[axis].also;
+        if (also >= 0) playSkip_.set(static_cast<size_t>(also));
+        startStick(axis, false);
+    }
     rebuildPlaybackDefinition();
+}
+
+// ---------------------------------------------------------------------------- the stick loop
+
+int SimBridge::stickAxisFor(int channel) const {
+    for (int i = 0; i < kStickAxisCount; ++i) {
+        if (stick_[i].channel == channel || stick_[i].also == channel) return i;
+    }
+    return -1;
+}
+
+void SimBridge::startStick(int axis, bool learned) {
+    StickAxis& a = stick_[axis];
+    a.on = true;
+    a.learned = true;
+    a.loop.reset();
+    a.sentAny = false;
+    a.sent = 0;
+    a.sinceSend = kStickResendFrames;
+    a.dataFrame = frameCount_;
+    a.frames = a.near = 0;
+    a.errSum = a.errMax = a.stickMax = 0.0;
+    a.hardware = 0;
+    log::info("playback: steering the %s to the clip's with %s (%s, as a joystick sends it)%s. Leave your joystick "
+              "alone while a clip plays",
+              a.name, axis == kStickYaw ? "the pedals" : "the stick", a.event,
+              learned ? ", as this aircraft keeps its own" : " instead, on this aircraft from now on");
+    if (!learned) engine_.learnStickSurface(1u << axis);  // (the axes in StickSurface's order)
+}
+
+double SimBridge::liveBeta() {
+    if (!stickBetaResolved_) {
+        stickBetaResolved_ = true;
+        stickBeta_ = fsVarsGetAVarId("INCIDENCE BETA");
+        stickDegrees_ = fsVarsGetUnitId("degrees");
+        if (stickBeta_ == FS_VAR_INVALID_ID || stickDegrees_ == FS_INVALID_UNIT) {
+            log::warn("playback: can't read INCIDENCE BETA; the rudder is steered without the sideslip");
+        }
+    }
+    double beta = NAN;
+    if (stickBeta_ == FS_VAR_INVALID_ID || stickDegrees_ == FS_INVALID_UNIT) return beta;
+    FsVarParamArray none = {};
+    if (fsVarsAVarGet(stickBeta_, stickDegrees_, none, &beta) != FS_VAR_ERROR_NONE) return NAN;
+    return std::fabs(beta) < 45.0 ? beta : NAN;  // (standing still it reads 180)
+}
+
+void SimBridge::driveStick(int axis, const Frame& frame, bool jumped) {
+    StickAxis& a = stick_[axis];
+    if (jumped) a.loop.onJump();
+    // A step for each new reading of the aircraft's surface (none while the sim's paused).
+    if (frameCount_ != a.dataFrame) {
+        a.dataFrame = frameCount_;
+        constexpr double kDegPerRad = 180.0 / kPi;
+        const double target = frame.v[a.channel] * kDegPerRad;
+        const double live = input_.raw.v[a.channel] * kDegPerRad;
+        // The clip ahead by the aircraft's lag, and how fast its surface moves there (in real
+        // seconds, at the playback speed); held at the start or paused, where it is.
+        // What the aircraft reads: its g and sideslip, and the pitch and roll rates the replay
+        // will have written by the time the stick reaches it (the clip's, ahead).
+        StickReadings reads;
+        reads.g = input_.raw.v[kGForce];
+        reads.pitchRate = frame.v[kRotVelBodyX];
+        reads.rollRate = frame.v[kRotVelBodyZ];
+        if (a.loop.config().holdBeta != 0.0) reads.betaDeg = liveBeta();
+        double ahead = target;
+        double rate = 0.0;
+        if (engine_.playback().playing() && !settling_ && playClip_ && !playClip_->frames.empty()) {
+            const Frame* frames = playClip_->frames.data();
+            const size_t count = playClip_->frames.size();
+            const double t = frame.t + a.loop.config().leadSec * playSpeed_;
+            sampleFrames(frames, count, t, stickAhead_, &a.hint[0]);
+            ahead = stickAhead_.v[a.channel] * kDegPerRad;
+            reads.pitchRate = stickAhead_.v[kRotVelBodyX];
+            reads.rollRate = stickAhead_.v[kRotVelBodyZ];
+            sampleFrames(frames, count, t - 0.1, stickAhead_, &a.hint[1]);
+            const double before = stickAhead_.v[a.channel];
+            sampleFrames(frames, count, t + 0.1, stickAhead_, &a.hint[2]);
+            rate = (stickAhead_.v[a.channel] - before) / 0.2 * kDegPerRad * playSpeed_;  // a second of real time
+        }
+        a.loop.update(target, ahead, rate, live, engine_.lastWallDt(), input_.raw.v[kOnGround] >= 0.5, reads);
+        switch (a.loop.takeEvent()) {
+            case StickLoop::Event::Flipped:
+                log::warn("playback: the %s didn't come towards the clip's at full travel for 2 s (%.1f degrees off); "
+                          "trying %s the other way round",
+                          a.name, target - live, a.event);
+                break;
+            case StickLoop::Event::Failed:
+                log::warn("playback: the %s didn't come to the clip's with %s either way round (%.1f degrees off); "
+                          "centred, and the %s left to the aircraft for the rest of this replay",
+                          a.name, a.event, target - live, a.name);
+                break;
+            case StickLoop::Event::None: break;
+        }
+        if (std::isfinite(target) && std::isfinite(live) && !a.loop.failed()) {
+            const double off = std::fabs(target - live);
+            ++a.frames;
+            if (off <= kStickNearDeg) ++a.near;
+            a.errSum += off;
+            a.errMax = std::fmax(a.errMax, off);
+            a.stickMax = std::fmax(a.stickMax, std::fabs(a.loop.stick()));
+        }
+    }
+    sendStick(axis, a.loop.stick(), jumped);
+}
+
+// The axis events are taken to run -16384 .. 16384 the opposite way to the sim's position (ELEVATOR
+// POSITION, AILERON POSITION ...): the SDK's Working Title ESP template negates AXIS_ELEVATOR_SET and
+// AXIS_AILERONS_SET to get its input. The A380 confirmed all three (-16384 pulls back); on another
+// aircraft the loop finds out if one is the other way round (StickLoop).
+void SimBridge::sendStick(int axis, double stick, bool force) {
+    StickAxis& a = stick_[axis];
+    const double s = stick < -1.0 ? -1.0 : (stick > 1.0 ? 1.0 : stick);
+    const int32_t value = static_cast<int32_t>(std::lround(-s * 16383.0));
+    if (!force && a.sentAny && value == a.sent && ++a.sinceSend < kStickResendFrames) return;
+    a.sent = value;
+    a.sinceSend = 0;
+    a.sentAny = true;
+    ControlDriver::keyEvent(a.keyEvent, value);
+}
+
+void SimBridge::endStick(int axis) {
+    StickAxis& a = stick_[axis];
+    if (!a.on) return;
+    a.on = false;
+    if (a.sentAny) {
+        sendStick(axis, 0.0, true);  // centred, as the joystick should be
+        a.sentAny = false;
+    }
+    if (a.frames > 0) {
+        log::info("playback: stick loop: the %s %s within %.0f degrees of the clip's in %d%% of %d frames (%.1f off "
+                  "on average, at most %.1f); %s at most %.0f%% of its travel%s; %d joystick event(s) meanwhile",
+                  a.name, axis == kStickRoll ? "were" : "was", kStickNearDeg, a.near * 100 / a.frames, a.frames,
+                  a.errSum / a.frames, a.errMax, a.event,
+                  a.stickMax * 100.0, a.loop.flipped() ? ", the other way round" : "", a.hardware);
+    }
 }
 
 void SimBridge::rebuildPlaybackDefinition() {
@@ -1220,6 +1374,17 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     }
     if (throttleViaEvents_ || throttleViaInput_) {
         for (int c = kThrottle1; c <= kThrottle4; ++c) playSkip_.set(static_cast<size_t>(c));
+    }
+    // Surfaces this aircraft kept to itself in an earlier replay (this session's, or its profile's):
+    // steered by the stick from the start.
+    for (int i = 0; i < kStickAxisCount; ++i) {
+        StickAxis& a = stick_[i];
+        endStick(i);  // (switching clips)
+        const bool known = a.learned || (haveProfile_ && (profile_.stickSurfaces & (1u << i)));
+        if (!known || !present.test(static_cast<size_t>(a.channel))) continue;
+        playSkip_.set(static_cast<size_t>(a.channel));
+        if (a.also >= 0) playSkip_.set(static_cast<size_t>(a.also));
+        startStick(i, true);
     }
     rebuildPlaybackDefinition();
     rotationSamples_ = 0;
@@ -1965,6 +2130,9 @@ void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
     watchLevers(frame);
     trackEventChannels(frame, jumped);
     if (!settling_ || jumped) trackEngines(frame, jumped);  // (not while held at the start)
+    for (int i = 0; i < kStickAxisCount; ++i) {
+        if (stick_[i].on) driveStick(i, frame, jumped);
+    }
     if (playChannelCount_ == 0 && directChannelCount_ == 0) return;
     if (!jumped && haveWritten_) checkRotationScale();
     if (jumped) directSkip_ = kDirectSkipFrames;
@@ -2304,8 +2472,22 @@ void SimBridge::traceOpen() {
     std::fputs(",tas_live,ias_live,ongnd_live,n1_1_clip,n1_1_live,n2_1_clip,n2_1_live,n1_2_live,n2_2_live,"
                "thrust_1_live,thrust_2_live,thr_1_clip,thr_1_live,thr_2_live,axis_1_sent,axis_2_sent,sent_now,"
                "wall_dt_ms,step_ms,sim_time,update_dt_ms,updates,g_clip,g_live,elev_live,ail_l_live,rud_live,"
-               "gs_clip,gs_live,agl_live\n",
+               "gs_clip,gs_live,agl_live,elev_clip,stick_on,stick,stick_axis,stick_air,stick_way,yoke_y_live,"
+               "elev_pos_live,L:CAPT_SIDESTICK_PITCH,L:FBW_ELEV_OUTPUT,L:FBW_VERTICAL_FLIGHT_MODE_RATIO,"
+               "L:ELEVATORS_HSTAB_1_ANIMATION,stick_hw_events,ail_clip,ail_r_live,ail_on,ail_stick,ail_way,"
+               "ail_hw_events,rud_clip,rud_on,rud_stick,rud_way,rud_hw_events,beta_live,L:CAPT_SIDESTICK_ROLL,"
+               "L:FBW_ROLL_OUTPUT,L:LEFT_AILERON_ANIMATION,L:INI_RUDDER_PEDAL_POSITION,L:FBW_YAW_OUTPUT,"
+               "L:RUDDER_ANGLE_ANIM,elev_hold,elev_ff,ail_hold,ail_ff,rud_hold,rud_ff\n",
                trace_);
+    static const char* kTraceLVars[kTraceLVarCount] = {
+        "CAPT_SIDESTICK_PITCH", "FBW_ELEV_OUTPUT",  "FBW_VERTICAL_FLIGHT_MODE_RATIO", "ELEVATORS_HSTAB_1_ANIMATION",
+        "CAPT_SIDESTICK_ROLL",  "FBW_ROLL_OUTPUT",  "LEFT_AILERON_ANIMATION",         "INI_RUDDER_PEDAL_POSITION",
+        "FBW_YAW_OUTPUT",       "RUDDER_ANGLE_ANIM"};
+    for (int i = 0; i < kTraceLVarCount; ++i) traceLVar_[i] = fsVarsGetLVarId(kTraceLVars[i]);
+    traceYokeY_ = fsVarsGetAVarId("YOKE Y POSITION");
+    traceBeta_ = fsVarsGetAVarId("INCIDENCE BETA");
+    tracePositionUnit_ = fsVarsGetUnitId("position");
+    traceDegreesUnit_ = fsVarsGetUnitId("degrees");
     traceRows_ = 0;
     traceStartMs_ = utcNowMs();
     traceSends_ = driver_.sends(Control::Throttle);
@@ -2331,7 +2513,43 @@ void SimBridge::traceRow(const Frame& frame, bool jumped) {
     std::fprintf(trace_, ",%.3f,%.3f,%.4f,%.4f,%.4f", frame.v[kGForce], live[kGForce], live[kElevator],
                  live[kAileronLeft], live[kRudder]);
     // Ground speed (the clip's and the aircraft's) and height: the A350's cabin sounds follow them.
-    std::fprintf(trace_, ",%.3f,%.3f,%.2f\n", frame.v[kGroundSpeed], live[kGroundSpeed], live[kAgl]);
+    std::fprintf(trace_, ",%.3f,%.3f,%.2f", frame.v[kGroundSpeed], live[kGroundSpeed], live[kAgl]);
+    // The stick loop: the clip's elevator, the stick sent (this frame's is sent after this row),
+    // the gains' blend and way round, the sim's yoke and elevator input, the A380's sidestick and
+    // its pitch fly-by-wire's order and flight mode (NaN on other aircraft).
+    double yoke = NAN;
+    if (traceYokeY_ != FS_VAR_INVALID_ID && tracePositionUnit_ != FS_INVALID_UNIT) {
+        FsVarParamArray none = {};
+        if (fsVarsAVarGet(traceYokeY_, tracePositionUnit_, none, &yoke) != FS_VAR_ERROR_NONE) yoke = NAN;
+    }
+    double lv[kTraceLVarCount];
+    for (int i = 0; i < kTraceLVarCount; ++i) {
+        lv[i] = NAN;
+        if (traceLVar_[i] != FS_VAR_INVALID_ID && fsVarsLVarGet(traceLVar_[i], numberUnit_, &lv[i]) != FS_VAR_ERROR_NONE) {
+            lv[i] = NAN;
+        }
+    }
+    const StickAxis& pitch = stick_[kStickPitch];
+    std::fprintf(trace_, ",%.4f,%d,%.4f,%ld,%.2f,%d,%.4f,%.4f,%.4f,%.3f,%.3f,%.4f,%d", frame.v[kElevator],
+                 pitch.on ? 1 : 0, pitch.loop.stick(), static_cast<long>(pitch.sent), pitch.loop.airWeight(),
+                 pitch.loop.sign(), yoke, live[kElevatorInput], lv[0], lv[1], lv[2], lv[3], pitch.hardware);
+    // The ailerons and rudder the same way (the left aileron is the one steered), the sideslip the
+    // aircraft reads, and the A380's sidestick roll, pedals, roll and yaw orders and drawn surfaces.
+    double beta = NAN;
+    if (traceBeta_ != FS_VAR_INVALID_ID && traceDegreesUnit_ != FS_INVALID_UNIT) {
+        FsVarParamArray none = {};
+        if (fsVarsAVarGet(traceBeta_, traceDegreesUnit_, none, &beta) != FS_VAR_ERROR_NONE) beta = NAN;
+    }
+    const StickAxis& roll = stick_[kStickRoll];
+    const StickAxis& yaw = stick_[kStickYaw];
+    std::fprintf(trace_, ",%.4f,%.4f,%d,%.4f,%d,%d,%.4f,%d,%.4f,%d,%d,%.3f,%.4f,%.3f,%.3f,%.4f,%.3f,%.4f",
+                 frame.v[kAileronLeft], live[kAileronRight], roll.on ? 1 : 0, roll.loop.stick(), roll.loop.sign(),
+                 roll.hardware, frame.v[kRudder], yaw.on ? 1 : 0, yaw.loop.stick(), yaw.loop.sign(), yaw.hardware, beta,
+                 lv[4], lv[5], lv[6], lv[7], lv[8], lv[9]);
+    // Each loop's hold (the stick for the motion the aircraft reads) and feedforward (the clip's
+    // movement), as last sent.
+    std::fprintf(trace_, ",%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n", pitch.loop.lastHold(), pitch.loop.lastFeedforward(),
+                 roll.loop.lastHold(), roll.loop.lastFeedforward(), yaw.loop.lastHold(), yaw.loop.lastFeedforward());
     traceSends_ = sends;
     ++traceRows_;
 }
@@ -2400,6 +2618,10 @@ void SimBridge::checkInputEvents() {
 void SimBridge::onAircraftChanged() {
     if (throttleViaEvents_) log::info("aircraft changed: trying the throttle simvars first again");
     throttleViaEvents_ = false;
+    for (StickAxis& a : stick_) {
+        a.learned = false;
+        a.loop.forget();
+    }
     directMotion_ = true;
     snapRejected_ = false;
     snapAccepted_ = false;
@@ -2430,6 +2652,7 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     traceClose();
     logOverrides();
     logEngines();
+    for (int i = 0; i < kStickAxisCount; ++i) endStick(i);
     playing_ = false;
     playClip_ = nullptr;
     atPresses_ = 0;

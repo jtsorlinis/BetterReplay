@@ -105,6 +105,11 @@ const char* stateKey(ControlState s) {
 
 bool parseStateKey(const std::string& key, ControlState& out) { return parseKey(kStateKeys, key, out); }
 
+const char* stickSurfaceKey(int i) {
+    static const char* kKeys[kStickSurfaceCount] = {"elevator", "ailerons", "rudder"};
+    return i >= 0 && i < kStickSurfaceCount ? kKeys[i] : "";
+}
+
 const char* directionKey(Control c, Direction d) {
     if (c == Control::Gear) return d == Direction::Extend ? "down" : "up";
     return d == Direction::Extend ? "extend" : "retract";
@@ -1337,6 +1342,13 @@ void ProfileStore::toJson(std::string& out) const {
         w.kv("title", p.title);
         w.kv("updatedUtcMs", p.updatedUtcMs);
         w.kv("declined", p.declined);
+        if (p.stickSurfaces) {
+            w.key("stickSurfaces").beginArray();
+            for (int i = 0; i < kStickSurfaceCount; ++i) {
+                if (p.stickSurfaces & (1u << i)) w.value(stickSurfaceKey(i));
+            }
+            w.endArray();
+        }
         w.key("controls").beginObject();
         for (int i = 0; i < kControlCount; ++i) {
             const ControlProfile& c = p.controls[i];
@@ -1394,6 +1406,14 @@ bool ProfileStore::fromJson(const char* text, size_t length, std::string* error)
         p.title = v.getString("title", "");
         p.updatedUtcMs = static_cast<int64_t>(v.getNumber("updatedUtcMs", 0.0));
         p.declined = v.getBool("declined", false);
+        if (const JsonValue* stick = v.get("stickSurfaces")) {
+            for (size_t k = 0; stick->isArray() && k < stick->array.size(); ++k) {
+                for (int i = 0; i < kStickSurfaceCount; ++i) {
+                    const JsonValue& s = stick->array[k];
+                    if (s.type == JsonValue::Type::String && s.string == stickSurfaceKey(i)) p.stickSurfaces |= 1u << i;
+                }
+            }
+        }
         const JsonValue* controls = v.get("controls");
         for (int i = 0; controls && i < kControlCount; ++i) {
             const JsonValue* c = controls->get(kSpecs[i].key);
