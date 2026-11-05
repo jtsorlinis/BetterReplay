@@ -3,7 +3,7 @@
   Package definition. Asset group types follow the MSFS SDK conventions (SPB for InGamePanels,
   Copy for html_ui and the standalone module); not yet diffed against a 2024 SDK sample.
 -->
-<AssetPackage Name="betterreplay-recorder" Version="0.1.1">
+<AssetPackage Name="betterreplay-recorder" Version="0.2.0">
     <ItemSettings>
         <ContentType>MISC</ContentType>
         <Title>BetterReplay</Title>
