@@ -1203,3 +1203,19 @@ TEST(Playback_AutothrottleLightOnlyOnItsAircraft) {
     CHECK(autothrottleLight("title:FSS Embraer E190 Alliance Airlines") == nullptr);
     CHECK(autothrottleLight("") == nullptr);
 }
+
+TEST(Playback_ParkingBrakeLVarOnlyOnItsAircraft) {
+    // The Fenix's handle, for each of its packages (all FNX_32X); not the sim's other A320s, nor the
+    // E-Jets (whose table this shares), nor a key from the title before the path is known.
+    for (const char* path : {"simobjects/airplanes/fnx_32x/presets/fnx/fnx_320_cfm_sl/config/aircraft.cfg",
+                             "simobjects/airplanes/fnx_32x/presets/fnx/fnx_319_cfm_wf_sd/config/aircraft.cfg"}) {
+        const char* name = parkingBrakeLVar(aircraftFamily(path));
+        REQUIRE(name != nullptr);
+        CHECK_EQ(std::string(name), std::string("S_MIP_PARKING_BRAKE"));
+    }
+    CHECK(parkingBrakeLVar(aircraftFamily("simobjects/airplanes/microsoft-a320neo")) == nullptr);
+    CHECK(parkingBrakeLVar(aircraftFamily("simobjects/airplanes/e190")) == nullptr);
+    CHECK(parkingBrakeLVar("title:FenixA320 CFM SL") == nullptr);
+    CHECK(parkingBrakeLVar("") == nullptr);
+    CHECK(autothrottleLight(aircraftFamily("simobjects/airplanes/fnx_32x")) == nullptr);
+}

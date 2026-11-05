@@ -227,6 +227,7 @@ bool SimBridge::open() {
     ControlDriver::Context ctx;
     ctx.h = h_;
     ctx.live = &input_.raw;
+    ctx.aircraftKey = &engine_.aircraftKey();
     ctx.engines = &numEngines_;
     ctx.flapPositions = &flapPositions_;
     ctx.throttleLowerLimit = &throttleLowerLimit_;
@@ -623,7 +624,7 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     SetupFacts& facts = input_.facts;
     facts.engines = numEngines_;
     facts.engineType = std::isfinite(ex[kExEngineType]) ? static_cast<int>(ex[kExEngineType]) : 1;
-    facts.parkingBrake = input_.raw.v[kParkingBrake] >= 0.5;
+    facts.parkingBrake = parkingBrakeSet(input_.raw.v[kParkingBrake]);
     facts.onRunway = ex[kExOnRunway] >= 0.5;
     facts.engineRunning = false;
     for (int e = 0; e < 4 && e < numEngines_; ++e) facts.engineRunning |= ex[kExCombustion1 + e] >= 0.5;
@@ -1638,11 +1639,14 @@ bool SimBridge::flapsArrived(const Frame& target) {
     const double wantIdx = target.v[kFlapsHandleIndex];
     const double haveIdx = live[kFlapsHandleIndex];
     const bool known = std::isfinite(want) && std::isfinite(have);
-    if (known && std::fabs(have - want) <= kFlapsThereTol) {
+    const bool atIndex = !std::isfinite(wantIdx) || !std::isfinite(haveIdx) || std::fabs(haveIdx - wantIdx) < 0.5;
+    // With the handle in the clip's detent too: the Fenix A320's flaps went through the clip's 0.66
+    // on their way to CONF 3's 0.82 (a notch too many), and the replay jumped to the clip then held
+    // 18 s at its start for flaps that were past it.
+    if (known && atIndex && std::fabs(have - want) <= kFlapsThereTol) {
         log::info("playback: the flaps are where the clip has them (%.2f) after %.1f s", have, secs);
         return true;
     }
-    const bool atIndex = !std::isfinite(wantIdx) || !std::isfinite(haveIdx) || std::fabs(haveIdx - wantIdx) < 0.5;
     const int64_t still = now - flapsMovedMs_;
     if (atIndex && still >= kFlapsStillMs) {
         if (known && std::fabs(have - want) > kFlapsFarOff) {
@@ -2695,7 +2699,33 @@ void SimBridge::holdBrakes() {
 }
 
 void SimBridge::setParkingBrake(bool on) {
-    if (!playing_) driver_.parkingBrake(on);
+    if (playing_) return;
+    if (pbLVar_ != FS_VAR_INVALID_ID) {
+        fsVarsLVarSet(pbLVar_, numberUnit_, on ? 1.0 : 0.0);
+    } else {
+        driver_.parkingBrake(on);
+    }
+}
+
+// The Fenix's parking brake handle is its own L:var; BRAKE PARKING POSITION stayed off with it set.
+bool SimBridge::parkingBrakeSet(double simvar) {
+    const std::string& key = engine_.aircraftKey();
+    if (key != pbKey_) {
+        pbKey_ = key;
+        pbName_ = parkingBrakeLVar(key);
+        pbLVar_ = FS_VAR_INVALID_ID;
+        pbLookupFrames_ = 0;
+    }
+    if (pbName_ && pbLVar_ == FS_VAR_INVALID_ID && --pbLookupFrames_ <= 0) {
+        pbLookupFrames_ = 60;
+        pbLVar_ = fsVarsGetLVarId(pbName_);
+        if (pbLVar_ != FS_VAR_INVALID_ID) log::info("parking brake: L:%s on this aircraft, not the simvar", pbName_);
+    }
+    double v = NAN;
+    if (pbLVar_ != FS_VAR_INVALID_ID && fsVarsLVarGet(pbLVar_, numberUnit_, &v) == FS_VAR_ERROR_NONE && std::isfinite(v)) {
+        return v >= 0.5;
+    }
+    return simvar >= 0.5;
 }
 
 // The gear step on the ground: the aircraft straight up from where it stands, its heading and

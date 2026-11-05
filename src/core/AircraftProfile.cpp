@@ -173,21 +173,42 @@ std::vector<ControlMethod> ownGearWays(const std::string& aircraftKey) {
 
 namespace {
 
-// Autothrottle lights, by the aircraft's profile key: the E-Jets' is the E190's family, so the
-// E170, E175 and E195 have it too (kFamilyAliases).
-struct AutothrottleLight {
+// An aircraft's own L:var, by its profile's key.
+struct AircraftLVar {
     const char* key;
     const char* lvar;
 };
-const AutothrottleLight kAutothrottleLights[] = {{"simobjects/airplanes/e190", "FSS_EXX_FGC_LT_AT"}};
 
-}  // namespace
+// Autothrottle lights: the E-Jets' is the E190's family, so the E170, E175 and E195 have it too
+// (kFamilyAliases).
+const AircraftLVar kAutothrottleLights[] = {{"simobjects/airplanes/e190", "FSS_EXX_FGC_LT_AT"}};
 
-const char* autothrottleLight(const std::string& aircraftKey) {
-    for (const AutothrottleLight& a : kAutothrottleLights) {
+// Parking brakes: the Fenix A319, A320 and A321 are all SimObjects/Airplanes/FNX_32X (the handle's
+// VAR_NAME in its Cockpit_Behavior.xml; GSX's Fenix profile tests the same L:var).
+const AircraftLVar kParkingBrakeLVars[] = {{"simobjects/airplanes/fnx_32x", "S_MIP_PARKING_BRAKE"}};
+
+// Flap levers with no detent for 1+F: the Fenix A319, A320 and A321 (FNX_32X).
+const char* const kFlapsOnePlusF[] = {"simobjects/airplanes/fnx_32x"};
+
+template <size_t N>
+const char* lvarFor(const AircraftLVar (&table)[N], const std::string& aircraftKey) {
+    for (const AircraftLVar& a : table) {
         if (aircraftKey == a.key) return a.lvar;
     }
     return nullptr;
+}
+
+}  // namespace
+
+const char* autothrottleLight(const std::string& aircraftKey) { return lvarFor(kAutothrottleLights, aircraftKey); }
+
+const char* parkingBrakeLVar(const std::string& aircraftKey) { return lvarFor(kParkingBrakeLVars, aircraftKey); }
+
+bool flapsOnePlusF(const std::string& aircraftKey) {
+    for (const char* key : kFlapsOnePlusF) {
+        if (aircraftKey == key) return true;
+    }
+    return false;
 }
 
 namespace {
@@ -321,30 +342,68 @@ std::string keyEventName(uint32_t id) {
 int EventStepper::waitFrames(Control c) { return c == Control::Gear ? kGearWaitFrames : kWaitFrames; }
 
 void FlapNotches::begin(int64_t nowMs) {
-    if (!(nowMs - notchMs_ < kSettleMs)) lever_ = NAN;
+    if (!(nowMs - notchMs_ < kSettleMs)) forget();
     since_ = 1 << 20;
 }
 
-int FlapNotches::step(double target, double handle, int64_t nowMs, bool force) {
+int FlapNotches::step(double target, double handle, int64_t nowMs, bool force, bool onGround) {
     if (!std::isfinite(handle)) return 0;
+    ground_ = onGround;
     if (since_ < (1 << 20)) ++since_;
     const double h = std::round(handle);
+    const bool justNotched = dir_ != 0 && nowMs - notchMs_ < kRespondMs;
     if (!(h == handle_)) {
         handle_ = h;
         movedMs_ = nowMs;
+        // Somewhere the notches haven't had the lever, and not further a notch's way just after
+        // it: the pilot's or the aircraft's doing. The Fenix A320 set to FULL between a Stop and
+        // the next replay, the count still at 0 from Stop's notches 16 s before: it sent FLAPS_INCR,
+        // took the handle at FULL for that notch going further, and never retracted them
+        // (2026-11-05). A handle that lags (the PMDG 777's, 737's) shows only where they've had it.
+        const bool outside = std::isfinite(lo_) && (h < lo_ - 0.5 || h > hi_ + 0.5);
+        const bool further = justNotched && std::isfinite(lever_) && (h - lever_) * dir_ > 0.5;
+        if (outside && !further) setLever(h);
     }
-    if (!std::isfinite(lever_) || nowMs - movedMs_ >= kSettleMs) lever_ = h;
-    if (!std::isfinite(target) || std::fabs(lever_ - target) < 0.5) return 0;
+    if (!std::isfinite(lever_) || nowMs - movedMs_ >= kSettleMs) setLever(h);
+    // The handle past where the notches took the lever, the way they went just now, and the target
+    // further still: the aircraft went further than a notch. (On the ground the Fenix A320's first
+    // FLAPS_INCR from 0 is 1+F, handle 2; going by the notches sent a second, and the replay played
+    // the takeoff roll at CONF 2. setOnePlusF now knows that one.) As far as the handle, never past
+    // the target: a notch back from there could go as far the other way. (The PMDG 777's handle
+    // lags: short of the lever, never past.)
+    if (justNotched && std::isfinite(target) && (h - lever_) * dir_ > 0.5 && (target - lever_) * dir_ > 0.5) {
+        lever_ = dir_ > 0 ? std::min(h, target) : std::max(h, target);
+        lo_ = std::min({lo_, lever_, h});
+        hi_ = std::max({hi_, lever_, h});
+    }
+    if (at(target)) return 0;
     if (!force && since_ < kFrames) return 0;
     const int dir = target > lever_ ? 1 : -1;
-    lever_ += dir;
+    lever_ = after(lever_, dir);
+    lo_ = std::min(lo_, lever_);
+    hi_ = std::max(hi_, lever_);
+    dir_ = dir;
     movedMs_ = notchMs_ = nowMs;
     since_ = 0;
     return dir;
 }
 
 bool FlapNotches::at(double target) const {
-    return !std::isfinite(lever_) || !std::isfinite(target) || std::fabs(lever_ - target) < 0.5;
+    if (!std::isfinite(lever_) || !std::isfinite(target)) return true;
+    const double t = std::round(target);
+    const double off = std::fabs(lever_ - t);
+    if (off < 0.5) return true;
+    // A notch that would go past the target and end no nearer: as near as the notches get.
+    return std::fabs(after(lever_, t > lever_ ? 1 : -1) - t) >= off;
+}
+
+double FlapNotches::after(double from, int dir) const {
+    const double f = std::round(from);
+    if (onePlusF_ && dir > 0) {
+        if (f == 0.0 && ground_) return 2.0;  // 1+F
+        if (f == 1.0) return 3.0;             // CONF 1 to CONF 2
+    }
+    return f + dir;
 }
 
 double FlapSteps::step(double target, double handle, bool force) {

@@ -245,7 +245,10 @@ bool ControlDriver::beginSlot(Control c, Slot& s, const ControlMethod& m, std::s
                 }
                 break;
             }
-            if (c == Control::Flaps && m.var == kKeyFlapsNotches) notches_.begin(utcNowMs());
+            if (c == Control::Flaps && m.var == kKeyFlapsNotches) {
+                notches_.begin(utcNowMs());
+                notches_.setOnePlusF(ctx_.aircraftKey && flapsOnePlusF(*ctx_.aircraftKey));
+            }
             if (c == Control::Flaps && m.var != kKeyFlapsNotches && (!ctx_.flapPositions || *ctx_.flapPositions < 2)) {
                 why = "FLAPS_SET needs the number of flap positions";
                 return false;
@@ -991,7 +994,8 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
 // Like a hardware flap switch: a notch at a time toward the clip's handle index (FlapNotches).
 void ControlDriver::stepFlaps(Slot& s, double target, bool force) {
     const double live = ctx_.live ? ctx_.live->v[kFlapsHandleIndex] : NAN;
-    const int dir = notches_.step(target, live, utcNowMs(), force);
+    const bool onGround = ctx_.live && ctx_.live->v[kOnGround] >= 0.5;
+    const int dir = notches_.step(target, live, utcNowMs(), force, onGround);
     if (dir == 0) return;
     const bool extend = dir > 0;
     keyEvent(extend ? KEY_FLAPS_INCR : KEY_FLAPS_DECR, 0);

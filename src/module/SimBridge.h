@@ -301,6 +301,14 @@ private:
     int atLightPressed_ = 0;
     bool pressAutothrottleDisconnect();
     void watchLevers(const Frame& frame);
+    // The setup's parking brake: the simvar, or on an aircraft that keeps its own (parkingBrakeLVar:
+    // the Fenix's) that L:var, once the aircraft has registered it (looked up again every 60 frames
+    // until then; pbKey_ is the aircraft key it was looked up for). Setting it again writes it there.
+    std::string pbKey_;
+    const char* pbName_ = nullptr;
+    FsLVarId pbLVar_ = FS_VAR_INVALID_ID;
+    int pbLookupFrames_ = 0;
+    bool parkingBrakeSet(double simvar);
     bool setupMasking_ = false;  // the setup is driving the throttle simvars: hardware masked
     // The setup's gear step on the ground (beginHover): the aircraft as it stood, and where it's
     // held, frozen, its position, attitude and velocities (DEF_HOVER) written every data frame in
@@ -465,8 +473,9 @@ private:
     // Flaps that the profile or an input event drives (flapsDriven) are set before the jump (or,
     // where they couldn't be, after it, the replay holding at its start: settleJump): once the
     // lever has waited for the aircraft to settle at the clip's speed (above), until the surfaces
-    // are within kFlapsThereTol of the clip's, or have held still for kFlapsStillMs with the
-    // handle at the clip's index (its setting can differ: CONF 1 for 1+F), or haven't moved for
+    // are within kFlapsThereTol of the clip's with the handle at the clip's index (not on their way
+    // past), or have held still for kFlapsStillMs with the handle at the clip's index (its setting
+    // can differ: CONF 1 for 1+F), or haven't moved for
     // kFlapsStuckMs; kFlapsArriveMaxMs at most. The PMDG 777's flaps take about ten seconds a detent.
     // Stopped more than kFlapsFarOff from the clip's is a warning: further than CONF 1 is from 1+F
     // (0.25 on the A320neo V2), as when its flaps stayed at FULL with the lever sent to 1.

@@ -461,6 +461,7 @@ private:
     void noteGearCommand(double command, const Frame& live);
     void logGearCommand() const;
     bool rolling(const Frame& live) const;
+    std::string rollDetail(const Frame& live) const;  // "3.1 kt backward, N1 48.2, reversers out", for the log
     // The brakes held while the engines run up on the ground (the pilot's throttle movement, its
     // replays, the lever's sweep): the A220's parking brake alone didn't hold it at full thrust.
     bool brakesWanted() const;
@@ -681,6 +682,15 @@ private:
     double sweepHeld_ = 0.0;      // time at this move
     double sweepLast_ = NAN;      // the lever's last reading, and how long it's been unchanged
     double sweepSteady_ = 0.0;
+    // The sweep's lowest and highest N1 (RPM on pistons) so far: before reverse thrust goes out,
+    // it waits at idle for the engines to come back down (spooledForReverse).
+    double sweepLowOut_ = NAN;
+    double sweepHighOut_ = NAN;
+    bool sweepSpoolWait_ = false;  // this move waited for that
+    bool sweepSpoolDone_ = false;  // and it's done with it (spooled down, or waited kSweepSpoolMaxSec)
+    bool sweepRollLogged_ = false; // it moved at idle (kIdleRollKt), logged once
+    bool deploysNext() const;      // the next move puts reverse thrust out
+    bool spooledForReverse(const Frame& live) const;
     Frame sweepFrame_;
     bool reverserOn_ = false;
     std::vector<LeverPoint> sweepForward_, sweepReverse_;

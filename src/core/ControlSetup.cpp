@@ -42,6 +42,9 @@ constexpr double kCalStillTol = 0.002;
 constexpr double kCalBackMaxSec = 6.0;
 constexpr double kCalSameTol = 0.03;
 constexpr double kMaxRollKt = 3.0;   // the throttle replay stops if the aircraft starts to roll
+// The throttle calibration with the throttle back at idle, the engines still coming down: the brakes
+// stop it, and only this much stops the calibration (SetupFlow::sweepFrame).
+constexpr double kIdleRollKt = 10.0;
 constexpr double kStopKt = 2.0;      // stopped, for the steps on the runway
 constexpr double kTaskStillSec = 0.75;  // a control held this long has finished that instruction
 // The gear: a variable that took this long to travel, or this share of the time the legs took
@@ -138,6 +141,8 @@ constexpr double kSweepStowCheckSec = 3.0;
 constexpr int kSweepToggleAgain = 2;
 constexpr double kSweepHoldSec = 4.0;
 constexpr double kSweepStowSec = 6.0;
+// Longest wait at idle for the engines to spool down before reverse thrust (spooledForReverse).
+constexpr double kSweepSpoolMaxSec = 30.0;
 
 // The gear step on the ground (SetupFlow::kHover*). Above the runway the sim has to show the
 // aircraft off the ground for kHoverSettleSec before the pilot is told to raise the gear; a height
@@ -268,12 +273,12 @@ const char* const kPositionsDetail =
 const char* const kPositionsAgain = "Couldn't find the lever's own position in that movement. Once more, please.";
 const char* const kNoticeDetail =
     "Once it's set, BetterReplay moves the throttle itself, from idle to full and back, to learn where the lever's "
-    "positions are, then tries reverse thrust if the aircraft has it. The engines spool up against the parking brake, "
-    "with the brakes held as well, for 20 to 40 seconds.";
+    "positions are, then, once the engines have spooled back down, tries reverse thrust if the aircraft has it. The "
+    "engines spool up against the parking brake, with the brakes held as well, for up to a minute.";
 const char* const kSweepDetail =
     "Keep your hands off the throttle: BetterReplay moves it itself, from idle to full and back, to learn where the "
-    "lever's positions are, then tries reverse thrust if the aircraft has it. The engines spool up against the "
-    "parking brake, with the brakes held as well, for 20 to 40 seconds.";
+    "lever's positions are, then, once the engines have spooled back down, tries reverse thrust if the aircraft has "
+    "it. The engines spool up against the parking brake, with the brakes held as well, for up to a minute.";
 // The aircraft started to move though the setup held the brakes (an aircraft that ignores BRAKES).
 const char* const kRolledReplay =
     "Stopped early: the aircraft started to move. If the parking brake is set, hold the brakes as well, then Watch "
@@ -2581,6 +2586,17 @@ bool SetupFlow::rolling(const Frame& live) const {
     return control() == Control::Throttle && onGround_ && live.v[kGroundSpeed] > kMaxRollKt;
 }
 
+std::string SetupFlow::rollDetail(const Frame& live) const {
+    const double vz = live.v[kVelBodyZ];
+    bool reversers = false;
+    for (int e = 0; e < engineCount(facts_); ++e) reversers |= reversing(live, e);
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "%.1f kt%s, %s %.1f, reversers %s", live.v[kGroundSpeed],
+                  !std::isfinite(vz) ? "" : vz < 0.0 ? " backward" : " forward", jetLike(facts_.engineType) ? "N1" : "RPM",
+                  outcomeSignal(live), reversers ? "out" : "stowed");
+    return buf;
+}
+
 void SetupFlow::replayFrame(double dt, const Frame& live) {
     const Control c = control();
     const char* label = controlSpec(c).label;
@@ -2654,7 +2670,7 @@ void SetupFlow::replayFrame(double dt, const Frame& live) {
     if (rolling(live)) {
         stoppedEarly_ = true;
         sim_->applyControl(c, mini_.frames.front(), true);
-        logf(1, "control setup: the aircraft started to roll (%.1f kt); stopping the throttle replay", live.v[kGroundSpeed]);
+        logf(1, "control setup: the aircraft started to roll (%s); stopping the throttle replay", rollDetail(live).c_str());
         endDrive();
         evaluate(live);
         return;
@@ -3234,6 +3250,8 @@ void SetupFlow::beginSweep() {
     sweepForward_.clear();
     sweepReverse_.clear();
     reverserOn_ = false;
+    sweepLowOut_ = sweepHighOut_ = NAN;
+    sweepRollLogged_ = false;
     for (double& v : sweepFrame_.v) v = NAN;
     phase_ = Phase::Sweep;
     phaseT_ = 0.0;
@@ -3276,19 +3294,71 @@ void SetupFlow::sweepTo(double axis, bool force) {
     sweepHeld_ = 0.0;
     sweepSteady_ = 0.0;
     sweepLast_ = NAN;
+    sweepSpoolWait_ = sweepSpoolDone_ = false;
+}
+
+bool SetupFlow::deploysNext() const {
+    if (sweepAt_ + 1 >= sweep_.size()) return false;
+    const SweepMove& next = sweep_[sweepAt_ + 1];
+    return next.reverser == 1 || (next.reverser == 2 && !toggledOn_) || next.record == 3;
+}
+
+// Back down from the sweep's highest N1 to within a tenth of its rise above idle, and stopped.
+bool SetupFlow::spooledForReverse(const Frame& live) const {
+    if (onGround_ && live.v[kGroundSpeed] > kStopKt) return false;
+    const double o = outcomeSignal(live);
+    if (!std::isfinite(o) || !std::isfinite(sweepLowOut_)) return true;
+    return fromRest(o, sweepLowOut_) <= std::max(tuning(Control::Throttle).outcomeStart, 0.1 * (sweepHighOut_ - sweepLowOut_));
 }
 
 void SetupFlow::sweepFrame(double dt, const Frame& live) {
-    if (rolling(live)) {
-        logf(1, "control setup: the aircraft started to roll (%.1f kt); stopping the throttle calibration", live.v[kGroundSpeed]);
+    // A roll stops the calibration while it adds thrust. Back at idle it's the engines still coming
+    // down (they lag the levers): the Fenix A320's brakes don't hold the 83% N1 the forward pass
+    // leaves it at, and it moved forward a second after the levers came back, the pass done, both
+    // times. The brakes stay held, and the reverse test waits for it to stop (spooledForReverse).
+    const int record = sweep_[sweepAt_].record;
+    const bool idleMove = record == 0 || record == 3 || record == 4 || record == 7;
+    if (rolling(live) && (!idleMove || live.v[kGroundSpeed] > kIdleRollKt)) {
+        logf(1, "control setup: the aircraft started to roll (%s); stopping the throttle calibration", rollDetail(live).c_str());
         stopSweep(kRolledSweep);
         return;
+    }
+    if (rolling(live) && !sweepRollLogged_) {
+        sweepRollLogged_ = true;
+        logf(1, "control setup: the aircraft is moving (%s) with the throttle back at idle, the engines still coming "
+             "down; holding the brakes until it stops", rollDetail(live).c_str());
     }
     if (phaseT_ > kSweepMaxSec) {
         stopSweep("The throttle calibration took too long.");
         return;
     }
     sweepHeld_ += dt;
+    const double out = outcomeSignal(live);
+    if (std::isfinite(out)) {
+        sweepLowOut_ = std::isfinite(sweepLowOut_) ? std::min(sweepLowOut_, out) : out;
+        sweepHighOut_ = std::isfinite(sweepHighOut_) ? std::max(sweepHighOut_, out) : out;
+    }
+    // Reverse thrust goes out from idle thrust, with the aircraft stopped: deployed half a second
+    // after the forward pass put the levers back to idle, the engines would still be at 83% N1, and
+    // the Fenix A320 still moving forward from it.
+    if (!sweepSpoolDone_ && deploysNext()) {
+        const bool spooled = spooledForReverse(live);
+        if (!spooled && sweepHeld_ < kSweepSpoolMaxSec) {
+            if (!sweepSpoolWait_) {
+                sweepSpoolWait_ = true;
+                logf(0, "control setup: waiting for the engines to spool down (N1 %.1f, %.1f at idle) and the aircraft "
+                     "to stop before trying reverse thrust", out, sweepLowOut_);
+            }
+            return;
+        }
+        sweepSpoolDone_ = true;
+        if (!spooled) {
+            logf(1, "control setup: the engines still read %.1f (%.1f at idle) or the aircraft is still moving (%.1f kt) "
+                 "after %.0f s; trying reverse thrust anyway", out, sweepLowOut_, live.v[kGroundSpeed], sweepHeld_);
+        } else if (sweepSpoolWait_) {
+            logf(0, "control setup: the engines spooled down (N1 %.1f) after %.1f s", out, sweepHeld_);
+        }
+    }
     // The lever's reading (none when only reverse is tried: then nothing to wait for).
     const double v = lever_.var.empty() ? NAN : sim_->readVar({engineVar(lever_.var, 1), true});
     const bool same = std::isfinite(v) && std::isfinite(sweepLast_) && std::fabs(v - sweepLast_) <= 1e-6 * std::max(1.0, std::fabs(v));

@@ -115,6 +115,9 @@ struct FakeAircraft : IControlSim {
     bool reverseZone = false;    // the axis's bottom fifth is reverse instead
     bool reverser = false;
     int reverserCalls = 0;
+    // The Fenix A320's: reverse thrust out with the engines above 40% N1 moves it against the brakes.
+    bool reverseKick = false;
+    double n1AtReverse = NAN;  // N1 when the reverse events last put them out
     // The PMDG 737 instead: the reverse events don't reverse it (its levers go forward with the
     // axis), but "decrease throttle" held at idle does, without the reverse flag, and let go it
     // comes back to idle. Its lever variable runs from 500 at idle down to 75 at full.
@@ -276,6 +279,7 @@ struct FakeAircraft : IControlSim {
         const bool braked = brakesHold && t - brakedAt < 0.1;
         const bool fullThrust = thr[0] > 50.0 || thr[1] > 50.0;
         if (rollWhenDriven && driving && drivenControl == Control::Throttle && fullThrust && !braked) gs = 5.0;
+        if (reverseKick && (reverser || toggled) && (n1[0] > 40.0 || n1[1] > 40.0)) gs = 5.0;
         if (weakParkingBrake) gs = fullThrust && !braked ? approach(gs, 20.0, 3.0, dt) : approach(gs, 0.0, braked ? 4.0 : 0.2, dt);
         if (keyNoise) fire(kElevatorAxis, std::round(300.0 * std::sin(7.0 * t)));
     }
@@ -387,6 +391,7 @@ struct FakeAircraft : IControlSim {
     void setReverser(bool on) override {
         ++reverserCalls;
         if (reversers) reverser = on;
+        if (on) n1AtReverse = n1[0];
     }
     void throttleDecrease() override {
         ++decreases;
@@ -1323,7 +1328,7 @@ TEST(Setup_ThrottleLeverFoundAndCalibratedWhenTheSimvarCreeps) {
     CHECK_EQ(h.phase(), std::string("sweep"));
     const JsonValue sweep = h.status();
     CHECK_EQ(sweep.getString("prompt", ""), std::string("Moving the throttle"));
-    CHECK(sweep.getString("detail", "").find("40 seconds") != std::string::npos);
+    CHECK(sweep.getString("detail", "").find("up to a minute") != std::string::npos);
     REQUIRE(h.run(120.0, nullptr, "done"));
     CHECK(!h.aircraft.driving);
     CHECK(!h.aircraft.reverser);  // stowed again
@@ -1685,6 +1690,90 @@ TEST(Setup_ThrottleToggleThatWontComeOutStopsTheSweep) {
     CHECK(h.status().getString("note", "").find("toggle reverse") != std::string::npos);
     CHECK(!h.aircraft.driving);
     CHECK(h.aircraft.toggles >= 4);  // in, back, twice more, and once more stopping
+}
+
+// The Fenix A320: its reversers out while the engines were still coming down from the forward
+// pass, it moved against the brakes. The sweep waits at idle for them to spool down (and the
+// aircraft to stop) before the reverse events; an aircraft whose engines don't, it waits for at
+// most kSweepSpoolMaxSec.
+TEST(Setup_ThrottleReverseWaitsForTheEnginesToSpoolDown) {
+    for (const bool stuckHigh : {false, true}) {
+        SetupHarness h;
+        std::vector<std::string> logs;
+        h.flow.setLogger(&captureLog, &logs);
+        throttleOnly(h);
+        h.aircraft.airbus = true;
+        h.aircraft.reverseKick = !stuckHigh;
+        h.facts.hasReverse = true;
+        REQUIRE(h.start());
+        ThrottlePilot p = throttlePilot(h);
+        confirmKeyEvents(h, p);
+        REQUIRE(h.phase() == "sweep");  // started by itself (the parking brake set)
+        if (stuckHigh) {
+            // Through the forward pass, then N1 held up (as a slow FADEC might).
+            for (int i = 0; i < 600 && !logged(logs, "forward pass done"); ++i) h.run(0.1);
+            REQUIRE(logged(logs, "forward pass done"));
+            const double from = h.t;
+            while (h.t - from < 60.0 && !h.aircraft.reverser) {
+                h.aircraft.n1[0] = h.aircraft.n1[1] = 60.0;
+                h.run(0.1);
+            }
+            REQUIRE(h.aircraft.reverser);
+            CHECK(h.t - from > 29.0);
+            CHECK(logged(logs, "trying reverse thrust anyway"));
+        }
+        REQUIRE(h.run(120.0, nullptr, "done"));
+        const ControlProfile& tp = h.flow.profile()[Control::Throttle];
+        CHECK(tp.lever.valid());
+        CHECK(tp.reverseBy == ReverseBy::Events);
+        CHECK(logged(logs, "waiting for the engines to spool down"));
+        if (!stuckHigh) {
+            CHECK(h.aircraft.n1AtReverse < 30.0);  // idle is 20; the forward pass took them to about 80
+            CHECK(logged(logs, "the engines spooled down"));
+            CHECK(!logged(logs, "started to roll"));
+        }
+    }
+}
+
+// The Fenix A320: its brakes don't hold the forward pass's full thrust, and its engines lag the
+// levers, so it moves on after the pass has put them back to idle. That's waited out with the
+// brakes held, and the reverse test goes on once it has stopped; faster than kIdleRollKt, it stops
+// the calibration (as a roll during the pass does: Setup_ThrottleLeverSweepStopsWhenTheAircraftRolls).
+TEST(Setup_ThrottleSweepWaitsOutARollAtIdle) {
+    for (const double kt : {5.0, 12.0}) {
+        SetupHarness h;
+        std::vector<std::string> logs;
+        h.flow.setLogger(&captureLog, &logs);
+        throttleOnly(h);
+        h.aircraft.airbus = true;
+        h.facts.hasReverse = true;
+        REQUIRE(h.start());
+        ThrottlePilot p = throttlePilot(h);
+        confirmKeyEvents(h, p);
+        REQUIRE(h.phase() == "sweep");  // started by itself (the parking brake set)
+        for (int i = 0; i < 600 && !logged(logs, "forward pass done"); ++i) h.run(0.1);
+        REQUIRE(logged(logs, "forward pass done"));
+        const double from = h.t;
+        while (h.t - from < 2.0 && h.phase() == "sweep") {
+            h.aircraft.gs = kt;
+            h.run(0.1);
+        }
+        if (kt > 10.0) {
+            CHECK_EQ(h.phase(), std::string("retry"));
+            CHECK(h.status().getString("note", "").find("hold the brakes as well, then Try again") != std::string::npos);
+            CHECK(!h.aircraft.driving);
+            continue;
+        }
+        CHECK_EQ(h.phase(), std::string("sweep"));
+        CHECK(logged(logs, "with the throttle back at idle"));
+        CHECK_EQ(h.aircraft.reverserCalls, 0);  // not while it's moving
+        h.aircraft.gs = 0.0;
+        REQUIRE(h.run(120.0, nullptr, "done"));
+        const ControlProfile& tp = h.flow.profile()[Control::Throttle];
+        CHECK(tp.lever.valid());
+        CHECK(tp.reverseBy == ReverseBy::Events);
+        CHECK(!logged(logs, "started to roll"));
+    }
 }
 
 TEST(Setup_ThrottleLeverSweepStopsWhenTheAircraftRolls) {
@@ -3734,6 +3823,213 @@ TEST(Playback_FlapNotchesKeepTheLeverOrGoByTheHandle) {
     CHECK(b.at(3.0));
     CHECK_EQ(b.step(3.0, 2.0, FlapNotches::kSettleMs, false), 1);  // from the handle
     CHECK_EQ(b.lever(), 3.0);
+}
+
+TEST(Playback_FlapNotchesGoByAHandleThatWentFurther) {
+    // The Fenix A320 on the runway, flaps up, playing a takeoff at 1+F (handle 2): its first
+    // FLAPS_INCR puts the lever at 1, which on the ground is 1+F, handle 2, a few frames later. The
+    // second notch the count wanted took it to CONF 2 (handle 3), and the replay held 22 s at the
+    // start and played the first 3.4 s of the roll there. Now one notch, and none after.
+    // 25 s, short of kSettleMs (after which the handle counts anyway).
+    auto run = [](double from, double target, double jumpTo, std::vector<int>& sent) {
+        FlapNotches n;
+        n.begin(0);
+        double handle = from;
+        int jumpAt = -1;
+        for (int i = 0; i < 60 * 25; ++i) {
+            if (i == jumpAt) handle = jumpTo;
+            const int dir = n.step(target, handle, frameMs(i), i == 0);
+            if (dir == 0) continue;
+            sent.push_back(dir);
+            if (jumpAt < 0) jumpAt = i + 3;  // the first notch: the handle there a few frames on
+            else handle += dir;              // any other: a notch
+        }
+        return n;
+    };
+    std::vector<int> sent;
+    FlapNotches n = run(0.0, 2.0, 2.0, sent);
+    REQUIRE(sent.size() == 1u);
+    CHECK_EQ(sent[0], 1);
+    CHECK_EQ(n.lever(), 2.0);
+    CHECK(n.at(2.0));
+    // Past the target (a clip at 1, the handle at 2): as far as the target, no notch back.
+    sent.clear();
+    n = run(0.0, 1.0, 2.0, sent);
+    REQUIRE(sent.size() == 1u);
+    CHECK_EQ(n.lever(), 1.0);
+    // Short of the target, the rest a notch at a time from the handle: to 4, the first notch to 2,
+    // then 3 and 4.
+    sent.clear();
+    n = run(0.0, 4.0, 2.0, sent);
+    REQUIRE(sent.size() == 3u);
+    for (int d : sent) CHECK_EQ(d, 1);
+    CHECK_EQ(n.lever(), 4.0);
+    // The other way: from 4 to 1, the first FLAPS_DECR putting the handle at 2, then one more.
+    sent.clear();
+    n = run(4.0, 1.0, 2.0, sent);
+    REQUIRE(sent.size() == 2u);
+    for (int d : sent) CHECK_EQ(d, -1);
+    CHECK_EQ(n.lever(), 1.0);
+    // A handle that lags (the PMDG 777's) is short of the lever, never past it: by the notches.
+    FlapNotches lag;
+    lag.begin(0);
+    int notches = 0;
+    for (int i = 0; i < 60; ++i) notches += lag.step(3.0, 0.0, frameMs(i), false) != 0;
+    CHECK_EQ(notches, 3);
+    CHECK_EQ(lag.lever(), 3.0);
+}
+
+TEST(Playback_FlapNotchesKnowTheFenixDetents) {
+    // The Fenix A320's lever has no detent for 1+F (handle index 2). The notches from `from` toward
+    // `target`, its handle lagging where it was (it took about 9 s to show a notch in the air), for
+    // 25 s, short of kSettleMs.
+    auto run = [](bool onePlusF, double from, double target, bool ground, FlapNotches& n) {
+        n = FlapNotches();
+        n.setOnePlusF(onePlusF);
+        n.begin(0);
+        std::vector<int> sent;
+        for (int i = 0; i < 60 * 25; ++i) {
+            const int dir = n.step(target, from, frameMs(i), false, ground);
+            if (dir != 0) sent.push_back(dir);
+        }
+        return sent;
+    };
+    // 2026-11-05, a landing replay's pre-jump in the air at the clip's CONF 2 (index 3): the index
+    // count sent three FLAPS_INCR and the third went to CONF 3. Two: CONF 1, then CONF 2.
+    FlapNotches n;
+    std::vector<int> sent = run(true, 0.0, 3.0, false, n);
+    REQUIRE(sent.size() == 2u);
+    for (int d : sent) CHECK_EQ(d, 1);
+    CHECK_EQ(n.lever(), 3.0);
+    CHECK(n.at(3.0));
+    // Other aircraft still go an index a notch.
+    FlapNotches other;
+    CHECK_EQ(run(false, 0.0, 3.0, false, other).size(), 3u);
+    CHECK_EQ(other.lever(), 3.0);
+    // In the air to FULL (5): four notches, the lever's 1, 2, 3 and FULL.
+    CHECK_EQ(run(true, 0.0, 5.0, false, n).size(), 4u);
+    CHECK_EQ(n.lever(), 5.0);
+    // On the ground the first notch from 0 is 1+F: one for a takeoff at 1+F, two for one at CONF 2.
+    sent = run(true, 0.0, 2.0, true, n);
+    REQUIRE(sent.size() == 1u);
+    CHECK_EQ(n.lever(), 2.0);
+    CHECK_EQ(run(true, 0.0, 3.0, true, n).size(), 2u);
+    CHECK_EQ(n.lever(), 3.0);
+    // In the air 1+F can't be reached going up: from CONF 1 nothing (a notch would be CONF 2, no
+    // nearer), from 0 the one notch to CONF 1, and that counts as there.
+    CHECK(run(true, 1.0, 2.0, false, n).empty());
+    CHECK(n.at(2.0));
+    CHECK_EQ(run(true, 0.0, 2.0, false, n).size(), 1u);
+    CHECK_EQ(n.lever(), 1.0);
+    CHECK(n.at(2.0));
+    // Going down, an index a notch, as the 2026-11-05 replays did: FULL to 1+F on the ground in
+    // three, 1+F to CONF 1 to 0 in the air in two, CONF 3 to CONF 2 in one.
+    sent = run(true, 5.0, 2.0, true, n);
+    REQUIRE(sent.size() == 3u);
+    for (int d : sent) CHECK_EQ(d, -1);
+    CHECK_EQ(n.lever(), 2.0);
+    CHECK_EQ(run(true, 2.0, 0.0, false, n).size(), 2u);
+    CHECK_EQ(run(true, 4.0, 3.0, false, n).size(), 1u);
+    // The handle showing the notches as the 2026-11-05 replay's did (CONF 1 a few frames on, then
+    // 2 for a while on the way to CONF 2): still two notches, and nothing after.
+    FlapNotches live;
+    live.setOnePlusF(true);
+    live.begin(0);
+    double handle = 0.0;
+    std::vector<std::pair<int, double>> moves;  // frame, handle
+    int notches = 0;
+    for (int i = 0; i < 60 * 25; ++i) {
+        for (const auto& m : moves) {
+            if (m.first == i) handle = m.second;
+        }
+        const int dir = live.step(3.0, handle, frameMs(i), false, false);
+        if (dir == 0) continue;
+        ++notches;
+        if (notches == 1) moves.push_back({i + 3, 1.0});
+        if (notches == 2) {
+            moves.push_back({i + 3, 2.0});
+            moves.push_back({i + 300, 3.0});
+        }
+    }
+    CHECK_EQ(notches, 2);
+    CHECK_EQ(handle, 3.0);
+    CHECK(live.at(3.0));
+}
+
+TEST(Playback_FlapNotchesGoByAHandleThePilotMoved) {
+    // 2026-11-05: the Fenix A320's landing replay stopped, and Stop's notches took the lever from
+    // CONF 2 (3) to 0 on the ground; its handle still showed 1+F (2) when they'd gone. The pilot set
+    // FULL (5), and 16 s after those notches played the landing again, at CONF 2: the count, kept
+    // from them, sent FLAPS_INCR, then took the handle at FULL for that notch going further, and
+    // the flaps stayed at FULL. Now two FLAPS_DECR.
+    FlapNotches n;
+    n.setOnePlusF(true);
+    n.begin(0);
+    int64_t ms = 0;
+    std::vector<int> stop;
+    for (int i = 0; i < 60; ++i, ms += 17) {
+        const int dir = n.step(0.0, i < 20 ? 3.0 : 2.0, ms, i == 0, true);
+        if (dir != 0) stop.push_back(dir);
+    }
+    REQUIRE(stop.size() == 3u);
+    CHECK_EQ(n.lever(), 0.0);
+    ms += 16000;
+    n.begin(ms);
+    CHECK_EQ(n.lever(), 0.0);  // kept: Stop's notches were just now
+    std::vector<int> sent;
+    for (int i = 0; i < 60 * 25; ++i) {
+        const int dir = n.step(3.0, 5.0, ms + frameMs(i), i == 0, false);
+        if (dir != 0) sent.push_back(dir);
+    }
+    REQUIRE(sent.size() == 2u);
+    for (int d : sent) CHECK_EQ(d, -1);
+    CHECK_EQ(n.lever(), 3.0);
+    // Notches up to CONF 2, the replay stopped where its flaps were, and the pilot set FULL 15 s
+    // later: the handle beyond them, but not just after one. Two FLAPS_DECR again.
+    FlapNotches up;
+    up.begin(0);
+    for (int i = 0; i < 60; ++i) up.step(3.0, 0.0, frameMs(i), false);
+    CHECK_EQ(up.lever(), 3.0);
+    const int64_t later = frameMs(60) + 15000;
+    up.begin(later);
+    sent.clear();
+    for (int i = 0; i < 60 * 25; ++i) {
+        const int dir = up.step(3.0, 5.0, later + frameMs(i), false);
+        if (dir != 0) sent.push_back(dir);
+    }
+    REQUIRE(sent.size() == 2u);
+    for (int d : sent) CHECK_EQ(d, -1);
+    // A handle that lags (the PMDG 737's, 3 s) still catching up with notches up when Stop's go
+    // down: it shows only where they've had the lever, so the count stands. Four up, four back,
+    // nothing more.
+    NotchedLever ac{3000, {{0, 3.0}}};
+    FlapNotches lag;
+    lag.begin(0);
+    int ups = 0, downs = 0;
+    double target = 7.0;
+    for (int i = 0; i < 60 * 60; ++i) {
+        const int64_t t = frameMs(i);
+        if (target == 7.0 && ups > 0 && lag.at(7.0)) target = 3.0;  // Stop, right after the last notch up
+        const int dir = lag.step(target, ac.handle(t), t, false);
+        if (dir == 0) continue;
+        (dir > 0 ? ups : downs) += 1;
+        ac.moves.push_back({t, ac.moves.back().second + dir});
+    }
+    CHECK_EQ(ups, 4);
+    CHECK_EQ(downs, 4);
+    CHECK_EQ(lag.lever(), 3.0);
+    CHECK_EQ(ac.moves.back().second, 3.0);
+}
+
+TEST(Playback_FlapsOnePlusFOnlyOnTheFenix) {
+    for (const char* path : {"simobjects/airplanes/fnx_32x/presets/fnx/fnx_320_cfm_sl/config/aircraft.cfg",
+                             "simobjects/airplanes/fnx_32x/presets/fnx/fnx_321_iae_sl/config/aircraft.cfg"}) {
+        CHECK(flapsOnePlusF(aircraftFamily(path)));
+    }
+    CHECK(!flapsOnePlusF(aircraftFamily("simobjects/airplanes/microsoft-a320neo")));
+    CHECK(!flapsOnePlusF(aircraftFamily("simobjects/airplanes/pmdg 777-300er")));
+    CHECK(!flapsOnePlusF("title:FenixA320 CFM SL"));
+    CHECK(!flapsOnePlusF(""));
 }
 
 TEST(Playback_FlapsSetGoesADetentAtATime) {

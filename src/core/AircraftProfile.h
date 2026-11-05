@@ -119,33 +119,63 @@ std::vector<ControlMethod> ownGearWays(const std::string& aircraftKey);
 // registered for the rest of the sim session once an aircraft has made it, so an A320 loaded after
 // an E190 has this one too.
 const char* autothrottleLight(const std::string& aircraftKey);
+// The L:var of the aircraft's own parking brake, for an aircraft whose handle doesn't move the sim's
+// (the Fenix A319/A320/A321's: S_MIP_PARKING_BRAKE, 1 set; BRAKE PARKING POSITION stayed off with
+// it set, so the setup never offered to start). The setup's "parking brake set" goes by it there.
+// Null for other aircraft. By the key, as autothrottleLight.
+const char* parkingBrakeLVar(const std::string& aircraftKey);
+// Whether the aircraft's flap lever has no detent of its own for CONF 1+F, handle index 2 (the
+// Fenix A319/A320/A321's: its lever has 0, 1, 2, 3 and FULL, its handle index 0 to 5), so FLAPS_INCR
+// doesn't go a handle index at a time (FlapNotches::setOnePlusF). By the key, as autothrottleLight.
+bool flapsOnePlusF(const std::string& aircraftKey);
 
 // The flap lever driven with FLAPS_INCR/DECR (kKeyFlapsNotches), like a hardware flap switch: a
 // notch at a time toward the target handle index, going by where the notches sent left the lever.
 // The handle can show that much later: the PMDG 777's follows its flaps, a detent every ten seconds
 // or so, and going by it sent extra notches that ran them to 25. So the handle counts again only
 // once it has held still for kSettleMs since it last moved and the last notch (a notch didn't
-// take). Kept across replays: Stop steps the lever back from where the replay's notches left it.
+// take), or at once where it's gone further than the notches the way they went, up to the target.
+// A lagging handle only shows where the notches have had the lever; one that moves anywhere else,
+// other than further a notch's way just after it (kRespondMs), was moved by the pilot or the
+// aircraft, and counts at once. Kept across replays: Stop steps the lever back from where the
+// replay's notches left it.
 class FlapNotches {
 public:
     // A method beginning: the lever from the last notches, only if they were just now (a replay's
-    // restore); since then the pilot may have moved it.
+    // restore); since then the pilot may have moved it (above).
     void begin(int64_t nowMs);
-    void forget() { lever_ = NAN; }  // the aircraft was reset
+    void forget() { setLever(NAN); dir_ = 0; }  // the aircraft was reset
+    // A lever with no detent for 1+F (flapsOnePlusF: the Fenix's). Going up, a notch from 0 is 1+F
+    // (index 2) on the ground, and one from CONF 1 (index 1) is CONF 2 (index 3): in the air at
+    // the clip's CONF 2, the third notch the index count wanted took it to CONF 3, and its handle,
+    // which showed 2 when that notch went, only got to 4 about 9 s later (2026-11-05). Going down
+    // it goes an index a notch, 1+F to CONF 1 in the air as well.
+    void setOnePlusF(bool on) { onePlusF_ = on; }
     // One frame, with the aircraft's handle index: +1 send FLAPS_INCR, -1 FLAPS_DECR, 0 none now.
-    // Notches kFrames apart at least, unless `force`.
-    int step(double target, double handle, int64_t nowMs, bool force);
-    // Whether the notches sent have taken the lever to `target` (nothing to go by counts as there).
+    // Notches kFrames apart at least, unless `force`. `onGround` for setOnePlusF.
+    int step(double target, double handle, int64_t nowMs, bool force, bool onGround = false);
+    // Whether the notches sent have taken the lever to `target`, or as near as notches take it
+    // (setOnePlusF: CONF 1 in the air for a clip at 1+F); nothing to go by counts as there.
     bool at(double target) const;
-    double lever() const { return lever_; }
+    double lever() const { return lever_; }  // the handle index the notches sent should give
     static constexpr int kFrames = 8;
     static constexpr int64_t kSettleMs = 30000;
+    // How long after a notch the handle going further its way is the aircraft taking it there (the
+    // Fenix's handle showed a notch about 9 s after it in the air).
+    static constexpr int64_t kRespondMs = 10000;
 
 private:
+    double after(double from, int dir) const;  // the handle index a notch from `from` gives
+    void setLever(double at) { lever_ = lo_ = hi_ = at; }  // the count starting from there
+    bool onePlusF_ = false;
+    bool ground_ = false;  // on the ground, as the last step saw it
     double lever_ = NAN;   // NaN: go by the handle
+    double lo_ = NAN;      // the lowest and highest the lever has been since the count started
+    double hi_ = NAN;
     double handle_ = NAN;  // as last seen
     int64_t movedMs_ = 0;  // when the handle last moved or a notch was sent
     int64_t notchMs_ = 0;  // when the last notch was sent
+    int dir_ = 0;          // its way: +1 FLAPS_INCR, -1 FLAPS_DECR
     int since_ = 1 << 20;  // frames since it
 };
 

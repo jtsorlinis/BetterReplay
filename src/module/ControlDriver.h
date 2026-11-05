@@ -32,6 +32,7 @@ public:
     struct Context {
         HANDLE h = 0;
         const Frame* live = nullptr;  // the latest values from the sim
+        const std::string* aircraftKey = nullptr;  // its profile's key (aircraftFamily)
         const int* engines = nullptr;
         const int* flapPositions = nullptr;
         const double* throttleLowerLimit = nullptr;  // percent, negative with reversers
