@@ -20,7 +20,10 @@ void fail(const char* file, int line, const std::string& msg) {
 }  // namespace th
 
 // Usage: CoreTests.exe [substring-filter]
+int traceFitMain(int argc, char** argv);  // TraceFit.cpp
+
 int main(int argc, char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "--fit-trace") == 0) return traceFitMain(argc, argv);
     const char* filter = argc > 1 ? argv[1] : nullptr;
     int run = 0;
     int failedTests = 0;

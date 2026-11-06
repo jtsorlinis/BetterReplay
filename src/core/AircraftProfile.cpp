@@ -730,6 +730,24 @@ bool leverInReverse(const LeverCalibration& cal, double lever) {
     return std::isfinite(lever) && cal.forward.size() >= 2 && cal.reverse.size() >= 2 && beyondIdle(cal, lever);
 }
 
+bool leverBelowIdle(const LeverCalibration& cal, double lever) {
+    if (!std::isfinite(lever) || cal.forward.size() < 2) return false;
+    double lo = 0.0, hi = 0.0;
+    leverRange(cal.forward, lo, hi);
+    const double idle = cal.forward.front().lever;
+    const double toFull = cal.forward.back().lever >= idle ? 1.0 : -1.0;
+    return (lever - idle) * toFull < -kBelowIdleFraction * (hi - lo);
+}
+
+bool leverAtIdle(const LeverCalibration& cal, double lever) {
+    if (!std::isfinite(lever) || cal.forward.size() < 2) return false;
+    double lo = 0.0, hi = 0.0;
+    leverRange(cal.forward, lo, hi);
+    const double idle = cal.forward.front().lever;
+    const double toFull = cal.forward.back().lever >= idle ? 1.0 : -1.0;
+    return (lever - idle) * toFull <= kBelowIdleFraction * (hi - lo);
+}
+
 double eventsReverseAmount(double fromLever, bool leverShown, double pct, double lower) {
     if (leverShown && std::isfinite(fromLever)) return fromLever;
     if (!(lower < 0.0) || !std::isfinite(pct) || !(pct < 0.0)) return fromLever;
@@ -841,12 +859,22 @@ bool reversing(const Frame& f, int engine) {
     return (std::isfinite(nozzle) && nozzle >= 50.0) || (std::isfinite(lever) && lever < -1.0);
 }
 
-ReverseToggle::Step ReverseToggle::step(bool clipReverse, bool liveReverse, double liveThrottle) {
+ReverseToggle::Step ReverseToggle::step(bool clipReverse, bool liveReverse, double liveThrottle, bool leversIdle,
+                                        bool amountNow) {
     Step out;
     const bool liveForward = liveThrottle > kForwardPct;
     const bool liveIdle = !liveReverse && !liveForward;
-    const double moved = std::isfinite(liveThrottle) && std::isfinite(lastThrottle_) ? liveThrottle - lastThrottle_ : 0.0;
-    lastThrottle_ = liveThrottle;
+    // How the simvar moved over the last few frames: the A380's moves only every third frame, so
+    // from one frame to the next it often seems still while it's coming down.
+    double moved = 0.0;
+    const int span = recentCount_;
+    if (std::isfinite(liveThrottle)) {
+        if (span > 0) moved = liveThrottle - recent_[span < kHeadingFrames ? 0 : recentNext_];
+        recent_[recentNext_] = liveThrottle;
+        recentNext_ = (recentNext_ + 1) % kHeadingFrames;
+        if (recentCount_ < kHeadingFrames) ++recentCount_;
+    }
+    const double headingPct = kHeadingPct * (span > 0 ? span : 1);
     if (clipReverse != want_) {
         want_ = clipReverse;
         tries_ = 0;
@@ -861,9 +889,11 @@ ReverseToggle::Step ReverseToggle::step(bool clipReverse, bool liveReverse, doub
         wait_ = 0;
     }
     // In reverse a reverse amount can't make forward thrust; out of it nothing reverses. Unless
-    // that's the throttle simvar still heading back to idle from before the toggle.
-    const bool otherwise = on_ ? liveForward && last_ == Drive::Reverse : liveReverse;
-    const bool heading = on_ ? moved < -kHeadingPct : moved > kHeadingPct;
+    // that's the throttle simvar still heading back to idle from before the toggle. Toggled in
+    // ahead of the clip, at reverse idle, there's no amount yet to make any: the A380's simvar
+    // still came down from 9% there, the toggle taken, and twice that was taken for it not.
+    const bool otherwise = on_ ? liveForward && last_ == Drive::Reverse && amountNow : liveReverse;
+    const bool heading = on_ ? moved < -headingPct : moved > headingPct;
     if (!otherwise) evidence_ = 0;
     else if (!heading) ++evidence_;
     if (evidence_ >= kEvidenceFrames) {
@@ -876,7 +906,7 @@ ReverseToggle::Step ReverseToggle::step(bool clipReverse, bool liveReverse, doub
     confirmed_ = on_ && (confirmed_ || liveReverse);
     if (clipReverse == on_) {
         idle_ = 0;
-        if (on_ && !confirmed_ && last_ == Drive::Reverse && !liveForward && !(moved > kHeadingPct)) {
+        if (on_ && !confirmed_ && last_ == Drive::Reverse && amountNow && !liveForward && !(moved > headingPct)) {
             // The first amount sent, and no forward thrust from it (a toggle not taken makes some).
             confirmed_ = ++probe_ >= kProbeFrames;
         }
@@ -889,7 +919,10 @@ ReverseToggle::Step ReverseToggle::step(bool clipReverse, bool liveReverse, doub
     // the clip changes, idle meanwhile in whichever mode the aircraft is in.
     out.drive = last_ = Drive::Idle;
     ++idle_;
-    if (tries_ >= kTries || (!(liveIdle && idle_ > 1) && idle_ < kIdleFrames)) return out;
+    // Going in, the levers at idle are enough (the simvar may trail them); coming out, the simvar
+    // back from reverse too.
+    const bool atIdle = liveIdle || (!on_ && leversIdle && !liveReverse);
+    if (tries_ >= kTries || (!(atIdle && idle_ > 1) && idle_ < kIdleFrames)) return out;
     idle_ = 0;
     on_ = !on_;
     confirmed_ = false;
@@ -899,6 +932,63 @@ ReverseToggle::Step ReverseToggle::step(bool clipReverse, bool liveReverse, doub
     ++toggles_;
     out.toggle = true;
     return out;
+}
+
+ReverseIdle reverseIdleInClip(const std::vector<Frame>& frames, int engines) {
+    const int n = std::max(1, std::min(engines, 4));
+    const auto reversingAny = [n](const Frame& f) {
+        for (int e = 0; e < n; ++e) {
+            if (reversing(f, e)) return true;
+        }
+        return false;
+    };
+    bool any = false, unknown = false;
+    bool was = false;
+    size_t after = 0;  // the first frame after the last stretch
+    for (size_t i = 0; i < frames.size(); ++i) {
+        const bool now = reversingAny(frames[i]);
+        if (now && !was) {
+            any = true;
+            size_t from = i;
+            while (from > after && frames[i].t - frames[from - 1].t <= ReverseIdleCheck::kLookBackSec) --from;
+            double amountT = NAN, nozzleT = NAN;
+            bool nozzles = false;
+            for (size_t j = from; j < frames.size(); ++j) {
+                const Frame& f = frames[j];
+                if (j > i && !reversingAny(f)) break;
+                for (int e = 0; e < n; ++e) {
+                    const double thr = f.v[kThrottle1 + e];
+                    const double noz = f.v[kReverserNozzle1 + e];
+                    if (std::isfinite(noz)) nozzles = true;
+                    if (std::isnan(amountT) && thr < -ReverseIdleCheck::kAmountPct) amountT = f.t;
+                    if (std::isnan(nozzleT) && noz >= ReverseIdleCheck::kNozzlePct) nozzleT = f.t;
+                }
+                if (!std::isnan(amountT) && !std::isnan(nozzleT)) break;
+            }
+            if (!nozzles) {
+                unknown = true;
+            } else if (std::isnan(amountT) || nozzleT <= amountT) {
+                return ReverseIdle::Seen;
+            }
+        }
+        if (!now && was) after = i;
+        was = now;
+    }
+    if (!any) return ReverseIdle::NoReverse;
+    return unknown ? ReverseIdle::Unknown : ReverseIdle::Unseen;
+}
+
+double reverseAmount(double clipPct, double aheadPct, double livePct, double lower) {
+    if (!(lower < 0.0) || !std::isfinite(clipPct)) return 0.0;
+    const double now = std::clamp(clipPct / lower, 0.0, 1.0);
+    if (!std::isfinite(aheadPct) || !std::isfinite(livePct)) return now;
+    const double ahead = std::clamp(aheadPct / lower, 0.0, 1.0);
+    const double way = ahead - now;
+    if (way == 0.0) return now;
+    const double live = livePct / lower;  // below 0 where it's forward thrust
+    const double behind = way > 0.0 ? now - live : live - now;
+    const double w = std::clamp((behind - ReversePush::kPushFrom) / ReversePush::kPushBand, 0.0, 1.0);
+    return now + w * way;
 }
 
 LeverReverseHold::Step LeverReverseHold::step(bool clipOut, bool liveLever, double leverVar) {
@@ -1349,6 +1439,30 @@ void ProfileStore::toJson(std::string& out) const {
             }
             w.endArray();
         }
+        bool anyPlant = false;
+        for (const StickPlant& sp : p.stickPlants) anyPlant |= sp.valid();
+        if (anyPlant) {
+            w.key("stickPlants").beginObject();
+            for (int i = 0; i < kStickSurfaceCount; ++i) {
+                const StickPlant& sp = p.stickPlants[i];
+                if (!sp.valid()) continue;
+                w.key(stickSurfaceKey(i)).beginObject();
+                w.kv("form", stickPlantForm(sp.form));
+                w.kv("gain", sp.gain);
+                w.kv("lagSec", sp.lagSec);
+                if (sp.settleSec > 0.0) w.kv("settleSec", sp.settleSec);
+                if (sp.rateGain > 0.0) w.kv("rateGain", sp.rateGain);
+                if (!sp.holds) w.kv("holds", false);
+                if (sp.holds && sp.holdScale != 1.0) w.kv("holdScale", sp.holdScale);
+                if (sp.holdYawRate != 0.0) w.kv("holdYawRate", sp.holdYawRate);
+                if (std::isfinite(sp.fit)) {
+                    w.kv("fit", sp.fit);
+                    w.kv("seconds", sp.seconds);
+                }
+                w.endObject();
+            }
+            w.endObject();
+        }
         w.key("controls").beginObject();
         for (int i = 0; i < kControlCount; ++i) {
             const ControlProfile& c = p.controls[i];
@@ -1412,6 +1526,30 @@ bool ProfileStore::fromJson(const char* text, size_t length, std::string* error)
                     const JsonValue& s = stick->array[k];
                     if (s.type == JsonValue::Type::String && s.string == stickSurfaceKey(i)) p.stickSurfaces |= 1u << i;
                 }
+            }
+        }
+        if (const JsonValue* plants = v.get("stickPlants")) {
+            for (int i = 0; plants->isObject() && i < kStickSurfaceCount; ++i) {
+                const JsonValue* sp = plants->get(stickSurfaceKey(i));
+                if (!sp || !sp->isObject()) continue;
+                StickPlant& out = p.stickPlants[i];
+                const std::string form = sp->getString("form", "");
+                out.form = form == "rate"     ? StickPlant::Form::Rate
+                           : form == "direct" ? StickPlant::Form::Direct
+                                              : StickPlant::Form::None;
+                out.gain = sp->getNumber("gain", NAN);
+                out.lagSec = sp->getNumber("lagSec", 0.0);
+                out.settleSec = sp->getNumber("settleSec", 0.0);
+                out.rateGain = sp->getNumber("rateGain", 0.0);
+                if (!std::isfinite(out.rateGain) || out.rateGain < 0.0 || out.rateGain > 200.0) out.rateGain = 0.0;
+                out.holds = sp->getBool("holds", true);
+                out.holdScale = sp->getNumber("holdScale", 1.0);
+                if (!std::isfinite(out.holdScale) || out.holdScale < 0.0) out.holdScale = 1.0;
+                out.holdYawRate = sp->getNumber("holdYawRate", 0.0);
+                if (!std::isfinite(out.holdYawRate) || std::fabs(out.holdYawRate) > 100.0) out.holdYawRate = 0.0;
+                out.fit = sp->getNumber("fit", NAN);
+                out.seconds = sp->getNumber("seconds", 0.0);
+                if (!out.valid() || !(out.lagSec >= 0.0 && out.lagSec <= 2.0)) out = StickPlant();
             }
         }
         const JsonValue* controls = v.get("controls");

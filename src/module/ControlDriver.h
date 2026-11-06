@@ -84,6 +84,14 @@ public:
     // themselves, without the setup's sweep: their aircraft's own decrease input event, not
     // THROTTLE_DECR (LeverReverseHold).
     void setReverseBy(ReverseBy by);
+    // After setReverseBy, for the clip about to play: on a "toggle" aircraft whose clip shows
+    // nothing at reverse idle (reverseIdleInClip), reverse is toggled in up to
+    // ReverseToggle::kLeadSec ahead of the clip's, the levers already at idle there.
+    void findReverseLead(const std::vector<Frame>& clipFrames);
+    // The playing clip ReverseToggle::kLeadSec ahead of the frame about to be applied (in the
+    // aircraft's seconds), for toggle reverse: going in ahead, and the amount (reverseAmount).
+    // Null when nothing is playing.
+    void setReverseAhead(const Frame* ahead) { reverseAhead_ = ahead; }
     // One THROTTLE_DECR, as a held "decrease throttle" key sends every frame, and one
     // THROTTLE_REVERSE_THRUST_TOGGLE (the setup's tests).
     void throttleDecrease();
@@ -153,6 +161,8 @@ private:
         DWORD eventClient[2] = {};     // and its client event IDs where it's the aircraft's own (0: a sim key event)
         EventStepper stepper;          // a toggle or steps
         GearCommandFollower gearLive;  // the gear's command from its legs, for a toggle or steps
+        GearUpOnGround gearUp;         // key events: the up sent again once off the ground
+        JumpFollowCheck jumpCheck;     // key events: a jump's value sent again if not taken
         FlapSteps flapSteps;           // FLAPS_SET / AXIS_FLAPS_SET: a detent at a time
         double sent[4] = {NAN, NAN, NAN, NAN};
         int since[4] = {};
@@ -174,8 +184,14 @@ private:
         bool engaged[4] = {};     // the reverser put in by us (the clip reversed without its flag)
         int engageWait[4] = {};   // frames until it's put in again if the aircraft hasn't taken it
         bool leverReversed[4] = {};  // the clip's lever has shown reverse since its reversers came out
+        bool leverBack[4] = {};      // and come back to idle since, its reversers still out (taken as out)
         ReverseToggle toggle;     // "toggle": the aircraft's reverse
         int toggleFrames = 0;     // per engine, a reverse amount sent
+        bool reverseLead = false; // toggled in ahead of the clip's reverse (findReverseLead)
+        bool leading = false;     // and doing so now
+        unsigned reverseEngines = 0;  // the engines the clip reverses, a bit each (0: not known, all)
+        int leadToggles = 0;
+        int pushFrames = 0;       // per engine, the amount pushed toward the clip's ahead (reverseAmount)
         std::vector<AutothrustStretch> autothrust[4];  // the playing clip's, per engine
         ThrustFollower follower[4];
         int64_t followMs = 0;   // when the throttle was last applied, for the follower's time step
@@ -203,7 +219,20 @@ private:
     static bool dueWhenLasting(Slot& s, int i, double v, bool force, double minStep, double nowStep, int64_t lastingMs,
                                int64_t nowMs);
     static constexpr int64_t kLastingMs = 500;
+    // "Hold" reverse: a throttle cut first where the sim's throttle is above this (percent).
+    static constexpr double kCutAbovePct = 2.0;
     void applyKeyEvent(Control c, Slot& s, const Frame& f, bool force);
+    // The throttle's lever variable channel for engine e (one for all where it has no '#').
+    static int leverChannel(const Slot& s, int e);
+    // Whether every engine's lever is at idle in f by the lever variable (leverAtIdle), where the
+    // throttle is replayed from it; false without one.
+    static bool leversAtIdle(const Slot& s, const Frame& f);
+    // Whether the clip's thrust is at idle in f, for toggling in ahead: its levers (leversAtIdle,
+    // where there's the variable) and its throttle simvar: no engine's above
+    // ReverseToggle::kForwardPct, or with the lever variable one at least. The A380 pilot's toggle
+    // takes its reversing engines' simvar to 0 while the outer ones still come down from approach
+    // thrust; that's when the pilot toggled.
+    static bool clipAtIdle(const Slot& s, const Frame& f);
     void stepFlaps(Slot& s, double target, bool force);
     // The flap lever as the notches sent left it (FlapNotches), kept across replays.
     FlapNotches notches_;
@@ -217,6 +246,7 @@ private:
 
     static bool sending_;
     Context ctx_;
+    const Frame* reverseAhead_ = nullptr;  // setReverseAhead
     Slot slots_[kControlCount];  // the method, or the picker's first way
     std::vector<Slot> extra_[kControlCount];  // and its others (WayPicker::ways() from 1 on)
     WayPicker picker_[kControlCount];

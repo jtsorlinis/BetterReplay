@@ -3,6 +3,30 @@
   "title": "FenixA320 CFM SL",
   "updatedUtcMs": 1793866157480,
   "stickSurfaces": ["elevator", "ailerons", "rudder"],
+  "stickPlants": {
+    "elevator": {
+      "form": "rate",
+      "gain": 12.8,
+      "lagSec": 0.11,
+      "holdScale": 0.32,
+      "fit": 0.38,
+      "seconds": 107
+    },
+    "ailerons": {
+      "form": "rate",
+      "gain": 45.6,
+      "lagSec": 0.11,
+      "fit": 0.45,
+      "seconds": 107
+    },
+    "rudder": {
+      "form": "direct",
+      "gain": 6.4,
+      "lagSec": 0.11,
+      "fit": 0.78,
+      "seconds": 61
+    }
+  },
   "controls": {
     "spoilers": {
       "state": "ok",

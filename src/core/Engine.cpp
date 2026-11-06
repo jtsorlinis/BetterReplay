@@ -995,6 +995,27 @@ bool Engine::learnStickSurface(unsigned surface) {
     return true;
 }
 
+bool Engine::learnStickPlant(int surface, const StickPlant& plant) {
+    if (surface < 0 || surface >= kStickSurfaceCount || !plant.valid() || !currentProfile()) return false;
+    const bool included = profileIncluded();
+    AircraftProfile& p = included ? included_.upsert(aircraftKey_) : profiles_.upsert(aircraftKey_);
+    p.stickPlants[surface] = plant;
+    logf(0, "control profile: the %s answers the stick %s: %.1f %s at full travel, %.2f s late (fit %.2f over %.0f s)%s",
+         stickSurfaceKey(surface), plant.form == StickPlant::Form::Rate ? "at a rate" : "directly", plant.gain,
+         plant.form == StickPlant::Form::Rate ? "degrees a second" : "degrees", plant.lagSec, plant.fit, plant.seconds,
+         included ? " (this session)" : "");
+    if (!included) {
+        p.updatedUtcMs = lastUtcMs_;
+        saveProfiles();
+    }
+    if (out_) out_->applyProfile(currentProfile());
+    return true;
+}
+
+const AircraftProfile* Engine::includedProfile() const {
+    return aircraftKey_.empty() ? nullptr : included_.find(aircraftKey_);
+}
+
 void Engine::storeSetupProfile() {
     if (aircraftKey_.empty()) return;
     AircraftProfile& p = profiles_.upsert(aircraftKey_);

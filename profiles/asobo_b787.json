@@ -2,6 +2,27 @@
   "key": "simobjects/airplanes/asobo_b787",
   "title": "787-10",
   "updatedUtcMs": 1793612544942,
+  "stickPlants": {
+    "elevator": {
+      "form": "rate",
+      "gain": 50,
+      "lagSec": 0.08,
+      "holdScale": 0.4
+    },
+    "ailerons": {
+      "form": "rate",
+      "gain": 63.9,
+      "lagSec": 0.08,
+      "fit": 0.38,
+      "seconds": 29
+    },
+    "rudder": {
+      "form": "direct",
+      "gain": 21.8,
+      "lagSec": 0.1,
+      "holds": false
+    }
+  },
   "controls": {
     "spoilers": {
       "state": "ok",

@@ -2,6 +2,27 @@
   "key": "simobjects/airplanes/synaptic_a220",
   "title": "A220-300",
   "updatedUtcMs": 1792547018797,
+  "stickPlants": {
+    "elevator": {
+      "form": "rate",
+      "gain": 60,
+      "lagSec": 0.07,
+      "holdScale": 0.55
+    },
+    "ailerons": {
+      "form": "direct",
+      "gain": 14.5,
+      "lagSec": 0.06
+    },
+    "rudder": {
+      "form": "direct",
+      "gain": 29.3,
+      "lagSec": 0,
+      "settleSec": 0.3,
+      "fit": 0.55,
+      "seconds": 156
+    }
+  },
   "controls": {
     "spoilers": {
       "state": "ok",

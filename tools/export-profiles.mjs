@@ -88,8 +88,23 @@ for (const p of sim.aircraft) {
     log.push(`  skipped  ${p.key} (nothing set up)`);
     continue;
   }
-  const { declined, ...profile } = p;
+  const { declined, ...fromWork } = p;
   const old = files.get(p.key);
+  // How each surface answers the stick (stickPlants): the file's figures (fitted from traces, or
+  // set by hand) where the work folder's profile has none for that surface; placed after
+  // stickSurfaces, as the module writes them.
+  let profile = fromWork;
+  const plants = { ...(old?.profile.stickPlants ?? {}), ...(fromWork.stickPlants ?? {}) };
+  if (Object.keys(plants).length) {
+    profile = {};
+    const after = 'stickSurfaces' in fromWork ? 'stickSurfaces' : 'updatedUtcMs';
+    for (const [k, v] of Object.entries(fromWork)) {
+      if (k === 'stickPlants') continue;
+      profile[k] = v;
+      if (k === after) profile.stickPlants = plants;
+    }
+    if (!profile.stickPlants) profile.stickPlants = plants;
+  }
   if (old && (old.profile.updatedUtcMs ?? 0) > (p.updatedUtcMs ?? 0)) {
     log.push(`  kept     profiles/${old.name} (newer than the work folder's)`);
     continue;

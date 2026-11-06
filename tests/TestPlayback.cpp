@@ -130,6 +130,86 @@ TEST(Playback_GearCommandFollowsReversal) {
     CHECK_NEAR(c.frames.back().v[kGearHandle], 1.0, 0);
 }
 
+// A landing replay started on a runway: the up went in the jump's frame, the aircraft still on the
+// ground there, and an aircraft that took none (the Fenix A320's) kept its gear down.
+TEST(Playback_GearUpSentOnTheGroundGoesAgainInTheAir) {
+    GearUpOnGround g;
+    g.sent(true, true);
+    int64_t t = 1000000;
+    CHECK(!g.step(true, true, 1.0, t));  // still on the ground
+    t += 5000;
+    CHECK(!g.step(true, true, 1.0, t));
+    CHECK(!g.step(true, false, 1.0, t));  // off it
+    CHECK(!g.step(true, false, 1.0, t + GearUpOnGround::kAirMs - 1));
+    CHECK(g.step(true, false, 1.0, t + GearUpOnGround::kAirMs));  // the gear still down: again
+    t += GearUpOnGround::kAirMs;
+    CHECK(!g.step(true, false, 1.0, t + 100));
+    CHECK(g.step(true, false, 1.0, t + GearUpOnGround::kAgainMs));  // and once more
+    CHECK(!g.step(true, false, 1.0, t + 10 * GearUpOnGround::kAgainMs));  // then no more
+
+    // The aircraft took the first: its gear comes up, nothing more is sent.
+    GearUpOnGround took;
+    took.sent(true, true);
+    CHECK(!took.step(true, false, 1.0, t));
+    for (int64_t ms = 0; ms <= GearUpOnGround::kWatchMs + 1000; ms += 100) {
+        const double up = (GearUpOnGround::kAirMs + ms) / 3000.0;  // coming up since it left the ground
+        CHECK(!took.step(true, false, up < 1.0 ? 1.0 - up : 0.0, t + GearUpOnGround::kAirMs + ms));
+    }
+
+    // The replay's snap wrote it up for a moment after the jump, and the Fenix put it back down:
+    // sent again once it reads down.
+    GearUpOnGround snapped;
+    snapped.sent(true, true);
+    CHECK(!snapped.step(true, false, 0.0, t));
+    CHECK(!snapped.step(true, false, 0.0, t + GearUpOnGround::kAirMs));
+    CHECK(snapped.step(true, false, 1.0, t + GearUpOnGround::kAirMs + 400));
+
+    // Sent in the air (a seek, a replay started flying), or a gear down: nothing again.
+    GearUpOnGround air;
+    air.sent(true, false);
+    CHECK(!air.step(true, false, 1.0, t + 5 * GearUpOnGround::kAirMs));
+    GearUpOnGround down;
+    down.sent(false, true);
+    CHECK(!down.step(false, false, 1.0, t + 5 * GearUpOnGround::kAirMs));
+
+    // The clip's gear went down before the aircraft left the ground: nothing again.
+    GearUpOnGround back;
+    back.sent(true, true);
+    CHECK(!back.step(false, false, 1.0, t));
+    CHECK(!back.step(true, false, 1.0, t + 5 * GearUpOnGround::kAirMs));
+}
+
+// The Fenix's speed brake, extended before a takeoff replay, stayed out though AXIS_SPOILER_SET sent
+// the clip's retracted at the jump.
+TEST(Playback_AJumpsSpoilersGoAgainWhereTheAircraftDidntTakeThem) {
+    const int64_t t = 1000000;
+    JumpFollowCheck c;
+    c.sent(0.0, t);
+    CHECK(!c.step(0.0, 0.5, t + JumpFollowCheck::kAfterMs - 1));  // given time
+    CHECK(c.step(0.0, 0.5, t + JumpFollowCheck::kAfterMs));        // still out: again
+    CHECK_EQ(c.tries(), 1);
+    CHECK(!c.step(0.0, 0.5, t + JumpFollowCheck::kAfterMs + 100));
+    CHECK(c.step(0.0, 0.5, t + 2 * JumpFollowCheck::kAfterMs));    // and once more
+    CHECK(!c.step(0.0, 0.5, t + 10 * JumpFollowCheck::kAfterMs));  // then no more
+
+    // Taken: nothing again.
+    JumpFollowCheck took;
+    took.sent(0.0, t);
+    CHECK(!took.step(0.0, 0.01, t + JumpFollowCheck::kAfterMs));
+    CHECK(!took.step(0.0, 0.5, t + 2 * JumpFollowCheck::kAfterMs));
+
+    // The clip's handle moved meanwhile (sent anyway): nothing again.
+    JumpFollowCheck moved;
+    moved.sent(0.0, t);
+    CHECK(!moved.step(0.3, 0.5, t + 100));
+    CHECK(!moved.step(0.0, 0.5, t + 2 * JumpFollowCheck::kAfterMs));
+
+    // Without the aircraft's handle: nothing again.
+    JumpFollowCheck blind;
+    blind.sent(0.0, t);
+    CHECK(!blind.step(0.0, NAN, t + 2 * JumpFollowCheck::kAfterMs));
+}
+
 TEST(Playback_GearCommandForExtension) {
     Clip c = makeClip(20.0);
     for (Frame& f : c.frames) {

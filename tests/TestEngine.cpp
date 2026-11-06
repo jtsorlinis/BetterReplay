@@ -787,3 +787,39 @@ TEST(Engine_StatusAndClipsJson) {
     REQUIRE(parseJson(json.data(), json.size(), v, &err));
     CHECK(v.get("clips")->array.empty());
 }
+
+// How a surface answers the stick, as a replay fitted it: kept in the aircraft's own profile and
+// there after a restart. The package's profile stays at hand beside the aircraft's own, for its
+// figures where the own one has none.
+TEST(Engine_StickPlantsAreKeptInTheAircraftsProfile) {
+    MemoryStorage storage;
+    writeProfiles(storage.files["aircraft.json"], "simobjects/airplanes/pmdg 737", kKeyFlapsAxis);
+    writeProfiles(storage.package["profiles/aircraft.json"], "simobjects/airplanes/pmdg 737", kKeyFlapsNotches);
+    Engine e(storage);
+    e.setLogger(&testLog, nullptr);
+    e.init();
+    e.setAircraftKey(kPmdg800);
+    REQUIRE(e.currentProfile() != nullptr);
+    CHECK(!e.profileIncluded());
+    REQUIRE(e.includedProfile() != nullptr);
+    CHECK((*e.includedProfile())[Control::Flaps].method.var == std::string(kKeyFlapsNotches));
+    StickPlant p;
+    p.form = StickPlant::Form::Direct;
+    p.gain = 14.0;
+    p.lagSec = 0.06;
+    p.fit = 0.7;
+    p.seconds = 40.0;
+    CHECK(!e.learnStickPlant(1, StickPlant()));  // nothing to keep
+    CHECK(e.learnStickPlant(1, p));
+    CHECK(e.currentProfile()->stickPlants[1].valid());
+    CHECK(!e.currentProfile()->stickPlants[0].valid());
+
+    Engine again(storage);
+    again.init();
+    again.setAircraftKey(kPmdg800);
+    REQUIRE(again.currentProfile() != nullptr);
+    const StickPlant& back = again.currentProfile()->stickPlants[1];
+    CHECK(back.form == StickPlant::Form::Direct);
+    CHECK_NEAR(back.gain, 14.0, 1e-9);
+    CHECK_NEAR(back.lagSec, 0.06, 1e-9);
+}

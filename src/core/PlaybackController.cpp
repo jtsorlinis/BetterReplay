@@ -135,6 +135,60 @@ double GearCommandFollower::update(double g) {
     return state_;
 }
 
+void GearUpOnGround::sent(bool up, bool onGround) {
+    waiting_ = up && onGround;
+    tries_ = 0;
+    airFromMs_ = 0;
+    dueMs_ = 0;
+}
+
+bool GearUpOnGround::step(bool clipUp, bool onGround, double extension, int64_t nowMs) {
+    if (!waiting_) return false;
+    if (!clipUp) {
+        waiting_ = false;  // the clip's gear went down again
+        return false;
+    }
+    if (onGround) {
+        airFromMs_ = 0;
+        return false;
+    }
+    if (airFromMs_ == 0) airFromMs_ = nowMs;
+    if (nowMs - airFromMs_ > kWatchMs) {
+        waiting_ = false;  // the aircraft's gear came up
+        return false;
+    }
+    const int64_t due = tries_ == 0 ? airFromMs_ + kAirMs : dueMs_;
+    if (nowMs < due || extension < kDown) return false;
+    ++tries_;
+    dueMs_ = nowMs + kAgainMs;
+    if (tries_ >= kTries) waiting_ = false;
+    return true;
+}
+
+void JumpFollowCheck::sent(double clip, int64_t nowMs) {
+    waiting_ = std::isfinite(clip);
+    clip_ = clip;
+    fromMs_ = nowMs;
+    tries_ = 0;
+}
+
+bool JumpFollowCheck::step(double clip, double live, int64_t nowMs) {
+    if (!waiting_) return false;
+    if (!(std::fabs(clip - clip_) <= kClipMoved)) {
+        waiting_ = false;
+        return false;
+    }
+    if (nowMs - fromMs_ < kAfterMs || !std::isfinite(live)) return false;
+    if (std::fabs(live - clip) <= kTol) {
+        waiting_ = false;
+        return false;
+    }
+    ++tries_;
+    fromMs_ = nowMs;
+    if (tries_ >= kTries) waiting_ = false;
+    return true;
+}
+
 SnapVerdict snapVerdict(const double* before, const double* written, const double* after, int count, int* which) {
     bool moved = false;
     for (int i = 0; i < count; ++i) {

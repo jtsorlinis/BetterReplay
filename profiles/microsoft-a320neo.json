@@ -2,6 +2,28 @@
   "key": "simobjects/airplanes/microsoft-a320neo",
   "title": "A320neo V2",
   "updatedUtcMs": 1793156037102,
+  "stickPlants": {
+    "elevator": {
+      "form": "rate",
+      "gain": 17.5,
+      "lagSec": 0.07
+    },
+    "ailerons": {
+      "form": "rate",
+      "gain": 42.9,
+      "lagSec": 0.08,
+      "fit": 0.41,
+      "seconds": 180
+    },
+    "rudder": {
+      "form": "direct",
+      "gain": 24.6,
+      "lagSec": 0.08,
+      "holdScale": 0.35,
+      "fit": 0.86,
+      "seconds": 53
+    }
+  },
   "controls": {
     "spoilers": {
       "state": "ok",

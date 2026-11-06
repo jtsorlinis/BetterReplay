@@ -2,6 +2,29 @@
   "key": "simobjects/airplanes/inibuilds-a340",
   "title": "A340-300 EIS2",
   "updatedUtcMs": 1793658497440,
+  "stickPlants": {
+    "elevator": {
+      "form": "rate",
+      "gain": 10,
+      "lagSec": 0.3
+    },
+    "ailerons": {
+      "form": "direct",
+      "gain": 11.2,
+      "lagSec": 0.14,
+      "settleSec": 0.3,
+      "fit": 0.45,
+      "seconds": 175
+    },
+    "rudder": {
+      "form": "direct",
+      "gain": 31.6,
+      "lagSec": 0.17,
+      "holdScale": 0.1,
+      "fit": 0.74,
+      "seconds": 175
+    }
+  },
   "controls": {
     "spoilers": {
       "state": "ok",

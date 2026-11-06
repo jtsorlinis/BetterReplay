@@ -2,6 +2,26 @@
   "key": "simobjects/airplanes/microsoft-a330",
   "title": "A330-300 (GE)",
   "updatedUtcMs": 1793610143829,
+  "stickPlants": {
+    "elevator": {
+      "form": "rate",
+      "gain": 10,
+      "lagSec": 0.3
+    },
+    "ailerons": {
+      "form": "rate",
+      "gain": 20,
+      "lagSec": 0.15
+    },
+    "rudder": {
+      "form": "direct",
+      "gain": 32.4,
+      "lagSec": 0.14,
+      "holdScale": 0.2,
+      "fit": 0.76,
+      "seconds": 30
+    }
+  },
   "controls": {
     "spoilers": {
       "state": "ok",

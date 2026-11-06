@@ -637,6 +637,9 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     facts.engines = numEngines_;
     facts.engineType = std::isfinite(ex[kExEngineType]) ? static_cast<int>(ex[kExEngineType]) : 1;
     facts.parkingBrake = parkingBrakeSet(input_.raw.v[kParkingBrake]);
+    // On an aircraft with its own handle (the Fenix's), the handle is the channel: recorded, kept in
+    // the snapshot and checked against the clip's.
+    if (pbLVar_ != FS_VAR_INVALID_ID) input_.raw.v[kParkingBrake] = facts.parkingBrake ? 1.0 : 0.0;
     facts.onRunway = ex[kExOnRunway] >= 0.5;
     facts.engineRunning = false;
     for (int e = 0; e < 4 && e < numEngines_; ++e) facts.engineRunning |= ex[kExCombustion1 + e] >= 0.5;
@@ -871,13 +874,71 @@ void SimBridge::startStick(int axis, bool learned) {
     a.sinceSend = kStickResendFrames;
     a.dataFrame = frameCount_;
     a.frames = a.near = 0;
+    a.held = 0;
+    a.damped = 0;
     a.errSum = a.errMax = a.stickMax = 0.0;
     a.hardware = 0;
+    a.stillNow = false;
+    a.stillSec = 0.0;
     log::info("playback: steering the %s to the clip's with %s (%s, as a joystick sends it)%s. Leave your joystick "
               "alone while a clip plays",
               a.name, axis == kStickYaw ? "the pedals" : "the stick", a.event,
               learned ? ", as this aircraft keeps its own" : " instead, on this aircraft from now on");
     if (!learned) engine_.learnStickSurface(1u << axis);  // (the axes in StickSurface's order)
+    chooseStickPlant(axis);
+    a.still.clear();
+    if (a.loop.config().centreStill && playClip_ && !playClip_->frames.empty()) {
+        a.still.find(playClip_->frames.data(), playClip_->frames.size(), a.channel);
+        if (a.still.count() > 0) {
+            log::info("playback: the clip's %s sits still at 0 for %.0f s in all (%d stretch(es) of %.0f s or more): "
+                      "%s centred there, as nothing moved it",
+                      a.name, a.still.seconds(), static_cast<int>(a.still.count()), StillStretches::kMinSec,
+                      axis == kStickYaw ? "the pedals" : "the stick");
+        }
+    }
+}
+
+StickLoopConfig SimBridge::defaultStickConfig(int axis) {
+    return axis == kStickPitch ? StickLoopConfig::elevator()
+                               : axis == kStickRoll ? StickLoopConfig::ailerons() : StickLoopConfig::rudder();
+}
+
+// The figures the loop steers the surface by: the aircraft's profile's, else the package's for it,
+// else the A380's while this replay fits its own.
+void SimBridge::chooseStickPlant(int axis) {
+    StickAxis& a = stick_[axis];
+    StickPlant p;
+    a.plantFrom = "";
+    if (haveProfile_ && profile_.stickPlants[axis].valid()) {
+        p = profile_.stickPlants[axis];
+        a.plantFrom = "the aircraft's profile";
+    } else if (const AircraftProfile* inc = engine_.includedProfile()) {
+        if (inc->stickPlants[axis].valid()) {
+            p = inc->stickPlants[axis];
+            a.plantFrom = "the package's profile for it";
+        }
+    }
+    a.plant = p;
+    a.fitting = !p.valid();
+    a.fitted = false;
+    a.fit.clear();
+    a.usableSec = 0.0;
+    a.nextFitSec = StickFit::kMinSec;
+    a.loop.setConfig(p.valid() ? defaultStickConfig(axis).forPlant(p) : defaultStickConfig(axis));
+    if (p.valid()) {
+        char more[64] = "";
+        if (p.form == StickPlant::Form::Direct && p.rateGain > 0.0) {
+            std::snprintf(more, sizeof(more), " and %.1f a second more while held", p.rateGain);
+        }
+        log::info("playback: the %s answers the stick %s, by %s: %.1f %s at full travel%s, %.2f s late%s%s%s", a.name,
+                  p.form == StickPlant::Form::Rate ? "at a rate" : "directly", a.plantFrom, p.gain,
+                  p.form == StickPlant::Form::Rate ? "degrees a second" : "degrees", more, p.lagSec,
+                  p.settleSec > 0.0 ? ", settling over a moment" : "", p.holds ? "" : ", without the holds",
+                  p.holds && p.holdYawRate != 0.0 ? ", held against the yaw rate it reads" : "");
+    } else {
+        log::info("playback: no figures for how the %s answers the stick yet: the A380's until this replay fits its own",
+                  a.name);
+    }
 }
 
 double SimBridge::liveBeta() {
@@ -913,23 +974,62 @@ void SimBridge::driveStick(int axis, const Frame& frame, bool jumped) {
         reads.g = input_.raw.v[kGForce];
         reads.pitchRate = frame.v[kRotVelBodyX];
         reads.rollRate = frame.v[kRotVelBodyZ];
+        reads.yawRate = frame.v[kRotVelBodyY];
         if (a.loop.config().holdBeta != 0.0) reads.betaDeg = liveBeta();
         double ahead = target;
         double rate = 0.0;
+        double aheadT = frame.t;
         if (engine_.playback().playing() && !settling_ && playClip_ && !playClip_->frames.empty()) {
             const Frame* frames = playClip_->frames.data();
             const size_t count = playClip_->frames.size();
             const double t = frame.t + a.loop.config().leadSec * playSpeed_;
+            aheadT = t;
             sampleFrames(frames, count, t, stickAhead_, &a.hint[0]);
             ahead = stickAhead_.v[a.channel] * kDegPerRad;
             reads.pitchRate = stickAhead_.v[kRotVelBodyX];
             reads.rollRate = stickAhead_.v[kRotVelBodyZ];
+            reads.yawRate = stickAhead_.v[kRotVelBodyY];
             sampleFrames(frames, count, t - 0.1, stickAhead_, &a.hint[1]);
             const double before = stickAhead_.v[a.channel];
             sampleFrames(frames, count, t + 0.1, stickAhead_, &a.hint[2]);
             rate = (stickAhead_.v[a.channel] - before) / 0.2 * kDegPerRad * playSpeed_;  // a second of real time
         }
-        a.loop.update(target, ahead, rate, live, engine_.lastWallDt(), input_.raw.v[kOnGround] >= 0.5, reads);
+        const double dt = engine_.lastWallDt();
+        const bool onGround = input_.raw.v[kOnGround] >= 0.5;
+        // Where the clip's sits still at 0 (by the time the aircraft answers), centred; steered otherwise.
+        a.stillNow = a.loop.config().centreStill && a.still.at(aheadT);
+        if (a.stillNow) {
+            a.loop.centre(dt, onGround);
+            if (dt > 0.0) a.stillSec += dt;
+        } else {
+            a.loop.update(target, ahead, rate, live, dt, onGround, reads);
+        }
+        if (a.fitting && dt > 0.0) {
+            // No figures for this surface: fitted from what the stick did, in the air.
+            StickSample sample;
+            sample.dt = dt;
+            sample.stick = a.loop.stick();
+            sample.surface = live;
+            sample.use = engine_.playback().playing() && !settling_ && !jumped && !onGround && !a.loop.failed() &&
+                         !a.stillNow && std::fabs(sample.stick) < 0.97;
+            a.fit.add(sample);
+            if (sample.use) a.usableSec += dt;
+            if (a.usableSec >= a.nextFitSec) {
+                a.nextFitSec = a.usableSec + 5.0;
+                const StickPlant p = a.fit.fit();
+                if (p.valid() && (!a.fitted || p.fit > a.plant.fit + 0.05)) {
+                    a.plant = p;
+                    a.plantFrom = "this replay's fit";
+                    a.fitted = true;
+                    a.loop.setConfig(defaultStickConfig(axis).forPlant(p));
+                    log::info("playback: the %s answers the stick %s: %.1f %s at full travel, %.2f s late%s (fitted over "
+                              "%.0f s, %.2f): steered by that from here",
+                              a.name, p.form == StickPlant::Form::Rate ? "at a rate" : "directly", p.gain,
+                              p.form == StickPlant::Form::Rate ? "degrees a second" : "degrees", p.lagSec,
+                              p.settleSec > 0.0 ? ", settling over a moment" : "", p.seconds, p.fit);
+                }
+            }
+        }
         switch (a.loop.takeEvent()) {
             case StickLoop::Event::Flipped:
                 log::warn("playback: the %s didn't come towards the clip's at full travel for 2 s (%.1f degrees off); "
@@ -938,8 +1038,24 @@ void SimBridge::driveStick(int axis, const Frame& frame, bool jumped) {
                 break;
             case StickLoop::Event::Failed:
                 log::warn("playback: the %s didn't come to the clip's with %s either way round (%.1f degrees off); "
-                          "centred, and the %s left to the aircraft for the rest of this replay",
+                          "centred, and the %s left to the aircraft for the rest of this replay (the next one starts "
+                          "the first way round again)",
                           a.name, a.event, target - live, a.name);
+                break;
+            case StickLoop::Event::Held:
+                // The stick has steered it on this aircraft: the aircraft's own doing (its protections).
+                if (a.held++ == 0) {
+                    log::info("playback: the %s didn't come to the clip's at full travel for 2 s (%.1f degrees off), "
+                              "though the stick has steered it on this aircraft: kept on (the aircraft's own limits?)",
+                              a.name, target - live);
+                }
+                break;
+            case StickLoop::Event::Damped:
+                if (a.damped++ == 0) {
+                    log::info("playback: the %s was wiggling (back and forth %d times in %.0f s): the loop's corrections "
+                              "calmed to %.0f%% from here",
+                              a.name, a.loop.config().wiggleTurns, a.loop.config().wiggleSec, a.loop.damping() * 100.0);
+                }
                 break;
             case StickLoop::Event::None: break;
         }
@@ -980,11 +1096,15 @@ void SimBridge::endStick(int axis) {
     }
     if (a.frames > 0) {
         log::info("playback: stick loop: the %s %s within %.0f degrees of the clip's in %d%% of %d frames (%.1f off "
-                  "on average, at most %.1f); %s at most %.0f%% of its travel%s; %d joystick event(s) meanwhile",
+                  "on average, at most %.1f); %s at most %.0f%% of its travel%s; held on at full travel that didn't get "
+                  "there %d time(s); calmed for wiggling %d time(s); centred where the clip's sat still for %.0f s; %d "
+                  "joystick event(s) meanwhile; steered by %s",
                   a.name, axis == kStickRoll ? "were" : "was", kStickNearDeg, a.near * 100 / a.frames, a.frames,
-                  a.errSum / a.frames, a.errMax, a.event,
-                  a.stickMax * 100.0, a.loop.flipped() ? ", the other way round" : "", a.hardware);
+                  a.errSum / a.frames, a.errMax, a.event, a.stickMax * 100.0, a.loop.flipped() ? ", the other way round" : "",
+                  a.held, a.damped, a.stillSec, a.hardware, a.plant.valid() ? a.plantFrom : "the A380's figures");
     }
+    if (a.fitted && a.plant.valid()) engine_.learnStickPlant(axis, a.plant);  // for the next replays
+    a.fitted = false;
 }
 
 void SimBridge::rebuildPlaybackDefinition() {
@@ -1263,6 +1383,7 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     ChannelMask owned;
     throttleByProfile_ = false;
     playClip_ = &clip;
+    reverseHint_ = 0;
     for (int i = 0; i < kControlCount; ++i) {
         const Control c = controlAt(i);
         profileDrives_[i] = false;
@@ -1315,7 +1436,10 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
             driver_.findGroundSpoilers(clip.frames);  // beyond where that puts the handle
         }
         // Reverse thrust from the clip's reversers, with or without a lever calibration.
-        if (c == Control::Throttle && cp.state == ControlState::Ok) driver_.setReverseBy(cp.reverseBy);
+        if (c == Control::Throttle && cp.state == ControlState::Ok) {
+            driver_.setReverseBy(cp.reverseBy);
+            driver_.findReverseLead(clip.frames);  // "toggle": in ahead where reverse idle shows nothing
+        }
         if (cp.state == ControlState::Ok && c != Control::Throttle && cp.leadSec > 0.0) {
             leadSec_[i] = cp.leadSec;
             log::info("playback: the %s driven %.1f s ahead of the clip (the setup's replay moved them that much later)",
@@ -2120,6 +2244,14 @@ void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
     }
     sendInputEvents(frame, jumped);
     const bool resendThrottle = pressAutothrottleDisconnect();
+    if (playClip_ && !playClip_->frames.empty()) {
+        // Toggle reverse looks ahead (ControlDriver::setReverseAhead).
+        sampleFrames(playClip_->frames.data(), playClip_->frames.size(), frame.t + ReverseToggle::kLeadSec * playSpeed_,
+                     reverseAhead_, &reverseHint_);
+        driver_.setReverseAhead(&reverseAhead_);
+    } else {
+        driver_.setReverseAhead(nullptr);
+    }
     for (int i = 0; i < kControlCount; ++i) {
         const Control c = controlAt(i);
         if (!profileDrives_[i] || (c == Control::Flaps && flapsHold_)) continue;
@@ -2159,15 +2291,20 @@ void SimBridge::sendChannelEvent(int channel, double value) {
     if (ch.engine > numEngines_) return;  // e.g. reverser 3/4 on a twin
     if (channel == kGearHandle && profileDrives_[static_cast<int>(Control::Gear)]) return;  // the profile's method
     const DWORD state = value >= 0.5 ? 1 : 0;
-    // Lights: parameter 0 on/off, parameter 1 circuit index (0 = all circuits).
-    // GEAR_SET: parameter 0 is 1 = down, 0 = up; parameter 1 is ignored.
-    if (ch.playEvent) {
+    // The Fenix's parking brake is its own handle: PARKING_BRAKE_SET left it set, so a takeoff
+    // replay started parked ran with the brake on (ChasePlane's camera placed for it).
+    const bool ownBrake = channel == kParkingBrake && pbLVar_ != FS_VAR_INVALID_ID;
+    if (ownBrake) {
+        fsVarsLVarSet(pbLVar_, numberUnit_, state ? 1.0 : 0.0);
+    } else if (ch.playEvent) {
+        // Lights: parameter 0 on/off, parameter 1 circuit index (0 = all circuits).
+        // GEAR_SET: parameter 0 is 1 = down, 0 = up; parameter 1 is ignored.
         track(SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT, EVT_CHANNEL_FIRST + channel,
                                                  SIMCONNECT_GROUP_PRIORITY_HIGHEST,
                                                  SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY, state, 0),
               ch.playEvent);
     }
-    const char* extra = state ? ch.playEventOn : ch.playEventOff;
+    const char* extra = ownBrake ? nullptr : (state ? ch.playEventOn : ch.playEventOff);
     if (extra) {
         track(SimConnect_TransmitClientEvent_EX1(h_, SIMCONNECT_OBJECT_ID_USER_AIRCRAFT,
                                                  (state ? EVT_CHANNEL_ON_FIRST : EVT_CHANNEL_OFF_FIRST) + channel,
@@ -2178,7 +2315,9 @@ void SimBridge::sendChannelEvent(int channel, double value) {
     // Play/seek/stop resend every event channel; only log the ones that actually change.
     const bool changed = lastSentEvent_[channel] != static_cast<double>(state);
     lastSentEvent_[channel] = state;
-    const char* name = ch.playEvent ? ch.playEvent : ch.key;
+    std::string own;
+    if (ownBrake) own = std::string("L:") + pbName_;
+    const char* name = ownBrake ? own.c_str() : (ch.playEvent ? ch.playEvent : ch.key);
     if (changed) {
         log::info("playback: %s %lu%s%s", name, static_cast<unsigned long>(state), extra ? " + " : "", extra ? extra : "");
     } else {
@@ -2477,7 +2616,10 @@ void SimBridge::traceOpen() {
                "L:ELEVATORS_HSTAB_1_ANIMATION,stick_hw_events,ail_clip,ail_r_live,ail_on,ail_stick,ail_way,"
                "ail_hw_events,rud_clip,rud_on,rud_stick,rud_way,rud_hw_events,beta_live,L:CAPT_SIDESTICK_ROLL,"
                "L:FBW_ROLL_OUTPUT,L:LEFT_AILERON_ANIMATION,L:INI_RUDDER_PEDAL_POSITION,L:FBW_YAW_OUTPUT,"
-               "L:RUDDER_ANGLE_ANIM,elev_hold,elev_ff,ail_hold,ail_ff,rud_hold,rud_ff\n",
+               "L:RUDDER_ANGLE_ANIM,elev_hold,elev_ff,ail_hold,ail_ff,rud_hold,rud_ff,lv_thr_1_clip,lv_thr_1_live,"
+               "rnoz_1_clip,rnoz_1_live,rnoz_2_clip,rnoz_2_live,rev_1_live,thr_2_clip,elev_damp,ail_damp,rud_damp,"
+               "elev_gain,ail_gain,rud_gain,elev_lead,ail_lead,rud_lead,gear_h_clip,gear_live,spoil_h_clip,"
+               "spoil_h_live,spoil_sent,pbrake_clip,pbrake_live,rud_still\n",
                trace_);
     static const char* kTraceLVars[kTraceLVarCount] = {
         "CAPT_SIDESTICK_PITCH", "FBW_ELEV_OUTPUT",  "FBW_VERTICAL_FLIGHT_MODE_RATIO", "ELEVATORS_HSTAB_1_ANIMATION",
@@ -2548,8 +2690,26 @@ void SimBridge::traceRow(const Frame& frame, bool jumped) {
                  lv[4], lv[5], lv[6], lv[7], lv[8], lv[9]);
     // Each loop's hold (the stick for the motion the aircraft reads) and feedforward (the clip's
     // movement), as last sent.
-    std::fprintf(trace_, ",%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n", pitch.loop.lastHold(), pitch.loop.lastFeedforward(),
+    std::fprintf(trace_, ",%.4f,%.4f,%.4f,%.4f,%.4f,%.4f", pitch.loop.lastHold(), pitch.loop.lastFeedforward(),
                  roll.loop.lastHold(), roll.loop.lastFeedforward(), yaw.loop.lastHold(), yaw.loop.lastFeedforward());
+    // Reverse thrust: the throttle lever's own variable (where the profile has one), the reverser
+    // nozzles and flag, the clip's and the aircraft's.
+    std::fprintf(trace_, ",%.4f,%.4f,%.1f,%.1f,%.1f,%.1f,%.0f,%.3f", frame.v[kLVarThrottle1], live[kLVarThrottle1],
+                 frame.v[kReverserNozzle1], live[kReverserNozzle1], frame.v[kReverserNozzle1 + 1],
+                 live[kReverserNozzle1 + 1], live[kReverser1], frame.v[kThrottle1 + 1]);
+    // Each loop's figures: its calming for a wiggle, its gain (negative: direct) and lead.
+    std::fprintf(trace_, ",%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f", pitch.loop.damping(), roll.loop.damping(),
+                 yaw.loop.damping(), (pitch.loop.config().airDirect ? -1.0 : 1.0) * pitch.loop.config().airK,
+                 (roll.loop.config().airDirect ? -1.0 : 1.0) * roll.loop.config().airK,
+                 (yaw.loop.config().airDirect ? -1.0 : 1.0) * yaw.loop.config().airK, pitch.loop.config().leadSec,
+                 roll.loop.config().leadSec, yaw.loop.config().leadSec);
+    // The gear (the clip's command, the aircraft's legs), the spoiler handle (the clip's, the
+    // aircraft's and the value last sent) and the parking brake.
+    std::fprintf(trace_, ",%.0f,%.3f,%.3f,%.3f,%.0f,%.0f,%.0f", frame.v[kGearHandle], liveGearExtension(),
+                 frame.v[kSpoilersHandle], live[kSpoilersHandle], driver_.lastSent(Control::Spoilers, 0),
+                 frame.v[kParkingBrake], live[kParkingBrake]);
+    // The pedals centred where the clip's rudder sits still at 0.
+    std::fprintf(trace_, ",%d\n", yaw.stillNow ? 1 : 0);
     traceSends_ = sends;
     ++traceRows_;
 }
@@ -2618,9 +2778,14 @@ void SimBridge::checkInputEvents() {
 void SimBridge::onAircraftChanged() {
     if (throttleViaEvents_) log::info("aircraft changed: trying the throttle simvars first again");
     throttleViaEvents_ = false;
-    for (StickAxis& a : stick_) {
+    for (int i = 0; i < kStickAxisCount; ++i) {
+        StickAxis& a = stick_[i];
         a.learned = false;
         a.loop.forget();
+        a.loop.setConfig(defaultStickConfig(i));
+        a.plant = StickPlant();
+        a.fitting = a.fitted = false;
+        a.fit.clear();
     }
     directMotion_ = true;
     snapRejected_ = false;
@@ -2655,6 +2820,7 @@ void SimBridge::endPlayback(const Frame& snapshot, bool restore) {
     for (int i = 0; i < kStickAxisCount; ++i) endStick(i);
     playing_ = false;
     playClip_ = nullptr;
+    driver_.setReverseAhead(nullptr);
     atPresses_ = 0;
     playChannelCount_ = 0;
     directChannelCount_ = 0;

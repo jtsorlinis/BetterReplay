@@ -34,31 +34,73 @@
 // elevator, as a 737's clips show; the A380's three all confirmed), and checked: held at full
 // travel for stuckSec while the clip's surface isn't moving fast, more than stuckDeg off and not
 // closerDeg closer, the surface went the wrong way (or not at all), so the other way is tried once;
-// if that's stuck too the loop gives up and centres the stick.
+// if that's stuck too the loop gives up and centres the stick, and the way round is as it was for
+// the next replay (neither way moved it: that doesn't say which is right). Once the stick has
+// steered the surface on this aircraft (within workedDeg of the clip's while the clip's moves at
+// workedRate or more, for workedSec in all: a stick the wrong way round can't follow a moving
+// surface, and a still one says nothing; on the A340's flown clip that took 60 s, the A380's
+// landing 48, the others' less), full travel that doesn't get there is the aircraft's own doing,
+// not the stick the wrong way round: the A340's elevator went to 30 degrees against a full push
+// in a hard push-over (its protections, with the replay's g lower than the clip's), the loop took
+// that for the stick reversed, gave up, and the next replay, its landing, began reversed and gave
+// up within 2 s. Then it stays on (Event::Held).
+//
+// Those figures are the A380's. Another aircraft's (StickPlant: how its surface answers, fitted by
+// StickFit from its replays, kept in its profile) replace the feedforward, the lead and the gains
+// (forPlant); the hold, in stick, is the control law's (an Airbus asks for the same g and rates per
+// stick), kept. And whatever the figures: a surface swinging a degree or more one way and back
+// wiggleTurns times within wiggleSec has the loop's own terms halved (Event::Damped, down to a
+// quarter): the A220's ailerons and the 777's elevator swung 16 to 34 times in 2 s on the A380's
+// figures, the rest at most 11, even in hard manoeuvres.
+//
+// Where the clip's rudder sits still at exactly 0 for 2 s or more, the pedals are centred and the
+// loop's terms emptied (centreStill, StillStretches). The A350's fly-by-wire leaves the rudder to
+// the pedals below about 100 ft: the clip's sat at 0 from there to the touchdown, the replay's
+// switched over with it, and the sideslip hold, still in the pedals, put it 5.6 degrees off for
+// 2 s. The A380's, A320neo's and A330's do the same from 100 to 200 ft down and from the liftoff to
+// about 200 ft: there their rudders followed the pedals alone (22 to 35 degrees per full pedal,
+// R2 0.99, nothing from the sideslip), and the A380's was up to 10 off.
 #pragma once
 
 #include <cmath>
+#include <cstddef>
+#include <utility>
+#include <vector>
+
+#include "Channels.h"
+#include "StickFit.h"
 
 namespace br {
 
-// What the aircraft reads, for the hold: its g, pitch and roll rates (rad/s, body axes as the sim
-// gives them) and sideslip (degrees). NaN: not fed in.
+// What the aircraft reads, for the hold: its g, pitch, roll and yaw rates (rad/s, body axes as the
+// sim gives them) and sideslip (degrees). NaN: not fed in.
 struct StickReadings {
     double g = NAN;
     double pitchRate = NAN;
     double rollRate = NAN;
+    double yawRate = NAN;
     double betaDeg = NAN;
 };
 
 struct StickLoopConfig {
     bool airDirect = false;  // in the air the stick moves the surface directly (else at a rate)
     double airK = 10.0;      // in the air: degrees a second (or degrees) per full travel
+    double airSettleSec = 0.0;  // direct: how long the surface takes to settle (the feedforward that much ahead)
+    // Direct: degrees a second per stick it also moves at, as long as the stick is held (0: none).
+    // A fly-by-wire with a proportional and an integral term on the stick, as the A350's on its
+    // pedals: the feedforward then leaves out what the stick sent so far has built up (the loop's
+    // own tally of it), or the surface runs past the clip's.
+    double airRateK = 0.0;
+    static constexpr double kBuiltSec = 1.0;  // how quickly that tally is brought to the surface's
     double groundK = 30.0;   // on the ground: degrees per full travel
     double leadSec = 0.3;    // the clip ahead, for the aircraft's lag (for the caller)
     double holdG = 0.95;     // stick per g above 1
     double holdPitchRate = -2.0;
     double holdRollRate = 0.0;
     double holdBeta = 0.0;   // per degree
+    // Per rad/s of yaw rate: none on the A380, whose pedals ask for sideslip. The A350's ask for a
+    // yaw rate (StickPlant::holdYawRate).
+    double holdYawRate = 0.0;
     double airKp = 0.05;     // stick (full travel 1) per degree the surface is off
     double airKi = 0.02;     // stick per degree-second
     double groundKp = 0.0;
@@ -68,6 +110,17 @@ struct StickLoopConfig {
     double stuckSec = 2.0;
     double stuckDeg = 3.0;
     double closerDeg = 2.0;
+    double workedSec = 3.0;
+    double workedDeg = 1.5;
+    double workedRate = 1.0;  // degrees a second
+    double wiggleTurnDeg = 0.5;   // back this far from where it went: a turn
+    double wiggleSwingDeg = 1.0;  // counted where it swung this far
+    double wiggleSec = 2.0;
+    int wiggleTurns = 12;
+    double minDamp = 0.25;
+    // Centred where the clip's surface sits still at 0 (StillStretches): the pedals, whose surface
+    // reads exactly 0 only with nothing moving it.
+    bool centreStill = false;
 
     static StickLoopConfig elevator() { return StickLoopConfig(); }
     static StickLoopConfig ailerons() {
@@ -89,17 +142,26 @@ struct StickLoopConfig {
         c.holdBeta = -1.0 / 16.0;
         c.airKp = 0.0;
         c.airKi = 0.02;
+        c.centreStill = true;
         return c;
     }
+    // This config with a surface's own figures: its feedforward, lead and gains. A rate's
+    // proportional and integral gains keep their product with the rate (this config's, if it's a
+    // rate, else the elevator's); a direct surface's are integral only, as the A380's rudder (0.9 a
+    // second over its degrees per stick). The hold scaled by plant.holdScale (none without holds).
+    StickLoopConfig forPlant(const StickPlant& plant) const;
 };
 
 class StickLoop {
 public:
-    enum class Event { None, Flipped, Failed };
+    enum class Event { None, Flipped, Failed, Held, Damped };
 
     explicit StickLoop(StickLoopConfig cfg = StickLoopConfig()) : cfg_(cfg) {}
 
     const StickLoopConfig& config() const { return cfg_; }
+    // Other figures from here on (StickLoopConfig::forPlant), the stick where it is.
+    void setConfig(const StickLoopConfig& cfg) { cfg_ = cfg; }
+    double damping() const { return damp_; }  // 1, or less after a wiggle (Event::Damped)
     // A new replay: the stick from centre, the integral emptied. The way round found earlier on
     // this aircraft is kept; forget() starts over (another aircraft).
     void reset();
@@ -114,6 +176,10 @@ public:
     // holds it; one ahead goes by the clip now.
     double update(double targetDeg, double aheadDeg, double aheadRate, double liveDeg, double dt, bool onGround,
                   const StickReadings& reads = StickReadings());
+    // One frame where the clip's surface sits still at 0 (config().centreStill, StillStretches):
+    // the stick to centre, as fast as it goes, and the loop's terms emptied, so it steers from
+    // there again where the clip's moves. Returns the stick.
+    double centre(double dt, bool onGround);
 
     double stick() const { return failed_ ? 0.0 : sign_ * drive_; }
     double airWeight() const { return air_; }  // 0 ground gains .. 1 air gains (NaN before the first frame)
@@ -121,6 +187,7 @@ public:
     double lastFeedforward() const { return ff_; }
     int sign() const { return sign_; }
     bool flipped() const { return flipped_; }
+    bool worked() const { return workedSec_ >= cfg_.workedSec; }  // the stick has steered it, this way round
     bool failed() const { return failed_; }
     // What the last update decided, once.
     Event takeEvent() {
@@ -136,12 +203,43 @@ private:
     double air_ = NAN;
     double hold_ = 0.0;
     double ff_ = 0.0;
+    double built_ = NAN;    // airRateK: the stick-seconds sent beyond the hold (NaN: from the surface)
     int sign_ = 1;          // the stick for a positive drive_: 1 pulled back
     bool flipped_ = false;   // the other way round has been tried
+    double workedSec_ = 0.0;  // how long it has steered the surface, this way round (kept like sign_)
     bool failed_ = false;
     double stuckFor_ = 0.0;
     double stuckFrom_ = 0.0;
     Event event_ = Event::None;
+    // The wiggle check: where the surface last turned, which way it's going, and when it swung.
+    double clock_ = 0.0;
+    int wigDir_ = 0;
+    double wigExt_ = NAN;
+    double wigPrev_ = NAN;
+    double wigTimes_[32] = {};
+    int wigCount_ = 0;
+    double damp_ = 1.0;
+    void ramp(double dt, bool onGround);
+    void watchWiggle(double liveDeg);
+};
+
+// Where a clip's surface sits still at exactly 0 for kMinSec or more (clip seconds, first to last
+// such frame). A rudder reads exactly 0 only with the pedals centred and nothing else moving it:
+// the Airbuses' below 100 to 200 ft, to the touchdown and from the liftoff (their fly-by-wire
+// leaves it to the pedals there). A shorter stretch can be the fly-by-wire's own still moment
+// (the A340's and A330's, up to 1.4 s, in the air).
+class StillStretches {
+public:
+    static constexpr double kMinSec = 2.0;
+
+    void find(const Frame* frames, size_t count, int channel, double minSec = kMinSec);
+    void clear() { spans_.clear(); }
+    bool at(double t) const;
+    size_t count() const { return spans_.size(); }
+    double seconds() const;
+
+private:
+    std::vector<std::pair<double, double>> spans_;
 };
 
 }  // namespace br

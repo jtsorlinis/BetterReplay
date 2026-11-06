@@ -1,6 +1,7 @@
 // Playhead over a loaded clip: play/pause, seek, speed, and the interpolated frame to write.
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 
@@ -31,6 +32,60 @@ public:
 private:
     double state_ = NAN;
     double extreme_ = NAN;  // most extended (state 1) / most retracted (state 0) since the last flip
+};
+
+// The gear's up sent with the aircraft on the ground: a landing replay started from a runway jumps
+// into the air with the gear up, and the up goes in that first frame, before the aircraft has left
+// the ground. The Fenix A320 took no gear up there (its gear stayed down through the replay's first
+// 40 s, until the clip's own gear down), as the key events go only when the clip's gear changes.
+// Sent again once the aircraft has been off the ground kAirMs with its gear still down, and once
+// more kAgainMs later. The gear read up for a moment (the replay's snap writes it up after the jump,
+// and the Fenix put it back down) doesn't count as coming up: only kWatchMs of it does.
+class GearUpOnGround {
+public:
+    static constexpr int64_t kAirMs = 1000;
+    static constexpr int64_t kAgainMs = 3000;
+    static constexpr int64_t kWatchMs = 10000;  // off the ground, after which it's left alone
+    static constexpr int kTries = 2;
+    static constexpr double kDown = 0.9;  // the legs' mean extension still counted as down
+
+    // The clip's gear sent: up or down, with the aircraft on the ground or not.
+    void sent(bool up, bool onGround);
+    // Each frame, while the clip's gear is still up (clipUp): true when the up is due again.
+    // extension: the legs' mean (NaN: not known, taken as down).
+    bool step(bool clipUp, bool onGround, double extension, int64_t nowMs);
+
+private:
+    bool waiting_ = false;
+    int tries_ = 0;
+    int64_t airFromMs_ = 0;  // off the ground since (0: on it)
+    int64_t dueMs_ = 0;      // after the first try, when the next one is
+};
+
+// A lever's value sent at a jump (the start of a replay, a seek), for a key event that goes only
+// when the clip's value changes: the Fenix's speed brake, extended before a takeoff replay, stayed
+// out though AXIS_SPOILER_SET sent the clip's retracted at the jump. Due again, nudged, if the
+// aircraft's handle isn't within kTol of the clip's kAfterMs later, up to kTries times; given up
+// once the clip's moves (sent then anyway) or the aircraft's gets there.
+class JumpFollowCheck {
+public:
+    static constexpr int64_t kAfterMs = 1500;
+    static constexpr double kTol = 0.05;
+    static constexpr double kClipMoved = 0.02;
+    static constexpr int kTries = 2;
+
+    void sent(double clip, int64_t nowMs);
+    // Each frame: true when the value is due again. live: the aircraft's handle (NaN: not known,
+    // nothing sent again).
+    bool step(double clip, double live, int64_t nowMs);
+    int tries() const { return tries_; }
+    double sentClip() const { return clip_; }
+
+private:
+    bool waiting_ = false;
+    double clip_ = NAN;
+    int64_t fromMs_ = 0;
+    int tries_ = 0;
 };
 
 // A gear snap (the gear positions written for a few frames after a jump or Stop, so the gear doesn't

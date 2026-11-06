@@ -2,6 +2,25 @@
   "key": "simobjects/airplanes/a350",
   "title": "A350-900 (Default Cabin)",
   "updatedUtcMs": 1792410710304,
+  "stickPlants": {
+    "elevator": {
+      "form": "rate",
+      "gain": 10,
+      "lagSec": 0.15
+    },
+    "ailerons": {
+      "form": "rate",
+      "gain": 25,
+      "lagSec": 0.25
+    },
+    "rudder": {
+      "form": "direct",
+      "gain": 15,
+      "lagSec": 0.1,
+      "rateGain": 13,
+      "holdYawRate": 5.73
+    }
+  },
   "controls": {
     "spoilers": {
       "state": "ok",

@@ -1989,19 +1989,49 @@ struct ToggleAircraft {
     int toggles = 0;
     int ignore = 0;
     double lagSec = 0.4;  // the simvar behind the lever (the A350's: about 1.5 s)
+    double forwardLagSec = NAN;  // out of reverse, where that differs
     double revIdleAxis = 0.0;
+    bool snaps = false;  // a toggle taken puts the simvar at 0 at once (the A380's)
+    // With snaps: going in, only once the simvar is this low; until then it comes down as before
+    // (the A380's, toggled at 9%, still did 0.6 s later; at 4.9% it went to 0).
+    double snapBelow = INFINITY;
+    int stairFrames = 1;  // the simvar shows a new value every this many frames (the A380's: every third)
+    bool pendingSnap = false;
+    double inner = NAN;  // the simvar, shown as thr every stairFrames
+    int stair = 0;
     void toggle() {
         ++toggles;
         if (ignore > 0) {
             --ignore;
             return;
         }
-        if (axis < 0.01) reverse = !reverse;
+        if (axis < 0.01) {
+            reverse = !reverse;
+            if (std::isnan(inner)) inner = thr;
+            pendingSnap = false;
+            if (snaps && reverse && inner > snapBelow) {
+                pendingSnap = true;
+            } else if (snaps) {
+                inner = 0.0;
+                if (stairFrames <= 1) thr = 0.0;
+            }
+        }
     }
     void step(double dt) {
+        if (std::isnan(inner)) inner = thr;
         const double amount = std::fmax(0.0, (axis - revIdleAxis) / (1.0 - revIdleAxis));
-        const double target = reverse ? -20.0 * amount : std::fmax(1.6, 100.0 * axis);
-        thr += (target - thr) * std::fmin(1.0, dt / lagSec);
+        const bool forward = !reverse || pendingSnap;
+        const double target = forward ? std::fmax(1.6, pendingSnap ? 0.0 : 100.0 * axis) : -20.0 * amount;
+        const double lag = forward && std::isfinite(forwardLagSec) ? forwardLagSec : lagSec;
+        inner += (target - inner) * std::fmin(1.0, dt / lag);
+        if (pendingSnap && inner <= snapBelow) {
+            inner = 0.0;
+            pendingSnap = false;
+        }
+        if (++stair >= stairFrames) {
+            stair = 0;
+            thr = inner;
+        }
     }
     bool reversing() const { return thr < -1.0; }
 };
@@ -2086,6 +2116,362 @@ TEST(Playback_ToggleReverseWithAReverseIdleZone) {
         CHECK_EQ(p.ac.toggles, 2);
         CHECK_EQ(p.rt.corrections(), 0);
     }
+}
+
+// The A380 again, as its landing replays go: the clip straight into full reverse. Its reverse
+// thrust used to come 1.9 s after the clip's, the levers held at idle and then at the small first
+// amount (which it ignores) for 30 frames each; now the clip's amount reaches it within about a
+// third of a second, with no forward thrust on the way.
+TEST(Playback_ToggleReverseReachesTheClipsAmountQuickly) {
+    TogglePlayback p;
+    p.ac.lagSec = 0.1;
+    p.ac.revIdleAxis = 0.5;
+    p.play(2.0, 1.6);
+    int frames = 0;
+    while (frames < 60 * 5 && !(p.ac.thr < -10.0)) {
+        p.frame(-20.0);
+        ++frames;
+    }
+    CHECK(frames < 30);  // half a second at 60 frames a second
+    CHECK(p.mostForward < 2.0);
+}
+
+namespace {
+
+// A clip of the throttle simvar and the lever (0 at idle), 60 frames a second, flown on the model
+// as a pilot does: the levers at idle from the start (the simvar coming down from `fromThr`), the
+// toggle at pressT, full reverse from fullT to backT, the toggle back out at outT.
+struct ToggleClip {
+    std::vector<double> thr, lever;
+    double t(size_t i) const { return static_cast<double>(i) / 60.0; }
+    static ToggleClip fly(ToggleAircraft ac, double fromThr, double seconds, double pressT, double fullT, double backT,
+                          double outT, double idleT = 0.0) {
+        ToggleClip c;
+        ac.thr = fromThr;
+        for (int i = 0; i < static_cast<int>(seconds * 60.0); ++i) {
+            const double t = i / 60.0;
+            const double lever = t < idleT ? 0.3 : 0.0;
+            ac.axis = t >= fullT && t < backT ? 1.0 : lever;
+            if (std::fabs(t - pressT) < 0.5 / 60.0 || std::fabs(t - outT) < 0.5 / 60.0) ac.toggle();
+            ac.step(1.0 / 60.0);
+            c.thr.push_back(ac.thr);
+            c.lever.push_back(ac.reverse ? 0.0 : lever);
+        }
+        return c;
+    }
+    // When the simvar first goes below `pct` from `from` seconds on, NaN if it doesn't.
+    double below(double pct, double from = 0.0) const {
+        for (size_t i = 0; i < thr.size(); ++i) {
+            if (t(i) >= from && thr[i] < pct) return t(i);
+        }
+        return NAN;
+    }
+};
+
+// Replays a ToggleClip as ControlDriver does on a "toggle" aircraft, the clip ReverseToggle::kLeadSec
+// ahead at hand: `lead` toggles in ahead of the clip's reverse (where reverseIdleInClip allows it),
+// the clip's lever and simvar at idle (clipAtIdle); `leverGate` toggles in once the aircraft's levers are at idle (the
+// lever variable) without waiting for its simvar; `push` sends reverseAmount. All three off is
+// the replay before them.
+struct LeadPlayback {
+    ReverseToggle rt;
+    ToggleAircraft ac;
+    bool lead = true, leverGate = true, push = true;
+    bool leading = false;
+    ToggleClip replay;    // the aircraft's simvar, frame by frame
+    double aheadUntil = 10.0;  // the clip's reverse amount coming back from here
+    double ahead = 0.0;        // the furthest the aircraft's simvar got ahead of the clip's into reverse
+    double forwardOff = 0.0;   // idle sent where the clip's levers weren't
+    double offSum = 0.0;       // the simvar off the clip's, from the clip's reverse to aheadUntil
+    int offFrames = 0;
+    double meanOff() const { return offFrames > 0 ? offSum / offFrames : NAN; }
+    void play(const ToggleClip& c) {
+        const size_t leadFrames = static_cast<size_t>(ReverseToggle::kLeadSec * 60.0);
+        const double clipIn = c.below(-1.0);
+        for (size_t i = 0; i < c.thr.size(); ++i) {
+            const double clip = c.thr[i];
+            const double later = c.thr[std::min(i + leadFrames, c.thr.size() - 1)];
+            const bool clipOut = clip < -1.0, aheadOut = later < -1.0;
+            if (clipOut || !aheadOut) {
+                leading = false;
+            } else if (lead && !leading && !rt.on() && c.lever[i] < 0.01 && clip <= ReverseToggle::kForwardPct) {
+                leading = true;
+            }
+            const ReverseToggle::Step st =
+                rt.step(clipOut || leading, ac.reversing(), ac.thr, leverGate && ac.axis < 0.01, clipOut);
+            double fraction = 0.0;
+            if (st.drive == ReverseToggle::Drive::Reverse && clip < 0.0) {
+                fraction = std::fmin(clip / -20.0, st.cap);
+                if (push && st.cap >= 1.0) fraction = reverseAmount(clip, later, ac.thr, -20.0);
+            }
+            if (st.drive == ReverseToggle::Drive::Forward) fraction = c.lever[i];
+            if (st.drive == ReverseToggle::Drive::Idle && !rt.on() && !clipOut) {
+                forwardOff = std::fmax(forwardOff, c.lever[i]);  // idle where the clip's levers aren't
+            }
+            ac.axis = fraction;
+            if (st.toggle) ac.toggle();
+            ac.step(1.0 / 60.0);
+            replay.thr.push_back(ac.thr);
+            // Reverse amounts only: reverse idle (0 here) against forward idle is what doesn't show.
+            if (c.t(i) < aheadUntil) ahead = std::fmax(ahead, std::fmin(clip, 0.0) - std::fmin(ac.thr, 0.0));
+            if (c.t(i) >= clipIn && c.t(i) < aheadUntil) {
+                offSum += std::fabs(clip - ac.thr);
+                ++offFrames;
+            }
+        }
+    }
+};
+
+// The A380 as its landing clip and replays show: the simvar comes down from approach thrust about
+// 1.8 s behind the levers, the toggle takes it to 0 at once, then a second behind the reverse
+// amount, the first fifth of the axis reverse idle (its 20% first amount shows nothing).
+ToggleAircraft a380Reverse() {
+    ToggleAircraft ac;
+    ac.lagSec = 1.0;
+    ac.forwardLagSec = 1.8;
+    ac.revIdleAxis = 0.2;
+    ac.snaps = true;
+    return ac;
+}
+
+}  // namespace
+
+// The A380's landing replays went into reverse 1.1 s after the clip and took 4 s to full reverse
+// where the clip took 2: the toggle waited for the simvar to come down to 5%, then settled and
+// probed after the clip's reverse had begun, and the clip's amount, already a second behind the
+// pilot's lever, was sent as the lever. Now it toggles in ahead, at reverse idle (which shows
+// nothing on it), with its levers at idle, probes as the clip's amount begins, and the amount is
+// pushed toward the clip's a second on while the A380's trails it, never past the clip's. Not
+// before the pilot's toggle either: the clip's thrust is at idle only from there.
+TEST(Playback_ToggleReverseAheadOfTheClip) {
+    const ToggleClip clip = ToggleClip::fly(a380Reverse(), 17.0, 16.0, 1.0, 1.9, 10.0, 12.0);
+    const double clipIn = clip.below(-1.0), clipFull = clip.below(-17.0);
+    REQUIRE(std::isfinite(clipIn) && std::isfinite(clipFull));
+    LeadPlayback before;
+    before.lead = before.leverGate = before.push = false;
+    before.ac = a380Reverse();
+    before.ac.thr = 17.0;
+    before.play(clip);
+    LeadPlayback now;
+    now.ac = a380Reverse();
+    now.ac.thr = 17.0;
+    now.play(clip);
+    const double beforeIn = before.replay.below(-1.0) - clipIn, beforeFull = before.replay.below(-17.0) - clipFull;
+    const double nowIn = now.replay.below(-1.0) - clipIn, nowFull = now.replay.below(-17.0) - clipFull;
+    std::printf("  A380 model: into reverse %.2f s late (before: %.2f), -17%% %.2f s late (before: %.2f); in reverse "
+                "%.2f%% off the clip on average (before: %.2f), at most %.2f%% ahead of it\n",
+                nowIn, beforeIn, nowFull, beforeFull, now.meanOff(), before.meanOff(), now.ahead);
+    CHECK(beforeIn > 0.8);  // as the replays were
+    CHECK(nowIn < 0.3);
+    CHECK(nowIn > -0.05);
+    CHECK(nowFull < beforeFull - 0.4);
+    CHECK(now.meanOff() < 0.6 * before.meanOff());
+    CHECK(now.ahead < 1.0);        // never ahead of the clip
+    CHECK(now.forwardOff < 0.01);  // nor idle where the clip's levers aren't
+    CHECK(now.replay.below(0.5) >= clip.below(0.5) - 1.5 / 60.0);  // nor the toggle's 0 before the pilot's
+    CHECK_EQ(now.ac.toggles, 2);
+    CHECK_EQ(now.rt.corrections(), 0);
+    CHECK(!now.ac.reverse);
+}
+
+// The A380 as the first replay ahead of the clip found it: toggled in with its simvar at 9%, still
+// coming down, it took the toggle but went on showing that until about 6%, and it shows a new
+// value only every third frame (every fifth here, at 60). Frame to frame that looked still, so
+// forward thrust "while in reverse" was taken for a toggle not taken, twice: toggled out and in
+// again, reverse came 1.2 s after the clip's. Now it's toggled once, and nothing is taken for
+// that before the clip's amount begins, nor while the simvar is still coming down over a few
+// frames; and it goes by the engines the clip reverses.
+TEST(Playback_ToggleReverseAheadWhileTheSimvarStillComesDown) {
+    const ToggleClip clip = ToggleClip::fly(a380Reverse(), 17.0, 16.0, 1.0, 1.9, 10.0, 12.0);
+    LeadPlayback p;
+    p.ac = a380Reverse();
+    p.ac.snapBelow = 6.0;
+    p.ac.stairFrames = 5;
+    p.ac.thr = 17.0;
+    p.play(clip);
+    const double in = p.replay.below(-1.0) - clip.below(-1.0);
+    std::printf("  A380 model, its simvar slow to show the toggle: into reverse %.2f s late, %.2f%% off the clip in "
+                "reverse on average, at most %.2f%% ahead of it, %d correction(s)\n",
+                in, p.meanOff(), p.ahead, p.rt.corrections());
+    CHECK_EQ(p.rt.corrections(), 0);
+    CHECK_EQ(p.ac.toggles, 2);
+    CHECK(in > -0.05);
+    CHECK(in < 0.8);
+    CHECK(p.ahead < 1.0);
+    CHECK(!p.ac.reverse);
+}
+
+// An aircraft whose simvar follows its lever within a frame or two gets the clip's own amount: the
+// push is for one that trails, and nothing comes early. And one as slow as the A350's.
+TEST(Playback_ToggleReverseAheadKeepsAQuickAircraftOnTheClip) {
+    for (const double lag : {0.02, 0.1, 1.5}) {
+        ToggleAircraft ac;
+        ac.lagSec = lag;
+        const ToggleClip clip = ToggleClip::fly(ac, 1.6, 16.0, 1.0, 1.9, 10.0, 12.0);
+        LeadPlayback p;
+        p.ac.lagSec = lag;
+        p.play(clip);
+        const double in = p.replay.below(-1.0) - clip.below(-1.0);
+        std::printf("  lag %.2f s: into reverse %.2f s late, at most %.2f%% ahead of the clip\n", lag, in, p.ahead);
+        CHECK(in > -0.05);
+        CHECK(in < 0.3 + lag * 0.2);
+        CHECK(p.ahead < 1.0);
+        CHECK_EQ(p.ac.toggles, 2);
+        CHECK_EQ(p.rt.corrections(), 0);
+    }
+}
+
+// Ahead of the clip's reverse only once the clip's levers are at idle: where the pilot pulls them
+// back half a second before reversing, the replay's follow the clip's until then.
+TEST(Playback_ToggleReverseAheadWaitsForTheClipsIdle) {
+    const ToggleClip clip = ToggleClip::fly(a380Reverse(), 30.0, 16.0, 1.6, 1.9, 10.0, 12.0, 1.4);
+    LeadPlayback p;
+    p.ac = a380Reverse();
+    p.ac.thr = 30.0;
+    p.play(clip);
+    CHECK(p.forwardOff < 0.01);
+    CHECK(p.ahead < 1.0);
+    CHECK_EQ(p.ac.toggles, 2);
+}
+
+// Going in, levers at idle by their own variable are enough: the simvar still at 15% (the A380's
+// coming down from approach thrust), it's toggled within a couple of frames, not once it's at 5%.
+// Coming out the simvar still has to be back from reverse.
+TEST(Playback_ToggleReverseByTheLeversIdle) {
+    ReverseToggle rt;
+    int frame = -1;
+    for (int i = 0; i < 10 && frame < 0; ++i) {
+        if (rt.step(true, false, 15.0, true, false).toggle) frame = i;
+    }
+    CHECK(frame >= 0 && frame <= 2);
+    ReverseToggle slow;
+    bool toggled = false;
+    for (int i = 0; i < 10; ++i) toggled |= slow.step(true, false, 15.0, false, false).toggle;
+    CHECK(!toggled);
+    // In reverse, the clip back out: the levers at idle don't do while the simvar shows reverse.
+    ReverseToggle out;
+    for (int i = 0; i < 60; ++i) out.step(true, i > 5, i > 5 ? -10.0 : 1.0, true, true);
+    REQUIRE(out.on());
+    toggled = false;
+    for (int i = 0; i < 10; ++i) toggled |= out.step(false, true, -10.0, true, false).toggle;
+    CHECK(!toggled);
+}
+
+// Ahead, at reverse idle, nothing tells whether the toggle took, so it isn't taken as confirmed
+// until the clip's amount begins.
+TEST(Playback_ToggleReverseProbesOnlyOnTheClipsAmount) {
+    ReverseToggle rt;
+    bool confirmed = false;
+    for (int i = 0; i < 120; ++i) {
+        const ReverseToggle::Step st = rt.step(true, false, 1.6, true, false);
+        confirmed |= st.confirmed != ReverseToggle::Confirmed::No;
+        CHECK(st.drive != ReverseToggle::Drive::Reverse || st.cap < 1.0);
+    }
+    CHECK(rt.on());
+    CHECK(!confirmed);
+    int frames = 0;
+    while (frames < 60 && rt.step(true, false, 1.0, true, true).confirmed == ReverseToggle::Confirmed::No) ++frames;
+    CHECK_EQ(frames, ReverseToggle::kProbeFrames - 1);
+}
+
+TEST(Profile_ReverseAmountPushesOnlyWhileTrailing) {
+    const double lower = -20.0;
+    CHECK_NEAR(reverseAmount(-10.0, -16.0, -10.0, lower), 0.5, 1e-9);  // level with the clip's: its own
+    CHECK_NEAR(reverseAmount(-10.0, -16.0, -12.0, lower), 0.5, 1e-9);  // past it
+    CHECK_NEAR(reverseAmount(-10.0, -16.0, -9.5, lower), 0.5, 1e-9);   // a frame's step behind
+    CHECK_NEAR(reverseAmount(-10.0, -16.0, -2.0, lower), 0.8, 1e-9);   // well behind: the clip's a second on
+    const double part = reverseAmount(-10.0, -16.0, -7.0, lower);      // between
+    CHECK(part > 0.5 && part < 0.8);
+    CHECK_NEAR(reverseAmount(-10.0, -10.0, 0.0, lower), 0.5, 1e-9);    // the clip level: its own
+    CHECK_NEAR(reverseAmount(-10.0, -4.0, -18.0, lower), 0.2, 1e-9);   // coming back, the aircraft deeper
+    CHECK_NEAR(reverseAmount(-10.0, -4.0, -10.0, lower), 0.5, 1e-9);
+    CHECK_NEAR(reverseAmount(-10.0, 20.0, -16.0, lower), 0.0, 1e-9);   // out of reverse a second on
+    CHECK_NEAR(reverseAmount(-10.0, NAN, -2.0, lower), 0.5, 1e-9);
+    CHECK_NEAR(reverseAmount(-10.0, -16.0, NAN, lower), 0.5, 1e-9);
+    CHECK_NEAR(reverseAmount(-25.0, -30.0, 0.0, lower), 1.0, 1e-9);
+}
+
+namespace {
+
+// A landing's frames, 30 a second: the reverse amount (every engine's throttle simvar) from
+// amountT, the nozzles from nozzleT (NaN: not recorded), both reaching full a second on; back out
+// at 10 s.
+std::vector<Frame> reverseFrames(double amountT, double nozzleT, int engines = 2) {
+    std::vector<Frame> out;
+    for (int i = 0; i < 12 * 30; ++i) {
+        Frame f;
+        f.t = 100.0 + i / 30.0;
+        const double t = i / 30.0;
+        for (int e = 0; e < 4; ++e) {
+            const bool has = e < engines;
+            const double a = std::isfinite(amountT) && t >= amountT && t < 10.0 ? -20.0 * std::fmin(1.0, t - amountT) : 1.6;
+            f.v[kThrottle1 + e] = has ? a : 0.0;
+            double noz = 0.0;
+            if (std::isnan(nozzleT)) {
+                noz = NAN;
+            } else if (t >= nozzleT && t < 10.0) {
+                noz = 100.0 * std::fmin(1.0, t - nozzleT);
+            }
+            f.v[kReverserNozzle1 + e] = has ? noz : 0.0;
+        }
+        if (std::isnan(nozzleT)) {
+            for (int e = 0; e < 4; ++e) f.v[kReverserNozzle1 + e] = NAN;
+        }
+        out.push_back(f);
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST(Profile_ReverseIdleInClip) {
+    CHECK(reverseIdleInClip(reverseFrames(3.0, 3.2), 2) == ReverseIdle::Unseen);  // the amount first (the A380's)
+    CHECK(reverseIdleInClip(reverseFrames(3.0, 1.5), 2) == ReverseIdle::Seen);    // the doors at reverse idle
+    CHECK(reverseIdleInClip(reverseFrames(3.0, 2.9), 2) == ReverseIdle::Seen);    // just before
+    CHECK(reverseIdleInClip(reverseFrames(NAN, 3.0), 2) == ReverseIdle::Seen);    // doors only
+    CHECK(reverseIdleInClip(reverseFrames(3.0, NAN), 2) == ReverseIdle::Unknown); // no nozzles recorded
+    CHECK(reverseIdleInClip(reverseFrames(NAN, 99.0), 2) == ReverseIdle::NoReverse);
+    CHECK(reverseIdleInClip(reverseFrames(3.0, 3.2), 4) == ReverseIdle::Unseen);
+    // The A380's outer engines don't reverse: only the inner two show it.
+    std::vector<Frame> a380 = reverseFrames(3.0, 3.2, 4);
+    for (Frame& f : a380) {
+        f.v[kThrottle1] = f.v[kThrottle1 + 3] = 1.6;
+        f.v[kReverserNozzle1] = f.v[kReverserNozzle1 + 3] = 0.0;
+    }
+    CHECK(reverseIdleInClip(a380, 4) == ReverseIdle::Unseen);
+}
+
+TEST(Profile_LeverAtIdle) {
+    LeverCalibration fenix;  // 2 at idle, 5 at full, down to 0 in reverse
+    fenix.forward = {{0.0, 2.0}, {0.5, 3.0}, {1.0, 5.0}};
+    CHECK(leverAtIdle(fenix, 2.0));
+    CHECK(leverAtIdle(fenix, 2.1));
+    CHECK(leverAtIdle(fenix, 0.0));
+    CHECK(!leverAtIdle(fenix, 2.3));
+    CHECK(!leverAtIdle(fenix, NAN));
+    LeverCalibration pmdg;  // 100 at idle, running down to 4.6 at full
+    pmdg.forward = {{0.0, 100.0}, {1.0, 4.6}};
+    CHECK(leverAtIdle(pmdg, 100.0));
+    CHECK(leverAtIdle(pmdg, 110.0));
+    CHECK(!leverAtIdle(pmdg, 50.0));
+    CHECK(!leverAtIdle(LeverCalibration(), 0.0));
+}
+
+TEST(Profile_LeverBelowIdle) {
+    LeverCalibration fenix;  // 2 at idle, 5 at full, down to 0 in reverse
+    fenix.forward = {{0.0, 2.0}, {0.5, 3.0}, {1.0, 5.0}};
+    CHECK(leverBelowIdle(fenix, 1.16));
+    CHECK(leverBelowIdle(fenix, 0.0));
+    CHECK(!leverBelowIdle(fenix, 1.9));  // within 5% of the travel
+    CHECK(!leverBelowIdle(fenix, 2.0));
+    CHECK(!leverBelowIdle(fenix, 3.0));
+    CHECK(!leverBelowIdle(fenix, NAN));
+    LeverCalibration pmdg;  // 100 at idle, running down to 4.6 at full
+    pmdg.forward = {{0.0, 100.0}, {1.0, 4.6}};
+    CHECK(leverBelowIdle(pmdg, 110.0));
+    CHECK(!leverBelowIdle(pmdg, 100.0));
+    CHECK(!leverBelowIdle(pmdg, 50.0));
+    CHECK(!leverBelowIdle(LeverCalibration(), 0.0));  // no calibration
 }
 
 // A toggle the aircraft didn't take shows: going into reverse, as a little forward thrust from
@@ -4981,4 +5367,60 @@ TEST(EngineSetup_AircraftChangedAboveTheRunwayPutsItBackOnceTheGearIsDown) {
     CHECK(h.aircraft.gearWhenPutBack > 0.98);
     CHECK(!h.aircraft.frozen);
     CHECK(logged("control setup stopped (aircraft changed)"));
+}
+
+TEST(Profile_StickPlantsRoundTrip) {
+    ProfileStore store;
+    AircraftProfile& a = store.upsert("simobjects/airplanes/synaptic_a220");
+    a.stickPlants[1].form = StickPlant::Form::Direct;
+    a.stickPlants[1].gain = 14.5;
+    a.stickPlants[1].lagSec = 0.06;
+    a.stickPlants[0].form = StickPlant::Form::Rate;
+    a.stickPlants[0].gain = 60.0;
+    a.stickPlants[0].lagSec = 0.07;
+    a.stickPlants[0].holdScale = 0.55;
+    a.stickPlants[2].form = StickPlant::Form::Direct;
+    a.stickPlants[2].gain = 29.3;
+    a.stickPlants[2].lagSec = 0.0;
+    a.stickPlants[2].settleSec = 0.3;
+    a.stickPlants[2].holds = false;
+    a.stickPlants[2].fit = 0.55;
+    a.stickPlants[2].seconds = 156.0;
+    AircraftProfile& a350 = store.upsert("simobjects/airplanes/a350");
+    a350.stickPlants[2].form = StickPlant::Form::Direct;
+    a350.stickPlants[2].gain = 15.0;
+    a350.stickPlants[2].rateGain = 13.0;
+    a350.stickPlants[2].lagSec = 0.1;
+    a350.stickPlants[2].holdYawRate = 5.7;
+    store.upsert("c172");
+    std::string json;
+    store.toJson(json);
+    int plantsWritten = 0;  // only where there are some: the A220 and the A350, not the C172
+    for (size_t at = json.find("\"stickPlants\""); at != std::string::npos; at = json.find("\"stickPlants\"", at + 1)) {
+        ++plantsWritten;
+    }
+    CHECK_EQ(plantsWritten, 2);
+    ProfileStore back;
+    REQUIRE(back.fromJson(json.data(), json.size(), nullptr));
+    const AircraftProfile* b = back.find("simobjects/airplanes/synaptic_a220");
+    REQUIRE(b);
+    CHECK(b->stickPlants[0].form == StickPlant::Form::Rate);
+    CHECK_NEAR(b->stickPlants[0].holdScale, 0.55, 1e-9);
+    CHECK_NEAR(b->stickPlants[1].holdScale, 1.0, 1e-12);
+    CHECK(b->stickPlants[1].form == StickPlant::Form::Direct);
+    CHECK_NEAR(b->stickPlants[1].gain, 14.5, 1e-9);
+    CHECK_NEAR(b->stickPlants[1].lagSec, 0.06, 1e-9);
+    CHECK(b->stickPlants[1].holds);
+    CHECK(std::isnan(b->stickPlants[1].fit));
+    CHECK_NEAR(b->stickPlants[2].settleSec, 0.3, 1e-9);
+    CHECK(!b->stickPlants[2].holds);
+    CHECK_NEAR(b->stickPlants[2].fit, 0.55, 1e-9);
+    CHECK(!back.find("c172")->stickPlants[1].valid());
+    CHECK_NEAR(b->stickPlants[2].holdYawRate, 0.0, 1e-12);
+    const AircraftProfile* c = back.find("simobjects/airplanes/a350");
+    REQUIRE(c);
+    CHECK_NEAR(c->stickPlants[2].holdYawRate, 5.7, 1e-9);
+    CHECK_NEAR(c->stickPlants[2].rateGain, 13.0, 1e-9);
+    CHECK_NEAR(b->stickPlants[2].rateGain, 0.0, 1e-12);
+    CHECK(c->stickPlants[2].form == StickPlant::Form::Direct);
 }

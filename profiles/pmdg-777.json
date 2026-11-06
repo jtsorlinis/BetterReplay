@@ -2,6 +2,27 @@
   "key": "simobjects/airplanes/pmdg 777",
   "title": "777-300ER",
   "updatedUtcMs": 1792399604434,
+  "stickPlants": {
+    "elevator": {
+      "form": "direct",
+      "gain": 20,
+      "lagSec": 0.05,
+      "settleSec": 0.15
+    },
+    "ailerons": {
+      "form": "direct",
+      "gain": 12,
+      "lagSec": 0.08,
+      "holds": false
+    },
+    "rudder": {
+      "form": "direct",
+      "gain": 23.6,
+      "lagSec": 0.08,
+      "fit": 0.64,
+      "seconds": 40
+    }
+  },
   "controls": {
     "spoilers": {
       "state": "ok",

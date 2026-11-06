@@ -150,6 +150,9 @@ public:
     // The aircraft's own profile (aircraft.json), else the one included in the package.
     const AircraftProfile* currentProfile() const;
     bool profileIncluded() const;  // currentProfile() is the package's
+    // The package's profile for this aircraft, whether or not it has its own (its figures for the
+    // stick loop, StickPlant, fill in what its own lacks).
+    const AircraftProfile* includedProfile() const;
     // An airport the sim reports around the aircraft. Takeoff and landing clips record the one
     // they were at.
     void addAirport(const std::string& ident, const std::string& region, double latDeg, double lonDeg) {
@@ -217,6 +220,9 @@ public:
     // so later replays steer it from the start (in an included profile, for the rest of the
     // session). False if the aircraft has no profile or the profile has it already.
     bool learnStickSurface(unsigned surface);
+    // How surface i (StickSurface's order) answers the stick, as a replay fitted it (StickFit):
+    // kept as learnStickSurface keeps the surfaces. False if there's no profile to keep it in.
+    bool learnStickPlant(int surface, const StickPlant& plant);
 
     // ---- status
     bool recording() const { return suspendReason_ == nullptr; }

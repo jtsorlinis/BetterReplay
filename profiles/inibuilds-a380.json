@@ -3,6 +3,23 @@
   "title": "A380-800 RR Cabin",
   "updatedUtcMs": 1792481158284,
   "stickSurfaces": ["elevator", "ailerons", "rudder"],
+  "stickPlants": {
+    "elevator": {
+      "form": "rate",
+      "gain": 10,
+      "lagSec": 0.3
+    },
+    "ailerons": {
+      "form": "rate",
+      "gain": 20,
+      "lagSec": 0.4
+    },
+    "rudder": {
+      "form": "direct",
+      "gain": 45,
+      "lagSec": 0.17
+    }
+  },
   "controls": {
     "spoilers": {
       "state": "ok",

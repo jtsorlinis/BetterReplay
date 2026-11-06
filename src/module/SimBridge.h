@@ -237,12 +237,28 @@ private:
         int sinceSend = 0;
         uint64_t dataFrame = 0;  // the data frame the loop last stepped on
         int frames = 0;
+        int held = 0;  // times the loop held on at full travel that didn't get there (Event::Held)
         int near = 0;
         double errSum = 0.0;
         double errMax = 0.0;
         double stickMax = 0.0;
         int hardware = 0;  // events from the joystick meanwhile
+        // How the surface answers the stick (StickPlant): from the aircraft's profile, or the
+        // package's, or else fitted as the replay goes (fitting), starting from the A380's.
+        StickPlant plant = {};
+        const char* plantFrom = "";
+        bool fitting = false;
+        bool fitted = false;  // this replay's fit is steered by (kept in the profile at the end)
+        StickFit fit = {};
+        double usableSec = 0.0;  // fed to the fit, this replay
+        double nextFitSec = 0.0;
+        int damped = 0;  // times the loop calmed for a wiggle (StickLoop::Event::Damped)
+        StillStretches still = {};  // where the clip's surface sits still at 0 (config().centreStill)
+        bool stillNow = false;  // centred there this frame
+        double stillSec = 0.0;
     };
+    static StickLoopConfig defaultStickConfig(int axis);
+    void chooseStickPlant(int axis);
     StickAxis stick_[kStickAxisCount] = {
         {"elevator", "AXIS_ELEVATOR_SET", kElevator, -1, KEY_AXIS_ELEVATOR_SET, KEY_ELEVATOR_SET,
          StickLoop(StickLoopConfig::elevator())},
@@ -343,6 +359,8 @@ private:
     double leadSec_[kControlCount] = {};
     size_t leadHint_[kControlCount] = {};
     Frame leadFrame_;
+    Frame reverseAhead_;  // the clip ReverseToggle::kLeadSec ahead, for toggle reverse
+    size_t reverseHint_ = 0;
     double playSpeed_ = 1.0;
     const Frame& leadFrame(int control, const Frame& frame);
     // AUTO_THROTTLE_DISCONNECT presses this replay has still to send, the next at atNextMs_; after

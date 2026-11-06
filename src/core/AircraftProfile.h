@@ -12,6 +12,7 @@
 
 #include "Channels.h"
 #include "PlaybackController.h"
+#include "StickFit.h"
 
 namespace br {
 
@@ -411,6 +412,9 @@ struct AircraftProfile {
     int64_t updatedUtcMs = 0;
     bool declined = false;  // "never for this aircraft": the setup isn't offered again
     unsigned stickSurfaces = 0;  // StickSurface bits
+    // How each of those answers the stick (StickFit), where known: fitted from replays, by hand for
+    // the included profiles, or as a replay fits them ("stickPlants" in aircraft.json).
+    StickPlant stickPlants[kStickSurfaceCount];
     ControlProfile controls[kControlCount];
 
     ControlProfile& operator[](Control c) { return controls[static_cast<int>(c)]; }
@@ -463,6 +467,15 @@ bool leverAxis(const LeverCalibration& cal, double lever, double clipReverser, b
 // Whether a recorded lever value is in reverse by the calibration: beyond idle, the other way from
 // full, where there's a reverse table. There the lever variable shows the reverse amount itself.
 bool leverInReverse(const LeverCalibration& cal, double lever);
+// Whether a recorded lever value is beyond idle, the other way from full, by more than
+// kBelowIdleFraction of the lever's travel, with or without a reverse table: the pilot going into
+// reverse on an aircraft whose lever runs on past idle for it (the Fenix's: 2 at idle, 5 at full,
+// down to 0 in reverse), seconds before its reversers come out.
+constexpr double kBelowIdleFraction = 0.05;
+bool leverBelowIdle(const LeverCalibration& cal, double lever);
+// Whether a lever value is at idle by the calibration: no more than kBelowIdleFraction of the
+// lever's travel toward full from idle, or beyond idle the other way.
+bool leverAtIdle(const LeverCalibration& cal, double lever);
 // The axis fraction in reverse on an "events" aircraft (ReverseBy::Events), the clip and the
 // aircraft both in reverse. `fromLever`: the lever's (leverAxis, or the hardware axis); leverShown:
 // the clip's lever variable has shown reverse since its reversers came out (leverInReverse). Until
@@ -568,15 +581,22 @@ public:
         bool corrected = false;  // the aircraft showed it isn't in the mode it was thought to be in
         Confirmed confirmed = Confirmed::No;  // known to be in reverse from this frame, and how
     };
-    // One frame. clipReverse: the clip is in reverse here (reversing(), any engine); liveReverse:
-    // the aircraft is; liveThrottle: its throttle simvar (the highest engine's), forward thrust
-    // above kForwardPct. Back at idle is neither.
-    Step step(bool clipReverse, bool liveReverse, double liveThrottle);
+    // One frame. clipReverse: the replay wants reverse here: the clip is in it (reversing(), any
+    // engine), or will be within kLeadSec where that may be toggled into ahead; liveReverse: the
+    // aircraft is; liveThrottle: its throttle simvar (the highest engine's), forward thrust above
+    // kForwardPct. Back at idle is neither. leversIdle: the aircraft's levers are at idle by their
+    // own variable, so going into reverse it's toggled without waiting for the simvar, which
+    // trails them (the A380's comes down from approach thrust at about 5% a second: a landing
+    // replay waited 0.4 s for it, though the A380 takes the toggle at 15%, as the pilot's clip
+    // shows). amountNow: the clip itself is in reverse here, so the amount sent is the clip's; only
+    // that tells whether the toggle took (ahead of it, at reverse idle, nothing shows either way).
+    Step step(bool clipReverse, bool liveReverse, double liveThrottle, bool leversIdle = false, bool amountNow = true);
     bool on() const { return on_; }                 // the aircraft is in reverse, as far as can be told
     bool busy() const { return on_ || wait_ > 0; }  // or a toggle is still settling
     void forget() {                                 // the aircraft was reset: out of reverse
         on_ = confirmed_ = false;
         wait_ = probe_ = 0;
+        recentCount_ = recentNext_ = 0;
     }
     int toggles() const { return toggles_; }
     int corrections() const { return corrections_; }
@@ -584,21 +604,33 @@ public:
     static constexpr double kForwardPct = 5.0;
     static constexpr double kProbeAmount = 0.2;
     static constexpr double kHeadingPct = 0.01;  // a frame: the throttle simvar heading back to idle
-    static constexpr int kSettleFrames = 30;     // after a toggle: idle this long, or until it shows reverse
-    // The first amount this long without forward thrust, the simvar not rising: the toggle took.
-    // The A380 shows nothing at it: a replay stayed there through the clip's full reverse, its
-    // reversing engines' N1 at idle.
-    static constexpr int kProbeFrames = 30;
+    static constexpr int kHeadingFrames = 6;     // over this many frames (the A380's moves every third)
+    // After a toggle: idle this long, or until it shows reverse. Then the first amount this long
+    // without forward thrust, the simvar not rising: the toggle took. The A380 shows nothing at
+    // either (a replay once stayed at the first amount through the clip's full reverse, its
+    // reversing engines' N1 at idle), so it waited the whole of both: at 30 frames each, its
+    // landing replays' reverse thrust came 1.9 s after the clip's. A toggle it didn't take shows as
+    // forward lever in the throttle simvar within a frame or two of the first amount, long before
+    // the engines answer, so a fraction of that is enough.
+    static constexpr int kSettleFrames = 8;
+    static constexpr int kProbeFrames = 10;
     static constexpr int kIdleFrames = 300;      // the longest wait for the throttle to come back to idle
     static constexpr int kEvidenceFrames = 10;   // the aircraft showing otherwise this long corrects the mode
     static constexpr int kTries = 3;             // toggles each time the clip goes in or out of reverse
+    // How far ahead the clip is looked at: for toggling in at reverse idle before the clip's
+    // reverse (reverseIdleInClip), and for the amount (reverseAmount). The pilot's own toggle comes
+    // before the clip shows reverse: the A380 clip's throttle simvar went from 15.5% to 0 at the
+    // press, and below -1% a second later.
+    static constexpr double kLeadSec = 1.0;
 
 private:
     bool on_ = false;
     bool confirmed_ = false;  // it has shown reverse since the toggle
     bool want_ = false;       // the clip's reverse in the last frame
     Drive last_ = Drive::Forward;
-    double lastThrottle_ = NAN;
+    double recent_[kHeadingFrames] = {};  // the last frames' simvar, a ring
+    int recentCount_ = 0;
+    int recentNext_ = 0;
     int wait_ = 0;
     int idle_ = 0;
     int evidence_ = 0;
@@ -607,6 +639,38 @@ private:
     int toggles_ = 0;
     int corrections_ = 0;
 };
+
+// Whether a clip shows its aircraft at reverse idle, which decides whether a replay may toggle
+// into reverse ahead of the clip's (ReverseToggle::kLeadSec) without that showing. At each of the
+// clip's reverse entries (reversing(), any engine): the reverse amount (the throttle simvar below
+// -kAmountPct, any engine) against the reversers' nozzles (kNozzlePct, any engine), from up to
+// kLookBackSec before the entry. Unseen: the amount came first everywhere, so the toggle alone
+// showed nothing (the A380's, A350's, A340's, A330's and A320neo's landing clips: the nozzles
+// under 2% as the amount began). Seen: somewhere the nozzles came first, together, or without an
+// amount at all. Unknown: an entry with no nozzle values. NoReverse: none in the clip.
+enum class ReverseIdle : uint8_t { NoReverse, Unseen, Seen, Unknown };
+struct ReverseIdleCheck {
+    static constexpr double kAmountPct = 0.5;
+    static constexpr double kNozzlePct = 10.0;
+    static constexpr double kLookBackSec = 3.0;
+};
+ReverseIdle reverseIdleInClip(const std::vector<Frame>& frames, int engines);
+
+// Toggle reverse, once the aircraft is in it: the reverse amount to send, as a fraction of full
+// reverse, for the clip's throttle simvar clipPct here and aheadPct ReverseToggle::kLeadSec
+// later, with the aircraft's at livePct (percent, negative in reverse; lower: full reverse,
+// negative). The clip's simvar trails the pilot's lever, and sent as the lever the aircraft's
+// trails it again: on the A380, which lags about a second, a replay took 4 s from -1% to -17%,
+// the clip 2. So where the aircraft's simvar trails the clip's by more than kPushFrom of full
+// reverse, in the way the clip's is heading, the amount goes toward the clip's kLeadSec on: all
+// the way at kPushBand more. Level with the clip's, or past it, it's the clip's own: an aircraft
+// that keeps up gets just that, and one that lags is pushed only until it reaches the clip's.
+// A frame's own step (the A380's 14% a second at 30 frames a second is 0.02) pushes nothing.
+struct ReversePush {
+    static constexpr double kPushFrom = 0.05;
+    static constexpr double kPushBand = 0.15;
+};
+double reverseAmount(double clipPct, double aheadPct, double livePct, double lower);
 
 // Reverse thrust in a replay on the FSS E-Jets (kLeverInputs in ControlDriver.cpp). Their throttle
 // input event reads the pilot's throttle from idle up, and takes no reverse. A "decrease throttle"

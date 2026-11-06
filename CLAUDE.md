@@ -4,7 +4,7 @@ An auto replay recorder for MSFS 2024: a WASM module (C++) that records the flig
 
 ## Layout
 
-- `src/core/`: plain C++17, no SDK. The channel table (`Channels.cpp`, one row per recorded simvar), ring buffer, event detector, clip format and index, playback controller, control setup and aircraft profiles, and `StickLoop` (steers a fly-by-wire's surfaces by the stick; its fitted A380 figures are in its header); `Engine` ties them together. Built natively for the tests and into the module.
+- `src/core/`: plain C++17, no SDK. The channel table (`Channels.cpp`, one row per recorded simvar), ring buffer, event detector, clip format and index, playback controller, control setup and aircraft profiles, `StickLoop` (steers a fly-by-wire's surfaces by the stick; its defaults are the A380's figures, in its header) and `StickFit` (fits how another aircraft's surface answers the stick; the figures, `stickPlants`, are kept in its profile); `Engine` ties them together. Built natively for the tests and into the module.
 - `src/module/`: the SDK adapter. `SimBridge` (SimConnect, per-frame playback), `ControlDriver` (gear, flaps, spoilers, throttle by the profile's methods), `CommBridge` (the panel's JSON commands over CommBus), `FileStore`, `Log`, and the entry points in `Module.cpp`.
 - `src/panel/`: the toolbar panel. The TypeScript is stripped to JavaScript at build time.
 - `package/`: the package and panel definitions; `package/spb/` caches the compiled panel `.spb`.
@@ -26,7 +26,7 @@ An auto replay recorder for MSFS 2024: a WASM module (C++) that records the flig
 - `betterreplay.log` is this sim session's log (UTC times), `betterreplay.prev.log` the previous session's. Read them when the user has flown, set up or replayed something.
 - Clips are `YYYY-MM-DD_HHMM_<takeoff|landing|manual>.rpl` (UTC), listed in `index.json`. `node tools\rpl-dump.mjs <clip.rpl>` prints one; `--csv <file>` writes every frame, `--cols gs,thr_1 --every 15` picks channels.
 - `aircraft.json` holds the control profiles set up in the sim.
-- `trace_<clip>.csv` is a per-frame replay trace, written only with `kPlaybackTrace = true` in `src/module/SimBridge.h` (rebuild, and set it back after).
+- `trace_<clip>.csv` is a per-frame replay trace, written only with `kPlaybackTrace = true` in `src/module/SimBridge.h` (rebuild, and set it back after). `build\tests\Release\CoreTests.exe --fit-trace <trace.csv>` fits each steered surface from one (`StickFit`), as a replay does.
 
 ## Including an aircraft's profile
 
