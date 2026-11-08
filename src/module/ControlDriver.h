@@ -164,6 +164,7 @@ private:
         GearUpOnGround gearUp;         // key events: the up sent again once off the ground
         JumpFollowCheck jumpCheck;     // key events: a jump's value sent again if not taken
         FlapSteps flapSteps;           // FLAPS_SET / AXIS_FLAPS_SET: a detent at a time
+        bool onePlusF = false;         // and their range by the lever's detents (flapLeverFraction)
         double sent[4] = {NAN, NAN, NAN, NAN};
         int since[4] = {};
         int64_t lastingFromMs[4] = {};  // dueWhenLasting: since when the value has been off what was sent
@@ -236,6 +237,11 @@ private:
     void stepFlaps(Slot& s, double target, bool force);
     // The flap lever as the notches sent left it (FlapNotches), kept across replays.
     FlapNotches notches_;
+    // The last flaps method begun alone (begin: the setup's tries, a profile with one way) wasn't
+    // FLAPS_INCR/DECR. The notches' count is kept from one of their drives to the next, not over
+    // another way's: the FlyByWire A320neo's FLAPS_SET took its flaps back to where the notches had
+    // been, the count took them for there still, and the notches sent nothing (2026-11-08).
+    bool flapsOtherWay_ = false;
     // An event by its number: a position sent when the control's value changes; a toggle or steps
     // one at a time toward the clip's value (EventStepper), as a pilot clicking would.
     void applyEvent(Control c, Slot& s, const Frame& f, bool force);

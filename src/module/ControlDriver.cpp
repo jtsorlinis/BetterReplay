@@ -104,6 +104,11 @@ bool ControlDriver::begin(Control c, const ControlMethod& m, std::string& why) {
     const int i = static_cast<int>(c);
     extra_[i].clear();
     if (c == Control::Spoilers) spoilerCal_ = LeverCalibration();  // set again after, where the profile has one
+    if (c == Control::Flaps) {
+        const bool notches = m.kind == MethodKind::KeyEvent && m.var == kKeyFlapsNotches;
+        if (notches && flapsOtherWay_) notches_.forget();  // from the handle (flapsOtherWay_)
+        flapsOtherWay_ = !notches;
+    }
     ControlProfile one;
     one.method = m;
     picker_[i].begin(c, one);
@@ -252,6 +257,14 @@ bool ControlDriver::beginSlot(Control c, Slot& s, const ControlMethod& m, std::s
             if (c == Control::Flaps && m.var != kKeyFlapsNotches && (!ctx_.flapPositions || *ctx_.flapPositions < 2)) {
                 why = "FLAPS_SET needs the number of flap positions";
                 return false;
+            }
+            if (c == Control::Flaps && m.var != kKeyFlapsNotches) {
+                s.onePlusF = ctx_.aircraftKey && flapsOnePlusF(*ctx_.aircraftKey);
+                if (s.onePlusF) {
+                    log::info("controls: %s by the flap lever's detents: no 1+F detent of its own (CONF 1 and 1+F both "
+                              "its 1)",
+                              m.var == kKeyFlapsAxis ? "AXIS_FLAPS_SET" : "FLAPS_SET");
+                }
             }
             break;
     }
@@ -1084,7 +1097,7 @@ void ControlDriver::applyKeyEvent(Control c, Slot& s, const Frame& f, bool force
                 log::info("controls: flaps a detent at a time (%s): the lever to %.0f (the handle at %.0f, the clip %.0f)",
                           axis ? "AXIS_FLAPS_SET" : "FLAPS_SET", detent, handle, target);
             }
-            const double fraction = detent / positions;
+            const double fraction = flapLeverFraction(detent, positions, s.onePlusF);
             const double value = axis ? std::round(fraction * 32766.0 - 16383.0) : std::round(fraction * 16383.0);
             dueOnChange(s, 0, value, true, 0.0);  // recorded and counted
             keyEvent(axis ? KEY_AXIS_FLAPS_SET : KEY_FLAPS_SET, static_cast<int32_t>(value));

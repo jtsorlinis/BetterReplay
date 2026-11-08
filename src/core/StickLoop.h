@@ -168,6 +168,14 @@ public:
     void forget();
     // After a jump: the surface is somewhere else now, so the stuck check starts again.
     void onJump() { stuckFor_ = 0.0; }
+    // Each frame the replay is held at its start (the flaps or engines getting where the clip has
+    // them): the stuck check waits for the clip to play. Its first frame can be one no stick
+    // reaches: the FlyByWire A380X's takeoff began 0.1 s after its flight loaded, its elevator still
+    // at -20 degrees from the load for 1.5 s. Held there 6 s for the engines, full stick took the
+    // elevator to -15; the loop took that for the stick the wrong way round, found neither way got
+    // there, and left the elevator to the aircraft through the takeoff roll and the rotation
+    // (2026-11-08).
+    void onHold() { stuckFor_ = 0.0; }
 
     // One frame: the clip's surface now, and leadSec ahead with how fast it moves there (degrees,
     // degrees a second), the aircraft's surface (degrees), dt in seconds, whether the aircraft is

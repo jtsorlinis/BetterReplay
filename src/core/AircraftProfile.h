@@ -122,13 +122,44 @@ std::vector<ControlMethod> ownGearWays(const std::string& aircraftKey);
 const char* autothrottleLight(const std::string& aircraftKey);
 // The L:var of the aircraft's own parking brake, for an aircraft whose handle doesn't move the sim's
 // (the Fenix A319/A320/A321's: S_MIP_PARKING_BRAKE, 1 set; BRAKE PARKING POSITION stayed off with
-// it set, so the setup never offered to start). The setup's "parking brake set" goes by it there.
+// it set, so the setup never offered to start; the FlyByWire A320neo's and A380X's
+// A32NX_PARK_BRAKE_LEVER_POS).
+// The setup's "parking brake set" goes by it there.
 // Null for other aircraft. By the key, as autothrottleLight.
 const char* parkingBrakeLVar(const std::string& aircraftKey);
 // Whether the aircraft's flap lever has no detent of its own for CONF 1+F, handle index 2 (the
-// Fenix A319/A320/A321's: its lever has 0, 1, 2, 3 and FULL, its handle index 0 to 5), so FLAPS_INCR
-// doesn't go a handle index at a time (FlapNotches::setOnePlusF). By the key, as autothrottleLight.
+// Fenix A319/A320/A321's and the FlyByWire A320neo's and A380X's: the lever has 0, 1, 2, 3 and
+// FULL, the handle index 0 to 5), so FLAPS_INCR doesn't go a handle index at a time
+// (FlapNotches::setOnePlusF), nor FLAPS_SET's range (flapLeverFraction). By the key, as
+// autothrottleLight.
 bool flapsOnePlusF(const std::string& aircraftKey);
+// The L:var of the aircraft's flap lever, for an aircraft whose FLAPS HANDLE INDEX follows its flaps
+// rather than the lever (the FlyByWire A320neo's and A380X's: A32NX_FLAPS_HANDLE_INDEX, 0 to 4; their
+// systems write the handle index from where the flaps and slats are). On the A380X it showed CONF 2
+// only once the flaps were three quarters of the way there, seconds after the lever, so the setup's
+// replays, which send the clip's handle, sent nothing before they were given up (2026-11-08). The
+// handle index is read from the lever there (flapsHandleFromLever): recorded, and what the setup
+// and replays go by. Null for other aircraft. By the key, as autothrottleLight.
+const char* flapsLeverLVar(const std::string& aircraftKey);
+// The L:var a PlayMode::AircraftLVar channel records on this aircraft: the FlyByWire A380X's wing
+// flex (wflex_l1 .. wflex_r4: A32NX_WING_FLEX_LEFT_INBOARD .. A32NX_WING_FLEX_RIGHT_OUTBOARD). Its
+// wings bend by those, from its own structural model, not by the sim's flex; in a replay that model
+// reads the frozen aircraft's motion (accelerations the sim makes of it, not settable), and its
+// wings were 9.4 off the clip's on average through a takeoff. So they're recorded and written back
+// (SimBridge::rewriteAircraftLVars). Null for other channels and aircraft. By the key, as
+// autothrottleLight.
+const char* aircraftLVar(const std::string& aircraftKey, int channel);
+// That lever's detent (0 to 4) as a handle index on a lever with no 1+F detent (flapsOnePlusF):
+// 0 is 0, 1 is 1+F's 2 (CONF 1 or 1+F, which the aircraft picks: going there a notch from 0 is
+// one notch in the air too), 2 to 4 are CONF 2's 3 to FULL's 5. NaN for NaN.
+double flapsHandleFromLever(double lever);
+// FLAPS_SET's and AXIS_FLAPS_SET's fraction of their range for a handle index: the index over the
+// highest (FLAPS NUM HANDLE POSITIONS). On a lever with no 1+F detent (`onePlusF`), the lever's
+// detent over its highest, CONF 1 and 1+F both its detent 1 (the aircraft picks which): the FlyByWire
+// A320neo's FLAPS_SET for 1+F as 2 of 5 (0.4) put its lever at 2, CONF 2, and its 2 from CONF 2
+// left it there, so the setup's replay moved the flaps out and nothing brought them back
+// (2026-11-08). NaN without positions or an index.
+double flapLeverFraction(double index, int positions, bool onePlusF);
 
 // The flap lever driven with FLAPS_INCR/DECR (kKeyFlapsNotches), like a hardware flap switch: a
 // notch at a time toward the target handle index, going by where the notches sent left the lever.

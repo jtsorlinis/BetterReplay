@@ -189,11 +189,43 @@ struct AircraftLVar {
 const AircraftLVar kAutothrottleLights[] = {{"simobjects/airplanes/e190", "FSS_EXX_FGC_LT_AT"}};
 
 // Parking brakes: the Fenix A319, A320 and A321 are all SimObjects/Airplanes/FNX_32X (the handle's
-// VAR_NAME in its Cockpit_Behavior.xml; GSX's Fenix profile tests the same L:var).
-const AircraftLVar kParkingBrakeLVars[] = {{"simobjects/airplanes/fnx_32x", "S_MIP_PARKING_BRAKE"}};
+// VAR_NAME in its Cockpit_Behavior.xml; GSX's Fenix profile tests the same L:var). The FlyByWire
+// A320neo's systems take PARKING_BRAKES/PARKING_BRAKE_SET into A32NX_PARK_BRAKE_LEVER_POS (1 set in
+// the sim's log with the handle set; the setup never saw it set by the simvar), and the FlyByWire
+// A380X's the same (its handle's PARKING_BRAKES and animation in A32NX_Interior_Handling.xml; 1 in the
+// sim's log once it loaded, braked; the setup never offered to start).
+const AircraftLVar kParkingBrakeLVars[] = {{"simobjects/airplanes/fnx_32x", "S_MIP_PARKING_BRAKE"},
+                                           {"simobjects/airplanes/flybywire_a320_neo", "A32NX_PARK_BRAKE_LEVER_POS"},
+                                           {"simobjects/airplanes/flybywire_a380x", "A32NX_PARK_BRAKE_LEVER_POS"}};
 
-// Flap levers with no detent for 1+F: the Fenix A319, A320 and A321 (FNX_32X).
-const char* const kFlapsOnePlusF[] = {"simobjects/airplanes/fnx_32x"};
+// Flap levers with no detent for 1+F: the Fenix A319, A320 and A321 (FNX_32X), and the FlyByWire
+// A320neo (its A32NX_FLAPS_HANDLE_INDEX 1, the handle index 2 at 1+F on the ground) and A380X (the
+// same lever, A32NX_FLAPS_HANDLE_INDEX over 4, by FLAPS_INCR/DECR; flaps-position.2 its CONF 1+F).
+const char* const kFlapsOnePlusF[] = {"simobjects/airplanes/fnx_32x", "simobjects/airplanes/flybywire_a320_neo",
+                                      "simobjects/airplanes/flybywire_a380x"};
+
+// Flap levers of their own: the FlyByWire A320neo's and A380X's systems (their flaps.rs) take
+// FLAPS_INCR/DECR, FLAPS_SET and AXIS_FLAPS_SET into A32NX_FLAPS_HANDLE_INDEX, 0 to 4, and write
+// FLAPS HANDLE INDEX from where the flaps and slats are.
+const AircraftLVar kFlapsLeverLVars[] = {{"simobjects/airplanes/flybywire_a320_neo", "A32NX_FLAPS_HANDLE_INDEX"},
+                                         {"simobjects/airplanes/flybywire_a380x", "A32NX_FLAPS_HANDLE_INDEX"}};
+
+// Wing flex: the FlyByWire A380X's wings bend by A32NX_WING_FLEX_LEFT/RIGHT_INBOARD, _INBOARD_MID,
+// _OUTBOARD_MID and _OUTBOARD (the ANIM_CODE of its A380_WINGS.xml), which its systems work out from
+// their own structural model; its flight_model.cfg's wing flex is for collisions. In the order of
+// the wflex_ channels, inboard first.
+struct AircraftLVars {
+    const char* key;
+    int first;  // the first channel
+    const char* lvars[8];
+};
+const AircraftLVars kAircraftLVars[] = {
+    {"simobjects/airplanes/flybywire_a380x",
+     kWingFlexLeft1,
+     {"A32NX_WING_FLEX_LEFT_INBOARD", "A32NX_WING_FLEX_LEFT_INBOARD_MID", "A32NX_WING_FLEX_LEFT_OUTBOARD_MID",
+      "A32NX_WING_FLEX_LEFT_OUTBOARD", "A32NX_WING_FLEX_RIGHT_INBOARD", "A32NX_WING_FLEX_RIGHT_INBOARD_MID",
+      "A32NX_WING_FLEX_RIGHT_OUTBOARD_MID", "A32NX_WING_FLEX_RIGHT_OUTBOARD"}},
+};
 
 template <size_t N>
 const char* lvarFor(const AircraftLVar (&table)[N], const std::string& aircraftKey) {
@@ -209,11 +241,35 @@ const char* autothrottleLight(const std::string& aircraftKey) { return lvarFor(k
 
 const char* parkingBrakeLVar(const std::string& aircraftKey) { return lvarFor(kParkingBrakeLVars, aircraftKey); }
 
+const char* flapsLeverLVar(const std::string& aircraftKey) { return lvarFor(kFlapsLeverLVars, aircraftKey); }
+
+const char* aircraftLVar(const std::string& aircraftKey, int channel) {
+    if (channel < 0 || channel >= kChannelCount || kChannels[channel].play != PlayMode::AircraftLVar) return nullptr;
+    for (const AircraftLVars& a : kAircraftLVars) {
+        const int i = channel - a.first;
+        if (aircraftKey == a.key && i >= 0 && i < 8) return a.lvars[i];
+    }
+    return nullptr;
+}
+
+double flapsHandleFromLever(double lever) {
+    if (!std::isfinite(lever)) return NAN;
+    const double d = std::min(std::max(std::round(lever), 0.0), 4.0);
+    return d < 0.5 ? 0.0 : d + 1.0;
+}
+
 bool flapsOnePlusF(const std::string& aircraftKey) {
     for (const char* key : kFlapsOnePlusF) {
         if (aircraftKey == key) return true;
     }
     return false;
+}
+
+double flapLeverFraction(double index, int positions, bool onePlusF) {
+    if (positions < 1 || !std::isfinite(index)) return NAN;
+    const double i = std::min(std::max(std::round(index), 0.0), static_cast<double>(positions));
+    if (!onePlusF || positions < 3) return i / positions;
+    return (i <= 1.0 ? i : i - 1.0) / (positions - 1);
 }
 
 namespace {

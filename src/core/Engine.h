@@ -99,7 +99,7 @@ public:
 struct EngineConfig {
     DetectorConfig detector;
     double sampleRateHz = 30.0;
-    double bufferSeconds = 600.0;  // about 12 MB of frames
+    double bufferSeconds = 600.0;  // about 14 MB of frames
     size_t maxAutoClipsPerAircraft = 10;  // newest takeoff/landing clips kept of each; manual saves are never auto-deleted
     double maxFrameDtSec = 0.5;  // longer gaps (hitches, loading) are clamped
     // After Stop, the longest the aircraft stays frozen settling (the panel counts it down). The

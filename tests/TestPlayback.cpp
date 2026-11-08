@@ -1293,9 +1293,48 @@ TEST(Playback_ParkingBrakeLVarOnlyOnItsAircraft) {
         REQUIRE(name != nullptr);
         CHECK_EQ(std::string(name), std::string("S_MIP_PARKING_BRAKE"));
     }
+    // The FlyByWire A320neo's and A380X's lever; not the iniBuilds A380.
+    for (const char* path : {"simobjects/airplanes/flybywire_a320_neo/aircraft.cfg",
+                             "simobjects/airplanes/flybywire_a380x/presets/flybywire/flybywire_a380_842_nocabin/config/"
+                             "aircraft.cfg"}) {
+        const char* fbw = parkingBrakeLVar(aircraftFamily(path));
+        REQUIRE(fbw != nullptr);
+        CHECK_EQ(std::string(fbw), std::string("A32NX_PARK_BRAKE_LEVER_POS"));
+    }
+    CHECK(parkingBrakeLVar("title:Airbus A320neo FlyByWire") == nullptr);
+    CHECK(parkingBrakeLVar("title:FlyByWire A380X (A380-842) No Cabin") == nullptr);
+    CHECK(parkingBrakeLVar(aircraftFamily("simobjects/airplanes/inibuilds-a380")) == nullptr);
     CHECK(parkingBrakeLVar(aircraftFamily("simobjects/airplanes/microsoft-a320neo")) == nullptr);
     CHECK(parkingBrakeLVar(aircraftFamily("simobjects/airplanes/e190")) == nullptr);
     CHECK(parkingBrakeLVar("title:FenixA320 CFM SL") == nullptr);
     CHECK(parkingBrakeLVar("") == nullptr);
     CHECK(autothrottleLight(aircraftFamily("simobjects/airplanes/fnx_32x")) == nullptr);
+}
+
+TEST(Playback_WingFlexLVarsOnlyOnTheFlyByWireA380X) {
+    // Its wings bend by its own L:vars, four a side, inboard first, in the wflex_ channels' order.
+    const std::string a380x = aircraftFamily(
+        "simobjects/airplanes/flybywire_a380x/presets/flybywire/flybywire_a380_842_nocabin/config/aircraft.cfg");
+    const char* const want[] = {"A32NX_WING_FLEX_LEFT_INBOARD",       "A32NX_WING_FLEX_LEFT_INBOARD_MID",
+                                "A32NX_WING_FLEX_LEFT_OUTBOARD_MID",  "A32NX_WING_FLEX_LEFT_OUTBOARD",
+                                "A32NX_WING_FLEX_RIGHT_INBOARD",      "A32NX_WING_FLEX_RIGHT_INBOARD_MID",
+                                "A32NX_WING_FLEX_RIGHT_OUTBOARD_MID", "A32NX_WING_FLEX_RIGHT_OUTBOARD"};
+    for (int i = 0; i < 8; ++i) {
+        const int c = kWingFlexLeft1 + i;
+        CHECK(kChannels[c].play == PlayMode::AircraftLVar);
+        const char* name = aircraftLVar(a380x, c);
+        REQUIRE(name != nullptr);
+        CHECK_EQ(std::string(name), std::string(want[i]));
+    }
+    CHECK_EQ(std::string(kChannels[kWingFlexLeft1].key), std::string("wflex_l1"));
+    CHECK_EQ(std::string(kChannels[kWingFlexRight4].key), std::string("wflex_r4"));
+    // Only its channels; not the iniBuilds A380 nor the FlyByWire A320neo, nor before the path is known.
+    CHECK(aircraftLVar(a380x, kElevator) == nullptr);
+    CHECK(aircraftLVar(a380x, kLVarFlaps) == nullptr);
+    CHECK(aircraftLVar(a380x, -1) == nullptr);
+    CHECK(aircraftLVar(a380x, kChannelCount) == nullptr);
+    CHECK(aircraftLVar(aircraftFamily("simobjects/airplanes/inibuilds-a380"), kWingFlexLeft1) == nullptr);
+    CHECK(aircraftLVar(aircraftFamily("simobjects/airplanes/flybywire_a320_neo/aircraft.cfg"), kWingFlexLeft1) == nullptr);
+    CHECK(aircraftLVar("title:FlyByWire A380X (A380-842) No Cabin", kWingFlexLeft1) == nullptr);
+    CHECK(aircraftLVar("", kWingFlexLeft1) == nullptr);
 }

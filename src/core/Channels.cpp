@@ -18,6 +18,7 @@ constexpr PlayMode EVT = PlayMode::Event;
 constexpr PlayMode SNAP = PlayMode::Snap;
 constexpr PlayMode INPUT = PlayMode::Input;
 constexpr PlayMode LVAR = PlayMode::LVar;
+constexpr PlayMode AIRLVAR = PlayMode::AircraftLVar;
 }  // namespace
 
 // Names, units and settable flags verified against the MSFS 2024 SimVar documentation.
@@ -154,6 +155,18 @@ const ChannelDef kChannels[kChannelCount] = {
     // A220's notch 1 is slats 21 degrees, flaps 0, so the trailing edge alone didn't show the control
     // setup it. The setup counts them with the flaps. Recorded only.
     {"slat_l", "LEADING EDGE FLAPS LEFT PERCENT", "percent over 100", F32, LIN, NONE, nullptr},
+    // Wing flex an aircraft works out itself rather than taking the sim's: the FlyByWire A380X's
+    // wings bend by four L:vars a side, from its own structural model, which in a replay reads the
+    // frozen aircraft's motion, not the clip's (aircraftLVar names them). Recorded and written back
+    // every frame there; NaN everywhere else.
+    {"wflex_l1", nullptr, nullptr, F32, LIN, AIRLVAR, nullptr},
+    {"wflex_l2", nullptr, nullptr, F32, LIN, AIRLVAR, nullptr},
+    {"wflex_l3", nullptr, nullptr, F32, LIN, AIRLVAR, nullptr},
+    {"wflex_l4", nullptr, nullptr, F32, LIN, AIRLVAR, nullptr},
+    {"wflex_r1", nullptr, nullptr, F32, LIN, AIRLVAR, nullptr},
+    {"wflex_r2", nullptr, nullptr, F32, LIN, AIRLVAR, nullptr},
+    {"wflex_r3", nullptr, nullptr, F32, LIN, AIRLVAR, nullptr},
+    {"wflex_r4", nullptr, nullptr, F32, LIN, AIRLVAR, nullptr},
 };
 
 int findChannel(const char* key) {

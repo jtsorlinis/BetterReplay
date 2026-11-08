@@ -30,6 +30,9 @@ enum class PlayMode : uint8_t {
                 // recorded from it and set back with SimConnect_SetInputEvent
     LVar = 5,   // an aircraft L:var named by the aircraft's control profile (AircraftProfile.h):
                 // recorded and replayed only on aircraft whose setup chose it
+    AircraftLVar = 6,  // an L:var the aircraft animates something by, named by its key
+                       // (AircraftProfile.h's aircraftLVar): recorded, and written every playback
+                       // frame, only on that aircraft
 };
 
 struct ChannelDef {
@@ -140,6 +143,14 @@ enum Channel : uint16_t {
     kEngineN2_4,
     kParkingBrake,
     kSlatsLeft,
+    kWingFlexLeft1,  // wing flex, 1 inboard .. 4 outboard (PlayMode::AircraftLVar)
+    kWingFlexLeft2,
+    kWingFlexLeft3,
+    kWingFlexLeft4,
+    kWingFlexRight1,
+    kWingFlexRight2,
+    kWingFlexRight3,
+    kWingFlexRight4,
     kChannelCount
 };
 

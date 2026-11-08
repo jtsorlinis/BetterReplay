@@ -4407,15 +4407,77 @@ TEST(Playback_FlapNotchesGoByAHandleThePilotMoved) {
     CHECK_EQ(ac.moves.back().second, 3.0);
 }
 
-TEST(Playback_FlapsOnePlusFOnlyOnTheFenix) {
+TEST(Playback_FlapsOnePlusFOnlyOnTheFenixAndTheFlyByWire) {
     for (const char* path : {"simobjects/airplanes/fnx_32x/presets/fnx/fnx_320_cfm_sl/config/aircraft.cfg",
-                             "simobjects/airplanes/fnx_32x/presets/fnx/fnx_321_iae_sl/config/aircraft.cfg"}) {
+                             "simobjects/airplanes/fnx_32x/presets/fnx/fnx_321_iae_sl/config/aircraft.cfg",
+                             "simobjects/airplanes/flybywire_a320_neo/aircraft.cfg",
+                             "simobjects/airplanes/flybywire_a380x/presets/flybywire/flybywire_a380_842/config/"
+                             "aircraft.cfg"}) {
         CHECK(flapsOnePlusF(aircraftFamily(path)));
     }
+    CHECK(!flapsOnePlusF(aircraftFamily("simobjects/airplanes/inibuilds-a380")));
     CHECK(!flapsOnePlusF(aircraftFamily("simobjects/airplanes/microsoft-a320neo")));
     CHECK(!flapsOnePlusF(aircraftFamily("simobjects/airplanes/pmdg 777-300er")));
+    CHECK(!flapsOnePlusF(aircraftFamily("simobjects/airplanes/a350")));
     CHECK(!flapsOnePlusF("title:FenixA320 CFM SL"));
+    CHECK(!flapsOnePlusF("title:Airbus A320neo FlyByWire"));
     CHECK(!flapsOnePlusF(""));
+}
+
+TEST(Playback_FlapsSetByTheLeversDetents) {
+    // Other aircraft: the handle index over the highest, as before (the A320neo V2's 1+F is 2 of 5).
+    for (int i = 0; i <= 5; ++i) CHECK_NEAR(flapLeverFraction(i, 5, false), i / 5.0, 1e-12);
+    CHECK_NEAR(flapLeverFraction(2, 4, false), 0.5, 1e-12);  // the A350's 2 of 4
+    // A lever with no 1+F detent (the FlyByWire A320neo's): 0, 1, 2, 3, FULL a quarter apart, CONF 1
+    // and 1+F both at 1. Its FLAPS_SET for 1+F had been 0.4, which it took as its lever's 2.
+    const double lever[] = {0.0, 0.25, 0.25, 0.5, 0.75, 1.0};
+    for (int i = 0; i <= 5; ++i) CHECK_NEAR(flapLeverFraction(i, 5, true), lever[i], 1e-12);
+    // Out of range clamps; no positions or no index is NaN.
+    CHECK_NEAR(flapLeverFraction(7, 5, true), 1.0, 1e-12);
+    CHECK_NEAR(flapLeverFraction(-1, 5, true), 0.0, 1e-12);
+    CHECK(std::isnan(flapLeverFraction(2, 0, true)));
+    CHECK(std::isnan(flapLeverFraction(NAN, 5, true)));
+}
+
+TEST(Playback_FlapsHandleFromTheFlyByWiresLever) {
+    // The FlyByWire A320neo's and A380X's FLAPS HANDLE INDEX follows their flaps; their lever is
+    // A32NX_FLAPS_HANDLE_INDEX. Not the Fenix's (its handle index is the lever's), nor the iniBuilds
+    // A380's, nor a key from the title.
+    for (const char* path : {"simobjects/airplanes/flybywire_a320_neo/aircraft.cfg",
+                             "simobjects/airplanes/flybywire_a380x/presets/flybywire/flybywire_a380_842_nocabin/config/"
+                             "aircraft.cfg"}) {
+        const char* name = flapsLeverLVar(aircraftFamily(path));
+        REQUIRE(name != nullptr);
+        CHECK_EQ(std::string(name), std::string("A32NX_FLAPS_HANDLE_INDEX"));
+        CHECK(flapsOnePlusF(aircraftFamily(path)));  // the handle index it gives is on that scale
+    }
+    CHECK(flapsLeverLVar(aircraftFamily("simobjects/airplanes/fnx_32x/presets/fnx/fnx_320_cfm_sl/config/aircraft.cfg")) ==
+          nullptr);
+    CHECK(flapsLeverLVar(aircraftFamily("simobjects/airplanes/inibuilds-a380")) == nullptr);
+    CHECK(flapsLeverLVar("title:FlyByWire A380X (A380-842) No Cabin") == nullptr);
+    // The lever's 0, 1, 2, 3 and FULL as the handle index: 1 is 1+F's 2, then CONF 2 to FULL.
+    const double index[] = {0.0, 2.0, 3.0, 4.0, 5.0};
+    for (int d = 0; d <= 4; ++d) CHECK_EQ(flapsHandleFromLever(d), index[d]);
+    CHECK_EQ(flapsHandleFromLever(5.0), 5.0);
+    CHECK_EQ(flapsHandleFromLever(-1.0), 0.0);
+    CHECK(std::isnan(flapsHandleFromLever(NAN)));
+    // FLAPS_SET then sends the lever's own detent: 1+F, CONF 2 and FULL as 0.25, 0.5 and 1.
+    for (int d = 0; d <= 4; ++d) CHECK_NEAR(flapLeverFraction(flapsHandleFromLever(d), 5, true), d / 4.0, 1e-12);
+    // And the notches from 0 to the lever's 1 are one, in the air (CONF 1) as on the ground (1+F),
+    // the handle going there with the lever.
+    for (bool ground : {false, true}) {
+        FlapNotches n;
+        n.setOnePlusF(true);
+        n.begin(0);
+        double handle = 0.0;
+        int notches = 0;
+        for (int i = 0; i < 60 * 5; ++i) {
+            const int dir = n.step(flapsHandleFromLever(1.0), handle, frameMs(i), false, ground);
+            notches += dir;
+            if (dir != 0) handle = flapsHandleFromLever(notches);
+        }
+        CHECK_EQ(notches, 1);
+    }
 }
 
 TEST(Playback_FlapsSetGoesADetentAtATime) {

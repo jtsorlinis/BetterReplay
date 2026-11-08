@@ -127,6 +127,8 @@ bool SimBridge::open() {
         ieValue_[c] = NAN;
         ieSetId_[c] = FS_VAR_INVALID_ID;
         lvId_[c] = FS_VAR_INVALID_ID;
+        alId_[c] = FS_VAR_INVALID_ID;
+        alWant_[c] = alWritten_[c] = NAN;
         if (!ch.simvar) continue;
         recordChannels_[recordCount_++] = c;
         track(SimConnect_AddToDataDefinition(h_, DEF_RECORD, ch.simvar, ch.units, SIMCONNECT_DATATYPE_FLOAT64),
@@ -611,6 +613,7 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
             input_.raw.v[c] = lv;
         }
     }
+    readAircraftLVars();
     for (int e = 0; e < 4; ++e) input_.raw.v[kThrottleAxis1 + e] = e < numEngines_ ? throttleAxis_[e] : NAN;
     const double* ex = v + recordCount_;
     input_.simTimeSec = ex[kExSimTime];
@@ -640,6 +643,10 @@ void SimBridge::onRecordData(const SIMCONNECT_RECV_SIMOBJECT_DATA* d, DWORD size
     // On an aircraft with its own handle (the Fenix's), the handle is the channel: recorded, kept in
     // the snapshot and checked against the clip's.
     if (pbLVar_ != FS_VAR_INVALID_ID) input_.raw.v[kParkingBrake] = facts.parkingBrake ? 1.0 : 0.0;
+    // On an aircraft whose handle index follows its flaps (the FlyByWire's), the handle index is its
+    // lever's: recorded, and what the setup and the flaps' key events go by.
+    const double flapLever = flapsLever();
+    if (std::isfinite(flapLever)) input_.raw.v[kFlapsHandleIndex] = flapsHandleFromLever(flapLever);
     facts.onRunway = ex[kExOnRunway] >= 0.5;
     facts.engineRunning = false;
     for (int e = 0; e < 4 && e < numEngines_; ++e) facts.engineRunning |= ex[kExCombustion1 + e] >= 0.5;
@@ -960,6 +967,7 @@ double SimBridge::liveBeta() {
 void SimBridge::driveStick(int axis, const Frame& frame, bool jumped) {
     StickAxis& a = stick_[axis];
     if (jumped) a.loop.onJump();
+    if (settling_) a.loop.onHold();  // (held at the start: the clip's first frame)
     // A step for each new reading of the aircraft's surface (none while the sim's paused).
     if (frameCount_ != a.dataFrame) {
         a.dataFrame = frameCount_;
@@ -1236,6 +1244,18 @@ void SimBridge::logOverrides() {
     }
     if (followed[0]) log::info("playback: input events followed the clip: %s", followed);
     if (yieldedCount_ > 0) log::info("playback: %d channel(s) were left to the aircraft (see above)", yieldedCount_);
+    if (alChecks_[kPhaseStart] + alChecks_[kPhaseSystems] + alChecks_[kPhaseEnd] > 0) {
+        // Where the aircraft writes its own: since the last frame's end (its draw), since this
+        // frame's start (the sim's physics and systems), since the systems (the late update).
+        const auto pct = [&](int p) { return alChecks_[p] > 0 ? alOver_[p] * 100 / alChecks_[p] : -1; };
+        const auto avg = [&](int p) { return alOver_[p] > 0 ? alOverSum_[p] / alOver_[p] : 0.0; };
+        log::info("playback: the aircraft's own animation L:vars (wing flex) written from the clip at each frame's "
+                  "start, after its systems and at its end; the aircraft had written its own over them by the start "
+                  "(since the last frame's draw) in %d%% of %d (%.3f off), by the systems in %d%% of %d (%.3f off), "
+                  "by the end in %d%% of %d (%.3f off)",
+                  pct(kPhaseStart), alChecks_[kPhaseStart], avg(kPhaseStart), pct(kPhaseSystems),
+                  alChecks_[kPhaseSystems], avg(kPhaseSystems), pct(kPhaseEnd), alChecks_[kPhaseEnd], avg(kPhaseEnd));
+    }
     if (throttleViaEvents_ && clipHasThrottle_ && throttleCheckedFrames_ >= 30) {
         const int pct = throttleOffFrames_ * 100 / throttleCheckedFrames_;
         if (pct >= 20) {
@@ -1377,6 +1397,11 @@ void SimBridge::beginPlayback(const Clip& clip, const Frame& peak) {
     playPresent_ = present;
     playSkip_.reset();
     yieldedCount_ = 0;
+    for (int p = 0; p < kFramePhaseCount; ++p) {
+        alChecks_[p] = alOver_[p] = 0;
+        alOverSum_[p] = 0.0;
+    }
+    for (int c = 0; c < kChannelCount; ++c) alWant_[c] = alWritten_[c] = NAN;
 
     // Controls the aircraft's profile drives: its method, through the driver, instead of the
     // defaults below (or nothing, if the setup found no way). Their channels are left alone here.
@@ -2265,6 +2290,7 @@ void SimBridge::writePlaybackFrame(const Frame& frame, bool jumped) {
     for (int i = 0; i < kStickAxisCount; ++i) {
         if (stick_[i].on) driveStick(i, frame, jumped);
     }
+    writeAircraftLVars(frame);
     if (playChannelCount_ == 0 && directChannelCount_ == 0) return;
     if (!jumped && haveWritten_) checkRotationScale();
     if (jumped) directSkip_ = kDirectSkipFrames;
@@ -2584,6 +2610,8 @@ void SimBridge::tracePlayback() {
 
 namespace {
 const int kTraceWritten[] = {kVelBodyX, kVelBodyY, kVelBodyZ, kRotVelBodyX, kRotVelBodyY, kRotVelBodyZ, kAlt, kPitch};
+const int kTraceFlex[] = {kWingFlexLeft1,  kWingFlexLeft2,  kWingFlexLeft3,  kWingFlexLeft4,
+                          kWingFlexRight1, kWingFlexRight2, kWingFlexRight3, kWingFlexRight4};
 }  // namespace
 
 void SimBridge::traceOpen() {
@@ -2619,8 +2647,23 @@ void SimBridge::traceOpen() {
                "L:RUDDER_ANGLE_ANIM,elev_hold,elev_ff,ail_hold,ail_ff,rud_hold,rud_ff,lv_thr_1_clip,lv_thr_1_live,"
                "rnoz_1_clip,rnoz_1_live,rnoz_2_clip,rnoz_2_live,rev_1_live,thr_2_clip,elev_damp,ail_damp,rud_damp,"
                "elev_gain,ail_gain,rud_gain,elev_lead,ail_lead,rud_lead,gear_h_clip,gear_live,spoil_h_clip,"
-               "spoil_h_live,spoil_sent,pbrake_clip,pbrake_live,rud_still\n",
+               "spoil_h_live,spoil_sent,pbrake_clip,pbrake_live,rud_still",
                trace_);
+    for (int c : kTraceFlex) std::fprintf(trace_, ",%s_clip,%s_live", kChannels[c].key, kChannels[c].key);
+    std::fputs(",acc_x_live,acc_y_live,acc_z_live,racc_x_live,racc_y_live,racc_z_live,"
+               "L:A32NX_GROUND_WEIGHT_ON_WHEELS_RATIO\n",
+               trace_);
+    traceWeightOnWheels_ = fsVarsGetLVarId("A32NX_GROUND_WEIGHT_ON_WHEELS_RATIO");
+    // The accelerations the FlyByWire A380X's structural model reads, its wings' flex among them (its
+    // systems.wasm asks for these with the body velocities). The linear ones aren't settable: in a
+    // replay they're what the sim's physics makes of the frozen aircraft. The clip's follow from its
+    // velocities.
+    static const char* const kTraceAccels[kTraceAccelCount] = {
+        "ACCELERATION BODY X",          "ACCELERATION BODY Y",          "ACCELERATION BODY Z",
+        "ROTATION ACCELERATION BODY X", "ROTATION ACCELERATION BODY Y", "ROTATION ACCELERATION BODY Z"};
+    for (int i = 0; i < kTraceAccelCount; ++i) traceAccel_[i] = fsVarsGetAVarId(kTraceAccels[i]);
+    traceFtPerSec2Unit_ = fsVarsGetUnitId("feet per second squared");
+    traceRadPerSec2Unit_ = fsVarsGetUnitId("radians per second squared");
     static const char* kTraceLVars[kTraceLVarCount] = {
         "CAPT_SIDESTICK_PITCH", "FBW_ELEV_OUTPUT",  "FBW_VERTICAL_FLIGHT_MODE_RATIO", "ELEVATORS_HSTAB_1_ANIMATION",
         "CAPT_SIDESTICK_ROLL",  "FBW_ROLL_OUTPUT",  "LEFT_AILERON_ANIMATION",         "INI_RUDDER_PEDAL_POSITION",
@@ -2709,7 +2752,27 @@ void SimBridge::traceRow(const Frame& frame, bool jumped) {
                  frame.v[kSpoilersHandle], live[kSpoilersHandle], driver_.lastSent(Control::Spoilers, 0),
                  frame.v[kParkingBrake], live[kParkingBrake]);
     // The pedals centred where the clip's rudder sits still at 0.
-    std::fprintf(trace_, ",%d\n", yaw.stillNow ? 1 : 0);
+    std::fprintf(trace_, ",%d", yaw.stillNow ? 1 : 0);
+    // The aircraft's own wing flex, the clip's and the aircraft's (as read at this data frame, before
+    // this frame's write); the accelerations its structural model reads, as the aircraft has them
+    // now; and its weight on the wheels (the FlyByWire A380X's; NaN elsewhere).
+    for (int c : kTraceFlex) std::fprintf(trace_, ",%.4f,%.4f", frame.v[c], live[c]);
+    for (int i = 0; i < kTraceAccelCount; ++i) {
+        double a = NAN;
+        const FsUnitId unit = i < 3 ? traceFtPerSec2Unit_ : traceRadPerSec2Unit_;
+        FsVarParamArray none = {};
+        if (traceAccel_[i] == FS_VAR_INVALID_ID || unit == FS_INVALID_UNIT ||
+            fsVarsAVarGet(traceAccel_[i], unit, none, &a) != FS_VAR_ERROR_NONE) {
+            a = NAN;
+        }
+        std::fprintf(trace_, ",%.4f", a);
+    }
+    double wow = NAN;
+    if (traceWeightOnWheels_ != FS_VAR_INVALID_ID &&
+        fsVarsLVarGet(traceWeightOnWheels_, numberUnit_, &wow) != FS_VAR_ERROR_NONE) {
+        wow = NAN;
+    }
+    std::fprintf(trace_, ",%.3f\n", wow);
     traceSends_ = sends;
     ++traceRows_;
 }
@@ -3115,6 +3178,99 @@ bool SimBridge::parkingBrakeSet(double simvar) {
         return v >= 0.5;
     }
     return simvar >= 0.5;
+}
+
+double SimBridge::flapsLever() {
+    const std::string& key = engine_.aircraftKey();
+    if (key != flKey_) {
+        flKey_ = key;
+        flName_ = flapsLeverLVar(key);
+        flLVar_ = FS_VAR_INVALID_ID;
+        flLookupFrames_ = 0;
+    }
+    if (flName_ && flLVar_ == FS_VAR_INVALID_ID && --flLookupFrames_ <= 0) {
+        flLookupFrames_ = 60;
+        flLVar_ = fsVarsGetLVarId(flName_);
+        if (flLVar_ != FS_VAR_INVALID_ID) {
+            log::info("flaps: the handle index from the lever, L:%s, on this aircraft, not the simvar (its flaps')",
+                      flName_);
+        }
+    }
+    double v = NAN;
+    if (flLVar_ == FS_VAR_INVALID_ID || fsVarsLVarGet(flLVar_, numberUnit_, &v) != FS_VAR_ERROR_NONE) return NAN;
+    return v;
+}
+
+// The aircraft's own animation L:vars (aircraftLVar) into their channels, NaN where it has none or
+// hasn't registered one yet (looked up again every 60 frames until then).
+void SimBridge::readAircraftLVars() {
+    const std::string& key = engine_.aircraftKey();
+    if (key != alKey_) {
+        alKey_ = key;
+        alLookupFrames_ = 0;
+        for (int c = 0; c < kChannelCount; ++c) {
+            if (kChannels[c].play != PlayMode::AircraftLVar) continue;
+            alId_[c] = FS_VAR_INVALID_ID;
+            engine_.setChannelVar(c, std::string());
+        }
+    }
+    if (--alLookupFrames_ <= 0) {
+        alLookupFrames_ = 60;
+        int found = 0;
+        const char* first = nullptr;
+        for (int c = 0; c < kChannelCount; ++c) {
+            const char* name = aircraftLVar(key, c);
+            if (!name || alId_[c] != FS_VAR_INVALID_ID) continue;
+            alId_[c] = fsVarsGetLVarId(name);
+            if (alId_[c] == FS_VAR_INVALID_ID) continue;
+            engine_.setChannelVar(c, name);
+            if (found++ == 0) first = name;
+        }
+        if (found > 0) {
+            log::info("recording %d of the aircraft's own animation L:var(s) (L:%s first); written back in replays",
+                      found, first);
+        }
+    }
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (kChannels[c].play != PlayMode::AircraftLVar) continue;
+        double v = NAN;
+        if (alId_[c] != FS_VAR_INVALID_ID && fsVarsLVarGet(alId_[c], numberUnit_, &v) != FS_VAR_ERROR_NONE) v = NAN;
+        input_.raw.v[c] = v;
+    }
+}
+
+// This replay frame's values, where the aircraft has them and the clip recorded them, written after
+// the sim's systems and held to the frame's end and the next one's start (rewriteAircraftLVars).
+void SimBridge::writeAircraftLVars(const Frame& frame) {
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (kChannels[c].play != PlayMode::AircraftLVar) continue;
+        const bool have = alId_[c] != FS_VAR_INVALID_ID && playPresent_.test(static_cast<size_t>(c));
+        alWant_[c] = have && std::isfinite(frame.v[c]) ? frame.v[c] : NAN;
+    }
+    rewriteAircraftLVars(kPhaseSystems);
+}
+
+// The clip's values written again at this point of the frame; first, whether the aircraft has
+// written its own over the last ones since (alOver_).
+void SimBridge::rewriteAircraftLVars(int phase) {
+    if (!playing_ || phase < 0 || phase >= kFramePhaseCount) return;
+    for (int c = 0; c < kChannelCount; ++c) {
+        if (kChannels[c].play != PlayMode::AircraftLVar || alId_[c] == FS_VAR_INVALID_ID || !std::isfinite(alWant_[c])) {
+            continue;
+        }
+        double live = NAN;
+        if (std::isfinite(alWritten_[c]) && fsVarsLVarGet(alId_[c], numberUnit_, &live) == FS_VAR_ERROR_NONE &&
+            std::isfinite(live)) {
+            ++alChecks_[phase];
+            const double off = std::fabs(live - alWritten_[c]);
+            if (off > 1e-6) {
+                ++alOver_[phase];
+                alOverSum_[phase] += off;
+            }
+        }
+        fsVarsLVarSet(alId_[c], numberUnit_, alWant_[c]);
+        alWritten_[c] = alWant_[c];
+    }
 }
 
 // The gear step on the ground: the aircraft straight up from where it stands, its heading and

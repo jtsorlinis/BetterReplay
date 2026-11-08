@@ -1,4 +1,5 @@
 #include <cmath>
+#include <tuple>
 #include <vector>
 
 #include "StickLoop.h"
@@ -424,6 +425,46 @@ TEST(StickLoop_AReplayAfterAFailureStartsTheFirstWayRound) {
     CHECK_EQ(next.fails, 0);
     CHECK_EQ(loop.sign(), 1);
     CHECK(next.worst < 2.0);
+}
+
+// The FlyByWire A380X's takeoff: the clip's first 1.5 s have the elevator at -20 degrees (just after
+// its flight loaded), where full stick on the ground takes it to -15. The replay held there 6 s for
+// the engines; the loop took the elevator stopped short for the stick the wrong way round, tried the
+// other way, and gave up on it for the whole takeoff. Held at the start, the stuck check waits; the
+// clip then plays its 1.5 s there and on, and the stick steers it.
+TEST(StickLoop_WaitsWhileTheReplayIsHeldAtTheStart) {
+    const auto clip = [](double t) { return t < 1.5 ? -20.0 : 0.0; };
+    const auto run = [&](bool held) {
+        A380Pitch a;
+        a.direct = true;
+        a.surface = 0.0;
+        StickLoop loop(StickLoopConfig::elevator());
+        int flips = 0;
+        int fails = 0;
+        const auto frame = [&](double target) {
+            a.step(loop.update(target, target, 0.0, a.surface, kDt, true, a.reads()), kDt);
+            a.surface = std::fmax(a.surface, -15.0);  // its stop, nose-down
+            const StickLoop::Event e = loop.takeEvent();
+            flips += e == StickLoop::Event::Flipped;
+            fails += e == StickLoop::Event::Failed;
+        };
+        for (int i = 0; i < 30 * 6; ++i) {  // held at the clip's first frame
+            if (held) loop.onHold();
+            frame(clip(0.0));
+        }
+        for (int i = 0; i < 30 * 10; ++i) frame(clip(i * kDt));  // the clip plays
+        return std::make_tuple(flips, fails, a.surface, loop.failed());
+    };
+    const auto [flips, fails, surface, failed] = run(true);
+    CHECK_EQ(flips, 0);
+    CHECK_EQ(fails, 0);
+    CHECK(!failed);
+    CHECK_NEAR(surface, 0.0, 0.5);
+    // Judged while held, as before: flipped, then given up on.
+    const auto [oldFlips, oldFails, oldSurface, oldFailed] = run(false);
+    CHECK_EQ(oldFlips, 1);
+    CHECK_EQ(oldFails, 1);
+    CHECK(oldFailed);
 }
 
 TEST(StickLoop_HoldsTheStickThroughGaps) {

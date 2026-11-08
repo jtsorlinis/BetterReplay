@@ -61,8 +61,18 @@ extern "C" MSFS_CALLBACK void module_init(void) {
     g_app->init();
 }
 
+// The frame's start, before the sim's physics: after the last frame's draw.
+extern "C" MSFS_CALLBACK void module_pre_sim_physics_update(float) {
+    if (g_app) g_app->sim.frameStart();
+}
+
 extern "C" MSFS_CALLBACK void module_post_sim_systems_update(float dTime) {
     if (g_app) g_app->sim.update(dTime);
+}
+
+// The frame's end, just before the draw.
+extern "C" MSFS_CALLBACK void module_late_update(float) {
+    if (g_app) g_app->sim.frameEnd();
 }
 
 extern "C" MSFS_CALLBACK void module_deinit(void) {

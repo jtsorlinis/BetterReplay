@@ -24,7 +24,13 @@ public:
 
     bool open();
     void close();
-    void update(float dTime);  // from a module update callback
+    void update(float dTime);  // from module_post_sim_systems_update: replays step and write there
+    // The points of the sim's frame the module is called at: its start (module_pre_sim_physics_update),
+    // after its systems (update), and its end before the draw (module_late_update). The aircraft's
+    // own animation L:vars are written from the clip at each in replays (rewriteAircraftLVars).
+    enum FramePhase { kPhaseStart, kPhaseSystems, kPhaseEnd, kFramePhaseCount };
+    void frameStart() { rewriteAircraftLVars(kPhaseStart); }
+    void frameEnd() { rewriteAircraftLVars(kPhaseEnd); }
 
     bool connected() const { return h_ != 0; }
     void setWorkDir(const std::string& dir) { workDir_ = dir; }  // for the playback trace
@@ -194,6 +200,12 @@ private:
     FsLVarId traceLVar_[kTraceLVarCount] = {};
     FsAVarId traceYokeY_ = FS_VAR_INVALID_ID;
     FsAVarId traceBeta_ = FS_VAR_INVALID_ID;
+    FsLVarId traceWeightOnWheels_ = FS_VAR_INVALID_ID;  // the FlyByWire A380X's, for its wing flex
+    // The body and rotation accelerations, what the A380X's structural model reads (kTraceAccels).
+    static constexpr int kTraceAccelCount = 6;
+    FsAVarId traceAccel_[kTraceAccelCount] = {};
+    FsUnitId traceFtPerSec2Unit_ = FS_INVALID_UNIT;
+    FsUnitId traceRadPerSec2Unit_ = FS_INVALID_UNIT;
     FsUnitId tracePositionUnit_ = FS_INVALID_UNIT;
     FsUnitId traceDegreesUnit_ = FS_INVALID_UNIT;
     std::string workDir_;
@@ -386,6 +398,36 @@ private:
     FsLVarId pbLVar_ = FS_VAR_INVALID_ID;
     int pbLookupFrames_ = 0;
     bool parkingBrakeSet(double simvar);
+    // The flap lever on an aircraft whose handle index follows its flaps (flapsLeverLVar: the
+    // FlyByWire A320neo's and A380X's), looked up as the parking brake's; NaN elsewhere, or until
+    // the aircraft has registered it.
+    std::string flKey_;
+    const char* flName_ = nullptr;
+    FsLVarId flLVar_ = FS_VAR_INVALID_ID;
+    int flLookupFrames_ = 0;
+    double flapsLever();
+    // The aircraft's own animation L:vars (PlayMode::AircraftLVar, aircraftLVar: the FlyByWire
+    // A380X's wing flex), looked up as the parking brake's: recorded into their channels (NaN where
+    // the aircraft has none) and written from the clip in replays, at three points of each frame
+    // (FramePhase). The A380X's systems write them once a frame, after the module's last point (at
+    // the draw), from their structural model, which seems to go on from where they are: written
+    // after the sim's systems alone, its own were there by the next data frame in 97% of frames, 9.4
+    // off the clip's on average, and the wings looked as before; written at the frame's start too,
+    // its own were 0.02 off the clip's, the wings within 0.006 of it on average through a takeoff,
+    // and they looked better (2026-11-09). Before each write, what it has
+    // there against what was written last (alWritten_) is counted by phase for the replay's summary,
+    // which says when in the frame it writes them.
+    std::string alKey_;
+    FsLVarId alId_[kChannelCount] = {};
+    int alLookupFrames_ = 0;
+    double alWant_[kChannelCount] = {};     // the clip's, this replay frame (NaN: none)
+    double alWritten_[kChannelCount] = {};  // what was written last
+    int alChecks_[kFramePhaseCount] = {};
+    int alOver_[kFramePhaseCount] = {};     // the aircraft's own there since the last write
+    double alOverSum_[kFramePhaseCount] = {};
+    void readAircraftLVars();
+    void writeAircraftLVars(const Frame& frame);
+    void rewriteAircraftLVars(int phase);
     bool setupMasking_ = false;  // the setup is driving the throttle simvars: hardware masked
     // The setup's gear step on the ground (beginHover): the aircraft as it stood, and where it's
     // held, frozen, its position, attitude and velocities (DEF_HOVER) written every data frame in
