@@ -63,12 +63,12 @@ Nothing is detected for the first 10 seconds of a flight, so spawning on a runwa
 - **Steam:** `%APPDATA%\Microsoft Flight Simulator 2024\WASM\MSFS2024\betterreplay-recorder\work\`
 - **Microsoft Store:** `%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalState\WASM\MSFS2024\betterreplay-recorder\work\`
 
-The newest 10 takeoff and landing clips of each aircraft are kept, and older ones are deleted automatically. "Save last 10 minutes" clips (about 5.5 MB each) are never deleted automatically.
+The newest 10 takeoff and landing clips of each aircraft are kept, and older ones are deleted automatically. "Save last 10 minutes" clips (about 6 MB each) are never deleted automatically.
 
 ## Troubleshooting
 
 - **No toolbar icon:** enable it in the toolbar's settings. If it's still missing, the package was built without its panel (see [Building from source](#building-from-source)); clips are still saved.
-- **Leave your joystick and pedals alone while a clip plays:** on fly-by-wire aircraft the replay steers the control surfaces through them, and moving them fights it. The first time an aircraft takes its surfaces back, a replay steers them from that moment on, and from the start of every replay after that.
+- **Leave your joystick and pedals alone while a clip plays:** on fly-by-wire aircraft the replay steers the control surfaces through them, and moving them fights it. On the included fly-by-wire aircraft a replay steers them from its start. On another one, the first time it takes its surfaces back, a replay steers them from that moment on, and from the start of every replay after that.
 - **Play says the engines aren't running:** a replay moves the thrust levers but can't start the engines, so an engine that's off stays off all through it, with no thrust or sound. Start them first for the replay to look right, or play it anyway.
 - **Something went wrong:** the log is `betterreplay.log` in the clips folder above, and `betterreplay.prev.log` is the previous sim session's. Include it when you report a problem.
 
