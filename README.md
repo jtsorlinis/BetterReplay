@@ -36,6 +36,8 @@ Any aircraft can be taught with the control setup. **Included** means BetterRepl
 | iniBuilds A350                          | ✅       |                                |
 | iniBuilds A380                          | ✅       |                                |
 | Fenix A320 Family                       | ✅       |                                |
+| FlyByWire A32NX (A320neo)               | ✅       |                                |
+| FlyByWire A380X                         | ✅       |                                |
 | Synaptic A220                           | ✅       |                                |
 | FlightSim Studio E-Jets                 | ✅       |                                |
 | PMDG 737                                | ✅       |                                |

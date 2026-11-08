@@ -1,7 +1,8 @@
 {
   "key": "simobjects/airplanes/inibuilds-a340",
   "title": "A340-300 EIS2",
-  "updatedUtcMs": 1793658497440,
+  "updatedUtcMs": 1793922250646,
+  "stickSurfaces": ["elevator", "ailerons", "rudder"],
   "stickPlants": {
     "elevator": {
       "form": "rate",

@@ -1,7 +1,8 @@
 {
   "key": "simobjects/airplanes/synaptic_a220",
   "title": "A220-300",
-  "updatedUtcMs": 1792547018797,
+  "updatedUtcMs": 1793925457459,
+  "stickSurfaces": ["elevator", "ailerons", "rudder"],
   "stickPlants": {
     "elevator": {
       "form": "rate",

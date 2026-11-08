@@ -1,7 +1,7 @@
 {
   "key": "simobjects/airplanes/inibuilds-a380",
   "title": "A380-800 RR Cabin",
-  "updatedUtcMs": 1792481158284,
+  "updatedUtcMs": 1793914158089,
   "stickSurfaces": ["elevator", "ailerons", "rudder"],
   "stickPlants": {
     "elevator": {
