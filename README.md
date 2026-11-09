@@ -32,6 +32,7 @@ Any aircraft can be taught with the control setup. **Included** means BetterRepl
 | iniBuilds A330 (default)                | ✅       |                                |
 | Working Title 787-10 (default)          | ✅       |                                |
 | Working Title 747-8 (default)           | ✅       |                                |
+| Cessna 172 Skyhawk G1000 (default)      | ✅       |                                |
 | iniBuilds A340                          | ✅       |                                |
 | iniBuilds A350                          | ✅       |                                |
 | iniBuilds A380                          | ✅       |                                |

@@ -1,0 +1,54 @@
+{
+  "key": "simobjects/airplanes/asobo_c172sp_g1000",
+  "title": "C172SP G1000 Passengers",
+  "updatedUtcMs": 1794185556898,
+  "stickSurfaces": ["elevator", "ailerons", "rudder"],
+  "stickPlants": {
+    "elevator": {
+      "form": "direct",
+      "gain": 27.68577025,
+      "lagSec": 0,
+      "settleSec": 0.1048158273,
+      "fit": 0.7719032362,
+      "seconds": 15.008
+    },
+    "ailerons": {
+      "form": "direct",
+      "gain": 17.24463239,
+      "lagSec": 0,
+      "settleSec": 0.09661574417,
+      "fit": 0.7392479798,
+      "seconds": 15.001
+    }
+  },
+  "controls": {
+    "spoilers": {
+      "state": "absent",
+      "method": "none",
+      "var": "",
+      "scale": 1,
+      "confirmed": false
+    },
+    "flaps": {
+      "state": "ok",
+      "method": "key_event",
+      "var": "",
+      "scale": 1,
+      "confirmed": true
+    },
+    "throttle": {
+      "state": "ok",
+      "method": "input_value",
+      "var": "ENGINE_THROTTLE_1",
+      "scale": 0.01,
+      "confirmed": true
+    },
+    "gear": {
+      "state": "absent",
+      "method": "none",
+      "var": "",
+      "scale": 1,
+      "confirmed": false
+    }
+  }
+}
