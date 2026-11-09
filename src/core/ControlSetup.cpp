@@ -1607,6 +1607,12 @@ double SetupFlow::buildMethods() {
 
     std::string firstInput;
     size_t taken = 0;
+    // The flaps' input events are tried after the generic flap events below. The Asobo flap lever's
+    // HANDLING_FLAPS reads 0..100, but its _SET takes 0..16384: sent the clip's 33.3 (10 degrees), the
+    // C172's flaps went to 0.2% and the A320neo V2's to 0. Later that flight, the C172's flap keys
+    // raised them only to that 0.2%, and wouldn't lower them again. Every aircraft set up so far has
+    // its flaps by a key event.
+    std::vector<ControlMethod> inputSets;
     for (const auto& f : inputs) {
         if (taken == 2) break;
         const std::string var = varOf(f, false);
@@ -1614,16 +1620,17 @@ double SetupFlow::buildMethods() {
         ++taken;
         firstChange = std::min(firstChange, tracker_.firstChange(f.index));
         if (firstInput.empty()) firstInput = var;
-        // Presets differ: the A320neo V2's throttle reads 0..100 but its _SET takes 0..1, its
-        // flaps read 0/25/50 and take that. Values in 0..1 need no scaling either way.
+        // Presets differ: the A320neo V2's throttle reads 0..100 but its _SET takes 0..1. Values in
+        // 0..1 need no scaling either way.
         if (f.peak > 1.0001) {
             const bool fractionFirst = c == Control::Spoilers || c == Control::Throttle;
-            methods_.push_back({MethodKind::InputSet, var, fractionFirst ? 0.01 : 1.0});
-            methods_.push_back({MethodKind::InputSet, var, fractionFirst ? 1.0 : 0.01});
+            inputSets.push_back({MethodKind::InputSet, var, fractionFirst ? 0.01 : 1.0});
+            inputSets.push_back({MethodKind::InputSet, var, fractionFirst ? 1.0 : 0.01});
         } else {
-            methods_.push_back({MethodKind::InputSet, var, 1.0});
+            inputSets.push_back({MethodKind::InputSet, var, 1.0});
         }
     }
+    if (c != Control::Flaps) methods_.insert(methods_.end(), inputSets.begin(), inputSets.end());
     // The key events that fired with the movement (the cockpit's lever, the pilot's binding):
     // aircraft like the PMDG 777 ignore the generic ones below, and no variable shows their own.
     double firstFiring = INFINITY;
@@ -1645,6 +1652,7 @@ double SetupFlow::buildMethods() {
     if (c == Control::Flaps) {
         methods_.push_back({MethodKind::KeyEvent, kKeyFlapsNotches, 1.0});
         if (facts_.flapPositions > 1) methods_.push_back({MethodKind::KeyEvent, kKeyFlapsAxis, 1.0});
+        methods_.insert(methods_.end(), inputSets.begin(), inputSets.end());
     } else if (c == Control::Spoilers) {
         methods_.push_back({MethodKind::KeyEvent, kKeySpoilersAxis, 1.0});
     }

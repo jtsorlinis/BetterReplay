@@ -65,6 +65,9 @@ struct FakeAircraft : IControlSim {
     // but its _SET puts the flaps up to 0 whatever it's sent (in the sim it read 0 sent 25 and 50);
     // FLAPS_SET takes the handle index. Nothing else drives them.
     bool a320Flaps = false;
+    // An aircraft with that lever whose FLAPS_SET does nothing: only writing its L:var
+    // FLAPS_LEVER_POSITION (the handle index) moves the flaps.
+    bool flapsByLVar = false;
     double t = 0.0;
     bool onGround = true;
     double gs = 0.0;
@@ -343,6 +346,7 @@ struct FakeAircraft : IControlSim {
         if (pmdgLeverVars) vars.insert(vars.end(), {{"7X7XleftMLGExtSnd", true}, {"switch_295_a", true}});
         if (ejetThrottle) vars.push_back({"EVT_LEVER_THROTTLE_B", false});
         if (a320Flaps) vars.push_back({"HANDLING_FLAPS", false});
+        if (flapsByLVar) vars.push_back({"FLAPS_LEVER_POSITION", true});
         if (spoilerIndicators) vars.insert(vars.end(), {{"SPOILER_INDICATION", true}, {"SPOILER_LEVER_DETENT", false}});        return vars;
     }
     std::vector<double> scanValues() const {
@@ -358,6 +362,7 @@ struct FakeAircraft : IControlSim {
         if (pmdgLeverVars) v.insert(v.end(), {gearPos < 0.999 ? 1.0 : 0.0, gearLever * 100.0});
         if (ejetThrottle) v.push_back(thr[0] / 100.0);
         if (a320Flaps) v.push_back(flapHandle * 25.0);
+        if (flapsByLVar) v.push_back(flapHandle);
         if (spoilerIndicators) v.insert(v.end(), {t >= 3.0 ? 1.0 : 0.0, t >= 0.3 ? 1.0 : 0.0});        return v;
     }
     void scanBegin(std::vector<ScanVar>& vars) override {
@@ -470,7 +475,11 @@ struct FakeAircraft : IControlSim {
         } else if (c == Control::Flaps && a320Flaps) {
             if (driven.kind == MethodKind::InputSet && driven.var == "HANDLING_FLAPS") flapHandle = 0.0;
             const double v = f.v[kFlapsHandleIndex];
-            if (driven.kind == MethodKind::KeyEvent && driven.var.empty() && std::isfinite(v)) flapHandle = std::round(v);
+            if (!flapsByLVar && driven.kind == MethodKind::KeyEvent && driven.var.empty() && std::isfinite(v)) {
+                flapHandle = std::round(v);
+            }
+            const double lever = f.v[kLVarFlaps];
+            if (flapsByLVar && driven.kind == MethodKind::LVar && std::isfinite(lever)) flapHandle = std::round(lever);
         } else if (c == Control::Gear && pmdg777) {
             const double command = eventTarget(c, f);
             EventMethod ev;
@@ -3531,12 +3540,49 @@ TEST(Setup_AFlapNotchThatMovesOnlyTheSlatsCounts) {
     CHECK_NEAR(h.aircraft.flaps, 0.0, 0);  // the trailing edge never moved
 }
 
-// The A320neo V2's flaps from 1+F on the runway, to notch 2 and back. Its HANDLING_FLAPS_SET put
-// them up to 0 whatever it was sent: the other way from the pilot's notch, which isn't moving them
-// (it counted as moving them 336% as far, and was asked about with FLAPS_SET bringing them back).
-// Nor, once the way back has taken them past where they started, are the others tried from there:
-// FLAPS_SET lowering them from 0 to 1+F counted as bringing them back. FLAPS_SET does both ways.
-// Without the way back (the pilot doesn't lower them again), the replay takes them the other way.
+// The Asobo flap lever (the A320neo V2's, the C172's): HANDLING_FLAPS reads 0..100 but its _SET
+// takes 0..16384, so the clip's values put the flaps up to 0. FLAPS_SET is tried before it and does
+// both ways, so the lever's _SET is never sent. (After a setup that sent it, the C172's flap keys
+// raised the flaps only to the 0.2% it had left them at, and wouldn't lower them again that flight.)
+TEST(Setup_FlapsByTheirEventBeforeTheLeversSet) {
+    for (const int positions : {4, 3}) {  // the A320neo V2, the C172
+        SetupHarness h;
+        h.facts.hasSpoilers = false;
+        h.facts.gearRetractable = false;
+        h.facts.flapPositions = positions;
+        h.aircraft.a320Flaps = true;
+        h.aircraft.flapHandle = 1.0;
+        h.aircraft.slats = 0.78;
+        REQUIRE(h.start());
+        bool retract = false;
+        auto pilot = [&](double s) {
+            if (h.status().getNumber("task", 0.0) >= 2.0) retract = true;
+            h.aircraft.flapHandle = s >= 1.0 && !retract ? 2.0 : 1.0;
+        };
+        h.away = [&] { h.aircraft.flapHandle = 2.0; };
+        CHECK(h.run(400.0, pilot, "ask"));
+        const ControlMethod handlingFlaps{MethodKind::InputSet, "HANDLING_FLAPS", 1.0};
+        const ControlMethod handlingFlapsFraction{MethodKind::InputSet, "HANDLING_FLAPS", 0.01};
+        const ControlMethod flapsSet{MethodKind::KeyEvent, "", 1.0};
+        CHECK(logged("input event HANDLING_FLAPS moved with it"));
+        REQUIRE(!h.aircraft.tried.empty());
+        CHECK(h.aircraft.tried.front() == flapsSet);
+        for (const ControlMethod& m : h.aircraft.tried) CHECK(!(m == handlingFlaps) && !(m == handlingFlapsFraction));
+        CHECK(!logged("HANDLING_FLAPS_SET"));
+        REQUIRE(h.answer("yes"));
+        const ControlProfile& cp = h.flow.profile()[Control::Flaps];
+        CHECK(cp.state == ControlState::Ok);
+        CHECK(cp.method == flapsSet);
+    }
+}
+
+// An aircraft with that lever whose FLAPS_SET does nothing, from 1+F on the runway, to notch 2 and
+// back. The lever's _SET is tried once the flap events haven't moved them, and puts them up to 0
+// whatever it's sent: the other way from the pilot's notch, which isn't moving them (on the A320neo
+// V2 it counted as moving them 336% as far). Nor, once the way back has taken them past where they
+// started, are the others tried from there: on the A320neo V2, FLAPS_SET lowering them from 0 to 1+F
+// counted as bringing them back. Its L:var does both ways. Without the way back (the pilot doesn't
+// lower them again), the replay takes them the other way.
 TEST(Setup_FlapsTakenTheOtherWayHaventMoved) {
     for (const bool awayAgain : {true, false}) {
         SetupHarness h;
@@ -3544,6 +3590,7 @@ TEST(Setup_FlapsTakenTheOtherWayHaventMoved) {
         h.facts.gearRetractable = false;
         h.facts.flapPositions = 4;
         h.aircraft.a320Flaps = true;
+        h.aircraft.flapsByLVar = true;
         h.aircraft.flapHandle = 1.0;
         h.aircraft.slats = 0.78;  // 1+F: the slats out at notch 1, the trailing edge up
         REQUIRE(h.start());
@@ -3558,6 +3605,7 @@ TEST(Setup_FlapsTakenTheOtherWayHaventMoved) {
         CHECK(h.run(400.0, pilot, "ask"));
         const ControlMethod handlingFlaps{MethodKind::InputSet, "HANDLING_FLAPS", 1.0};
         const ControlMethod flapsSet{MethodKind::KeyEvent, "", 1.0};
+        const ControlMethod leverVar{MethodKind::LVar, "FLAPS_LEVER_POSITION", 1.0};
         CHECK(logged("the flaps started moving (1 -> 2, outcome 0.78 -> "));
         if (awayAgain) {
             CHECK(logged("input event HANDLING_FLAPS (HANDLING_FLAPS_SET) didn't bring the flaps back from where you left "
@@ -3575,15 +3623,15 @@ TEST(Setup_FlapsTakenTheOtherWayHaventMoved) {
                          "the other way, past where you started it"));
             CHECK(!logged("bringing the flaps back from where the replay left it"));
         }
-        // FLAPS_SET went out and back, on its own.
+        // The L:var went out and back, on its own.
         CHECK(!logged("moved out the flaps and"));
         REQUIRE(!h.aircraft.tried.empty());
-        CHECK(h.aircraft.tried.front() == handlingFlaps);
-        CHECK(h.aircraft.tried.back() == flapsSet);
+        CHECK(h.aircraft.tried.front() == flapsSet);
+        CHECK(h.aircraft.tried.back() == leverVar);
         REQUIRE(h.answer("yes"));
         const ControlProfile& cp = h.flow.profile()[Control::Flaps];
         CHECK(cp.state == ControlState::Ok);
-        CHECK(cp.method == flapsSet);
+        CHECK(cp.method == leverVar);
         for (const auto& ways : cp.ways) CHECK(std::find(ways.begin(), ways.end(), handlingFlaps) == ways.end());
     }
 }
